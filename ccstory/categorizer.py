@@ -139,6 +139,32 @@ def load_rules(config_path: Path = CONFIG_PATH) -> list[CategoryRule]:
 DEFAULT_FALLBACK_BUCKET = "coding"
 
 
+# Rich color names for each default bucket. Used by report.py for bar chart,
+# highlight line, and per-category headings. Picked for screenshot legibility
+# across light + dark terminal themes. Falls back to "white" for any
+# user-defined bucket not in this map.
+BUCKET_COLORS: dict[str, str] = {
+    "coding":       "bright_cyan",
+    "investment":   "bright_green",
+    "writing":      "bright_magenta",
+    "research":     "bright_yellow",
+    "data":         "bright_blue",
+    "ops":          "orange3",
+    "other":        "grey62",
+    "uncategorized": "grey50",
+}
+
+
+def color_for(bucket: str) -> str:
+    """Rich color name for a bucket. Unknown buckets cycle through a stable palette."""
+    if bucket in BUCKET_COLORS:
+        return BUCKET_COLORS[bucket]
+    # Deterministic fallback for user-defined buckets
+    palette = ["bright_red", "bright_blue", "gold3", "spring_green3", "deep_pink3",
+               "turquoise2", "salmon1", "medium_purple"]
+    return palette[hash(bucket) % len(palette)]
+
+
 def classify(
     project_dir: str,
     rules: list[CategoryRule] | None = None,

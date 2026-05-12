@@ -6,13 +6,16 @@ A Claude Code usage recap that answers the question token counters can't:
 **what did you actually do?**
 
 ```
-╭──────────────────── Claude Code Recap · 2026-W19 ────────────────────╮
+╭──────────────── Claude Code Recap · May 5 – 12, 2026 ────────────────╮
 │                                                                      │
-│  Active  20.4h  Sessions  72   Output  2.85M                         │
-│  Turns   3,628  Cache     96%  Cost    $1,579                        │
+│  ★ Top focus  coding  10.9h  (53% of active time)                    │
+│    ↳ Built /show-routine slash command using bash+python to fetch…   │
+│                                                                      │
+│  Active  20.6h  Sessions  74   Output  2.92M                         │
+│  Turns   3,692  Cache     96%  Cost    $1,608                        │
 │                                                                      │
 │  Time by category                                                    │
-│  coding          ███████████████░░░░░░░░░░░░░   10.7h    53%         │
+│  coding          ███████████████░░░░░░░░░░░░░   10.9h    53%         │
 │  investment      █████████████░░░░░░░░░░░░░░░    9.6h    47%         │
 │  writing         ░░░░░░░░░░░░░░░░░░░░░░░░░░░░    0.1h     0%         │
 │                                                                      │
@@ -20,6 +23,10 @@ A Claude Code usage recap that answers the question token counters can't:
 │                                                                      │
 ╰────────────────────────────── ccstory ───────────────────────────────╯
 ```
+
+(In your terminal each bucket gets its own color — investment in green, coding
+in cyan, writing in magenta — and `★ Top focus` highlights the biggest bucket
+with the longest session's narrative.)
 
 The markdown report goes further — one-sentence narrative per session, written
 by your own local `claude -p`:

@@ -233,10 +233,12 @@ def main(argv: list[str] | None = None) -> int:
     out_path.write_text(md, encoding="utf-8")
 
     print_terminal_card(
-        label=label,
+        since=since,
+        until=until,
         sessions=sessions,
         rollups=rollups,
         usage=usage,
+        summaries=summaries,
         period_aggregates=period_aggregates,
         report_path=str(out_path),
         console=console,
