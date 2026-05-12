@@ -75,11 +75,30 @@ first user message of each session.
 ## Usage
 
 ```bash
-ccstory              # current month so far (default)
-ccstory week         # past 7 days
-ccstory 2026-04      # any specific month
-ccstory all          # entire history
-ccstory --no-summary # skip claude -p (faster, no narrative)
+ccstory                  # current month so far (default)
+ccstory week             # past 7 days
+ccstory 2026-04          # any specific month
+ccstory all              # entire history
+
+ccstory trend            # last 8 weeks of sparklines
+ccstory trend --weeks 12 # custom range
+ccstory trend --months 6 # by calendar months
+
+ccstory --no-summary     # skip claude -p (faster, no narrative)
+ccstory --no-compare     # skip the vs-previous block
+```
+
+`ccstory week` / `ccstory month` automatically appends a **vs-previous-window**
+comparison (▲/▼ deltas per bucket). `ccstory trend` shows per-bucket
+sparklines so you can see the shape of your usage across N weeks/months in
+one glance:
+
+```
+Hours by bucket
+total          ▁▄▆▇▃█    16.5h   avg 9.0h   ▲ +183%
+investment     ▁▃▅█▆█     6.3h   avg 4.0h   ▲ +29%
+coding         ▁▂▃▄▁█    10.2h   avg 3.3h   ▲ +1148%
+writing        ▁▇█▆▁▁     0.1h   avg 1.8h   ▼ -51%
 ```
 
 First run scaffolds `~/.ccstory/config.toml` and shows you how your projects
@@ -147,9 +166,12 @@ tokens stay comparable month over month.
 ## Roadmap
 
 - [x] v0.1 — Time + tokens + per-session narrative + 4-bucket defaults
+- [x] v0.1.1 — Per-bucket colors, date-range title, ★ Top focus highlight
+- [x] v0.1.2 — vs-previous-window comparison + `ccstory trend` sparklines
 - [ ] v0.2 — Per-category aggregate narrative (2-3 line summary of "what
       the whole bucket was about this period")
-- [ ] v0.3 — Cross-period comparison block (this period vs last)
+- [ ] v0.3 — Session-level classification (override folder bucket via
+      `claude -p` content-aware tagging)
 - [ ] v0.4 — Claude Code plugin form (`/ccstory` slash command)
 - [ ] v0.5 — Optional PNG card export
 

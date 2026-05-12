@@ -38,7 +38,12 @@ from .categorizer import (
     normalize_project_name,
     preview_classification,
 )
-from .report import print_terminal_card, render_report
+from .report import (
+    print_terminal_card,
+    render_report,
+    render_trend_card,
+    render_trend_markdown,
+)
 from .session_summarizer import (
     PROJECTS_DIR as SUMMARIZER_PROJECTS_DIR,
     claude_bin_available,
@@ -49,6 +54,7 @@ from .session_summarizer import (
 )
 from .time_tracking import CLAUDE_PROJECTS, collect_sessions, rollup_by_category
 from .token_usage import collect_usage
+from .trends import collect_trend, compare_to_previous
 
 LOG = logging.getLogger("ccstory.cli")
 REPORTS_DIR = Path.home() / ".ccstory" / "reports"
@@ -151,28 +157,68 @@ def _backfill_with_progress(sessions, console: Console) -> dict[str, int]:
     return counts
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="ccstory")
-    parser.add_argument(
-        "window",
-        nargs="?",
-        default="month",
-        help="week | month | all | YYYY-MM (default: month)",
+def _run_trend(argv: list[str], console: Console) -> int:
+    if not CLAUDE_PROJECTS.exists():
+        sys.exit(f"No Claude Code data at {CLAUDE_PROJECTS}.")
+    p = argparse.ArgumentParser(
+        prog="ccstory trend",
+        description="Show per-bucket sparklines over N periods.",
     )
+    p.add_argument("--weeks", type=int, default=None,
+                   help="Number of 7-day windows (default 8)")
+    p.add_argument("--months", type=int, default=None,
+                   help="Number of calendar months")
+    p.add_argument("--reports-dir", type=Path, default=REPORTS_DIR)
+    args = p.parse_args(argv)
+
+    period = "month" if args.months else "week"
+    count = args.months or args.weeks or 8
+
+    with console.status(
+        f"[dim]Computing trend over last {count} {period}s…[/dim]"
+    ):
+        points = collect_trend(period=period, count=count)
+    if not any(p.total_h for p in points):
+        sys.exit("No engaged sessions across the trend window.")
+
+    args.reports_dir.mkdir(parents=True, exist_ok=True)
+    out_path = args.reports_dir / f"trend-{period}-{count}.md"
+    out_path.write_text(render_trend_markdown(points, period), encoding="utf-8")
+
+    console.print(render_trend_card(points, period))
+    console.print(f"[dim]Full report → {out_path}[/dim]")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    raw = list(argv) if argv is not None else sys.argv[1:]
+    console = Console()
+
+    # Manual dispatch for `trend` keyword — keeps default `ccstory week`
+    # / `ccstory month` flow simple positional.
+    if raw and raw[0] == "trend":
+        logging.basicConfig(level=logging.WARNING)
+        return _run_trend(raw[1:], console)
+
+    parser = argparse.ArgumentParser(prog="ccstory")
+    parser.add_argument("window", nargs="?", default="month",
+                        help="week | month | all | YYYY-MM (default: month). "
+                             "Also: `trend` runs the trend subcommand.")
     parser.add_argument("--no-summary", action="store_true",
                         help="Skip claude -p per-session narrative (faster)")
+    parser.add_argument("--no-compare", action="store_true",
+                        help="Skip the vs-previous-window comparison block")
     parser.add_argument("--reports-dir", type=Path, default=REPORTS_DIR,
                         help=f"Markdown report output dir (default: {REPORTS_DIR})")
     parser.add_argument("--version", action="version",
                         version=f"ccstory {__version__}")
     parser.add_argument("-v", "--verbose", action="store_true")
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw)
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    console = Console()
 
     if not CLAUDE_PROJECTS.exists():
         sys.exit(f"No Claude Code data at {CLAUDE_PROJECTS}. "
@@ -218,6 +264,18 @@ def main(argv: list[str] | None = None) -> int:
         )
         summaries = get_many([s.session_id for s in sessions])
 
+    comparison = None
+    if not args.no_compare and args.window != "all":
+        with console.status("[dim]Computing previous-window comparison…[/dim]"):
+            comparison = compare_to_previous(
+                current_sessions=sessions,
+                current_rollups=rollups,
+                current_usage=usage,
+                current_label=label,
+                since=since,
+                until=until,
+            )
+
     args.reports_dir.mkdir(parents=True, exist_ok=True)
     out_path = args.reports_dir / f"recap-{label}.md"
     md = render_report(
@@ -229,6 +287,7 @@ def main(argv: list[str] | None = None) -> int:
         usage=usage,
         summaries=summaries,
         period_aggregates=period_aggregates,
+        comparison=comparison,
     )
     out_path.write_text(md, encoding="utf-8")
 
@@ -241,6 +300,7 @@ def main(argv: list[str] | None = None) -> int:
         summaries=summaries,
         period_aggregates=period_aggregates,
         report_path=str(out_path),
+        comparison=comparison,
         console=console,
     )
     return 0
