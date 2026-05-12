@@ -14,7 +14,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from .categorizer import color_for
+from .categorizer import color_for, load_settings
 from .session_summarizer import SessionSummary
 from .time_tracking import CategoryRollup, SessionStat
 from .token_usage import UsageReport, fmt_tokens
@@ -447,6 +447,20 @@ def render_trend_card(points: list[PeriodPoint], period: str) -> Panel:
         Text(f"avg ${sum(cost_series)/len(cost_series):,.0f}", style="dim"),
         _delta_text(cost_series[-1], cost_series[-2] if len(cost_series) > 1 else 0, unit="$"),
     )
+
+    # Quota burn (% of prorated monthly cap) — only show if configured > 0
+    settings = load_settings()
+    quota = settings["monthly_quota_usd"]
+    if quota > 0:
+        burn_series = [p.quota_pct(quota) * 100 for p in points]
+        burn_color = "red" if burn_series[-1] >= 100 else "yellow" if burn_series[-1] >= 60 else "green"
+        extra.add_row(
+            Text("burn %", style="bold"),
+            Text(sparkline(burn_series), style=burn_color),
+            Text(f"{burn_series[-1]:.0f}%", style=f"bold {burn_color}"),
+            Text(f"avg {sum(burn_series)/len(burn_series):.0f}%", style="dim"),
+            _delta_text(burn_series[-1], burn_series[-2] if len(burn_series) > 1 else 0),
+        )
 
     body = Group(
         Text("Hours by bucket", style="bold underline"),

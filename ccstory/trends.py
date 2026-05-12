@@ -134,6 +134,14 @@ class PeriodPoint:
     output_tokens: int
     cost_usd: float
 
+    def quota_pct(self, monthly_quota_usd: float) -> float:
+        """API-equiv cost as % of the prorated monthly quota (1.0 = 100%)."""
+        if monthly_quota_usd <= 0:
+            return 0.0
+        days = max(1.0, (self.until - self.since).total_seconds() / 86400)
+        prorated = monthly_quota_usd * (days / 30.0)
+        return self.cost_usd / prorated if prorated else 0.0
+
 
 def _week_windows(now: datetime, count: int) -> list[tuple[str, datetime, datetime]]:
     """N rolling 7-day windows ending at `now`. Most recent last."""

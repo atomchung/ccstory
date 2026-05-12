@@ -75,6 +75,9 @@ first user message of each session.
 ## Usage
 
 ```bash
+ccstory init             # one-shot: scan recent sessions and propose buckets
+ccstory init --dry-run   # preview without writing config
+
 ccstory                  # current month so far (default)
 ccstory week             # past 7 days
 ccstory 2026-04          # any specific month
@@ -88,6 +91,11 @@ ccstory --no-summary     # skip claude -p (faster, no narrative)
 ccstory --no-compare     # skip the vs-previous block
 ```
 
+**Recommended first run**: `ccstory init` scans the last 30 days of sessions
+and asks claude (via a single `claude -p` call, ~15s) to suggest a category
+bucket for each project. It writes a starter `~/.ccstory/config.toml` you can
+edit later.
+
 `ccstory week` / `ccstory month` automatically appends a **vs-previous-window**
 comparison (▲/▼ deltas per bucket). `ccstory trend` shows per-bucket
 sparklines so you can see the shape of your usage across N weeks/months in
@@ -99,7 +107,16 @@ total          ▁▄▆▇▃█    16.5h   avg 9.0h   ▲ +183%
 investment     ▁▃▅█▆█     6.3h   avg 4.0h   ▲ +29%
 coding         ▁▂▃▄▁█    10.2h   avg 3.3h   ▲ +1148%
 writing        ▁▇█▆▁▁     0.1h   avg 1.8h   ▼ -51%
+
+Overall
+output         ▁▁▁▄▁█     3.0M   avg 0.8M   ▲ +2460%
+cost           ▁▁▂▃▁█   $1,643   avg $463   ▲ +1877%
+burn %         ▁▁▂▃▁█     201%   avg 57%    ▲ +1877%
 ```
+
+The `burn %` row shows API-equivalent cost as a percentage of your prorated
+monthly quota — set `monthly_quota_usd` in `~/.ccstory/config.toml`
+(defaults to $3,500 ≈ Max 20x plan). Set to `0` to hide the row.
 
 First run scaffolds `~/.ccstory/config.toml` and shows you how your projects
 got bucketed.
@@ -168,6 +185,7 @@ tokens stay comparable month over month.
 - [x] v0.1 — Time + tokens + per-session narrative + 4-bucket defaults
 - [x] v0.1.1 — Per-bucket colors, date-range title, ★ Top focus highlight
 - [x] v0.1.2 — vs-previous-window comparison + `ccstory trend` sparklines
+- [x] v0.1.3 — `ccstory init` auto-categorization + quota burn % in trend
 - [ ] v0.2 — Per-category aggregate narrative (2-3 line summary of "what
       the whole bucket was about this period")
 - [ ] v0.3 — Session-level classification (override folder bucket via

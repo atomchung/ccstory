@@ -138,6 +138,21 @@ def load_rules(config_path: Path = CONFIG_PATH) -> list[CategoryRule]:
 
 DEFAULT_FALLBACK_BUCKET = "coding"
 
+# Community-estimated underlying API-equivalent ceiling for the Max 20x plan
+# ($200/mo flat fee). Override per user via config.toml `monthly_quota_usd`.
+# Set to 0 to disable burn-% display.
+DEFAULT_MONTHLY_QUOTA_USD = 3500.0
+
+
+def load_settings(config_path: Path = CONFIG_PATH) -> dict:
+    """Top-level config: default_bucket, monthly_quota_usd, etc."""
+    cfg = _load_toml(config_path) or {}
+    return {
+        "default_bucket": cfg.get("default_bucket", DEFAULT_FALLBACK_BUCKET),
+        "monthly_quota_usd": float(cfg.get("monthly_quota_usd",
+                                           DEFAULT_MONTHLY_QUOTA_USD)),
+    }
+
 
 # Rich color names for each default bucket. Used by report.py for bar chart,
 # highlight line, and per-category headings. Picked for screenshot legibility
@@ -213,17 +228,25 @@ def ensure_default_config(path: Path = CONFIG_PATH) -> bool:
     if path.exists():
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
-    template = """# ccstory category overrides
+    template = """# ccstory configuration
 #
-# Built-in defaults (4 buckets): coding, investment, writing, other.
-# Unmatched projects fall back to `coding` (the dominant Claude Code use case).
+# Defaults: coding, investment, writing, other.
+# Unmatched projects fall back to `coding`.
 #
 # First-match-wins. Tokens are matched against the *normalized* project leaf
 # name (worktree suffix + path prefix stripped, split by `-`).
 #
-# Example — add a "work" bucket and customize what counts as "writing":
-#
-# default_bucket = "coding"
+# Tip: run `ccstory init` to auto-populate this from your recent sessions.
+
+# Fallback bucket for unmatched projects
+default_bucket = "coding"
+
+# API-equivalent monthly quota for burn-% display in `ccstory trend`.
+# Community estimates: Max 20x ≈ $3500, Max 5x ≈ $1500, Pro ≈ $200.
+# Set to 0 to hide the burn-% row entirely.
+monthly_quota_usd = 3500
+
+# Example custom buckets:
 #
 # [categories]
 # "work"    = ["company-repo", "internal-tool"]

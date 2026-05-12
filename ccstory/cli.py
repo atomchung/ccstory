@@ -157,6 +157,24 @@ def _backfill_with_progress(sessions, console: Console) -> dict[str, int]:
     return counts
 
 
+def _run_init(argv: list[str], console: Console) -> int:
+    from .init_categories import run_init
+    p = argparse.ArgumentParser(
+        prog="ccstory init",
+        description="Scan recent sessions and auto-suggest category buckets "
+                    "via one claude -p call.",
+    )
+    p.add_argument("--days", type=int, default=30,
+                   help="How many past days to scan (default 30)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="Print proposal but don't write config.toml")
+    p.add_argument("-y", "--yes", action="store_true",
+                   help="Skip the confirmation prompt")
+    args = p.parse_args(argv)
+    return run_init(days=args.days, dry_run=args.dry_run,
+                    auto_yes=args.yes, console=console)
+
+
 def _run_trend(argv: list[str], console: Console) -> int:
     if not CLAUDE_PROJECTS.exists():
         sys.exit(f"No Claude Code data at {CLAUDE_PROJECTS}.")
@@ -194,11 +212,14 @@ def main(argv: list[str] | None = None) -> int:
     raw = list(argv) if argv is not None else sys.argv[1:]
     console = Console()
 
-    # Manual dispatch for `trend` keyword — keeps default `ccstory week`
+    # Manual dispatch for subcommands — keeps default `ccstory week`
     # / `ccstory month` flow simple positional.
     if raw and raw[0] == "trend":
         logging.basicConfig(level=logging.WARNING)
         return _run_trend(raw[1:], console)
+    if raw and raw[0] == "init":
+        logging.basicConfig(level=logging.WARNING)
+        return _run_init(raw[1:], console)
 
     parser = argparse.ArgumentParser(prog="ccstory")
     parser.add_argument("window", nargs="?", default="month",
