@@ -7,7 +7,9 @@
     python -m ccstory all
 
 Flags:
-    --no-summary       Skip claude -p summarization (fast, but no narrative)
+    --llm-narrative    Polish per-session narratives via `claude -p`
+                       (slow, opt-in; shows ETA before batch)
+    --no-summary       Skip per-session narrative entirely (fastest)
     --no-aggregate     Skip per-category aggregate narrative
     --reports-dir PATH Override default ~/.ccstory/reports/
 """
@@ -49,6 +51,7 @@ from .session_summarizer import (
     aggregate_for_period,
     claude_bin_available,
     get_many,
+    import_from_claude_recap,
     missing_ids,
     summarize_session,
     upsert,
@@ -166,14 +169,39 @@ def _aggregate_with_progress(
     return out
 
 
-def _backfill_with_progress(sessions, console: Console) -> dict[str, int]:
-    """Run claude -p summarization with a Rich progress bar."""
+CLAUDE_P_SEC_PER_SESSION = 40  # rough cold-start average on M1 Pro
+
+
+def _backfill_with_progress(
+    sessions,
+    console: Console,
+    use_llm: bool = False,
+) -> dict[str, int]:
+    """Resolve narratives for sessions not yet in DB.
+
+    Default path is the instant first-user-msg fallback. Pass `use_llm=True`
+    to opt into `claude -p` polish per session (slow); the user gets an ETA
+    warning before the batch starts.
+    """
     by_id = {s.session_id: s for s in sessions if getattr(s, "session_id", None)}
     miss = missing_ids(list(by_id.keys()))
     counts = {"summarized": 0, "fallback": 0, "skipped": 0,
               "already": len(by_id) - len(miss)}
     if not miss:
         return counts
+
+    if use_llm:
+        eta_min = max(1, (len(miss) * CLAUDE_P_SEC_PER_SESSION + 59) // 60)
+        console.print(
+            f"[yellow]![/yellow] Found {len(miss)} un-summarized "
+            f"session(s). [bold]`claude -p` ETA ~{eta_min} min[/bold] "
+            f"(~{CLAUDE_P_SEC_PER_SESSION}s/session cold start). "
+            f"Press Ctrl+C to abort, or rerun without --llm-narrative "
+            f"for an instant first-user-msg fallback.\n"
+        )
+        progress_desc = "Summarizing sessions via claude -p"
+    else:
+        progress_desc = "Generating fallback narratives"
 
     with Progress(
         SpinnerColumn(),
@@ -184,9 +212,7 @@ def _backfill_with_progress(sessions, console: Console) -> dict[str, int]:
         console=console,
         transient=False,
     ) as progress:
-        task = progress.add_task(
-            "Summarizing sessions via claude -p", total=len(miss)
-        )
+        task = progress.add_task(progress_desc, total=len(miss))
         for sid in miss:
             sess = by_id[sid]
             jsonl_path = SUMMARIZER_PROJECTS_DIR / sess.project / f"{sid}.jsonl"
@@ -199,7 +225,7 @@ def _backfill_with_progress(sessions, console: Console) -> dict[str, int]:
                     counts["skipped"] += 1
                     progress.advance(task)
                     continue
-            result = summarize_session(sid, jsonl_path)
+            result = summarize_session(sid, jsonl_path, use_llm=use_llm)
             if result and result.source == "auto":
                 counts["summarized"] += 1
                 latest = result.summary
@@ -289,9 +315,11 @@ def main(argv: list[str] | None = None) -> int:
             "      Per-bucket sparklines + burn-% over N periods.\n"
             "\n"
             "Examples:\n"
-            "  ccstory week                  # last 7 days + vs previous +\n"
-            "                                # per-bucket aggregate narrative\n"
-            "  ccstory week --no-aggregate   # faster, skip aggregate synthesis\n"
+            "  ccstory week                  # last 7 days, instant fallback\n"
+            "                                # narratives + aggregate synthesis\n"
+            "  ccstory week --llm-narrative  # polish per-session via claude -p\n"
+            "                                # (slow; shows ETA before batch)\n"
+            "  ccstory week --no-aggregate   # skip aggregate synthesis\n"
             "  ccstory 2026-04               # specific month\n"
             "  ccstory trend --months 6      # 6-month sparkline view\n"
             "  ccstory init -y               # auto-categorize (no prompt)"
@@ -301,7 +329,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("window", nargs="?", default="month",
                         help="week | month | all | YYYY-MM (default: month)")
     parser.add_argument("--no-summary", action="store_true",
-                        help="Skip claude -p per-session narrative (faster)")
+                        help="Skip per-session narrative entirely (fastest)")
+    parser.add_argument("--llm-narrative", action="store_true",
+                        help="Polish per-session narratives via `claude -p` "
+                             "(slow ~40s/session cold start; shows ETA "
+                             "before batch). Default is an instant "
+                             "first-user-msg fallback.")
     parser.add_argument("--no-aggregate", action="store_true",
                         help="Skip the per-bucket aggregate narrative "
                              "(one claude -p call per non-empty bucket)")
@@ -350,12 +383,21 @@ def main(argv: list[str] | None = None) -> int:
     summaries: dict = {}
     period_aggregates: dict[str, str] = {}
     if not args.no_summary:
-        if not claude_bin_available():
+        imported = import_from_claude_recap()
+        if imported:
             console.print(
-                "[yellow]![/yellow] [dim]`claude` not on PATH — summaries "
-                "will fall back to first user message[/dim]\n"
+                f"[green]✓[/green] [dim]imported {imported} cached "
+                f"summarie(s) from ~/.claude/session_summaries.db "
+                f"(/recap)[/dim]\n"
             )
-        counts = _backfill_with_progress(sessions, console)
+        if args.llm_narrative and not claude_bin_available():
+            console.print(
+                "[yellow]![/yellow] [dim]`claude` not on PATH — "
+                "--llm-narrative will fall back to first user message[/dim]\n"
+            )
+        counts = _backfill_with_progress(
+            sessions, console, use_llm=args.llm_narrative,
+        )
         console.print(
             f"[green]✓[/green] [dim]summarized={counts['summarized']} · "
             f"fallback={counts['fallback']} · skipped={counts['skipped']} · "

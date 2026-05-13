@@ -22,6 +22,7 @@ from pathlib import Path
 
 LOG = logging.getLogger("ccstory.summarizer")
 DB_PATH = Path.home() / ".ccstory" / "cache.db"
+RECAP_DB_PATH = Path.home() / ".claude" / "session_summaries.db"
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 CLAUDE_BIN = "claude"
 
@@ -115,6 +116,44 @@ def get_many(session_ids: list[str]) -> dict[str, SessionSummary]:
             session_ids,
         ).fetchall()
         return {r[0]: SessionSummary(*r) for r in rows}
+    finally:
+        conn.close()
+
+
+def import_from_claude_recap() -> int:
+    """Pull cached summaries from ~/.claude/session_summaries.db (written by
+    the personal_os /recap skill) into ccstory's cache.
+
+    Idempotent — uses INSERT OR IGNORE so existing ccstory entries are
+    preserved. Drops the recap-only `task_slug` column since ccstory's
+    schema doesn't carry it. Silently returns 0 if the recap DB is absent
+    (fresh users won't have it).
+    """
+    if not RECAP_DB_PATH.exists():
+        return 0
+    conn = _connect()
+    try:
+        try:
+            conn.execute(f"ATTACH DATABASE '{RECAP_DB_PATH}' AS recap")
+        except sqlite3.OperationalError as e:
+            LOG.warning("attach recap DB failed: %s", e)
+            return 0
+        try:
+            cur = conn.execute(
+                """INSERT OR IGNORE INTO session_summaries
+                   (session_id, summary, source, project, created_at)
+                   SELECT session_id, summary, source, project, created_at
+                   FROM recap.session_summaries
+                   WHERE summary IS NOT NULL AND summary <> ''"""
+            )
+            n = cur.rowcount or 0
+            conn.commit()
+            return n
+        finally:
+            conn.execute("DETACH DATABASE recap")
+    except sqlite3.Error as e:
+        LOG.warning("recap import failed: %s", e)
+        return 0
     finally:
         conn.close()
 
@@ -245,8 +284,31 @@ def summarize_via_claude_p(excerpt: str, timeout: int = 60) -> str | None:
         return None
 
 
-def summarize_session(session_id: str, jsonl_path: Path) -> SessionSummary | None:
-    """Idempotent: skip if already cached."""
+def _fallback_narrative(excerpt: str) -> str:
+    """First non-empty user message line as a poor-man's narrative.
+
+    Format of excerpt is `[USER 1]\n<text>\n\n[USER 2]\n...`, so [1] after
+    splitting on newline is the first user message body.
+    """
+    parts = excerpt.split("\n", 2)
+    line = parts[1] if len(parts) > 1 else excerpt
+    return line[:120]
+
+
+def summarize_session(
+    session_id: str,
+    jsonl_path: Path,
+    use_llm: bool = False,
+) -> SessionSummary | None:
+    """Idempotent: returns cached entry if present.
+
+    Default (`use_llm=False`) is instant — generates a fallback narrative
+    from the session's first user message and caches it as `source=fallback`.
+
+    Set `use_llm=True` to attempt `claude -p` polish (slow, ~30-60s/session
+    cold start). On `claude -p` failure, falls through to the same fallback
+    narrative.
+    """
     existing = get(session_id)
     if existing:
         return existing
@@ -254,12 +316,12 @@ def summarize_session(session_id: str, jsonl_path: Path) -> SessionSummary | Non
     if not excerpt:
         upsert(session_id, "(no meaningful conversation)", "skipped", project=project)
         return get(session_id)
-    summary = summarize_via_claude_p(excerpt)
-    if not summary:
-        first_line = excerpt.split("\n", 2)[1] if "\n" in excerpt else excerpt[:80]
-        upsert(session_id, first_line[:120], "fallback", project=project)
-        return get(session_id)
-    upsert(session_id, summary, "auto", project=project)
+    if use_llm:
+        summary = summarize_via_claude_p(excerpt)
+        if summary:
+            upsert(session_id, summary, "auto", project=project)
+            return get(session_id)
+    upsert(session_id, _fallback_narrative(excerpt), "fallback", project=project)
     return get(session_id)
 
 
@@ -367,10 +429,16 @@ def get_period_aggregates(period_key: str) -> dict[str, str]:
         conn.close()
 
 
-def backfill_for_sessions(sessions: list, on_progress=None) -> dict:
+def backfill_for_sessions(
+    sessions: list,
+    on_progress=None,
+    use_llm: bool = False,
+) -> dict:
     """Summarize any sessions not yet in DB.
 
     `sessions` is a list of objects with `.session_id` and `.project` attributes.
+    `use_llm=False` (default) uses the instant first-user-msg fallback;
+    `use_llm=True` opts into `claude -p` polish per session.
     Returns {"summarized": N, "fallback": F, "skipped": M, "already": K}.
     """
     by_id = {s.session_id: s for s in sessions if getattr(s, "session_id", None)}
@@ -388,7 +456,7 @@ def backfill_for_sessions(sessions: list, on_progress=None) -> dict:
                     on_progress(i + 1, len(miss), sid, "skipped")
                 continue
             jsonl_path = matches[0]
-        result = summarize_session(sid, jsonl_path)
+        result = summarize_session(sid, jsonl_path, use_llm=use_llm)
         if result and result.source == "auto":
             summarized += 1
         elif result and result.source == "fallback":
