@@ -1,5 +1,7 @@
 # ccstory
 
+[English](README.md) · [繁體中文](README.zh-TW.md) · [简体中文](README.zh-CN.md)
+
 > **ccusage tells you the bill. ccstory tells the story.**
 
 A Claude Code usage recap that answers the question token counters can't:
@@ -28,8 +30,10 @@ A Claude Code usage recap that answers the question token counters can't:
 in cyan, writing in magenta — and `★ Top focus` highlights the biggest bucket
 with the longest session's narrative.)
 
-The markdown report goes further — one-sentence narrative per session, written
-by your own local `claude -p`:
+The markdown report goes further — one-sentence narrative per session. By
+default these come from the `aiTitle` records Claude Code itself writes into
+each session's jsonl; with `--rich` they're authored by your local `claude -p`
+for an outcome-focused phrasing:
 
 ```
 ### investment
@@ -49,7 +53,7 @@ by your own local `claude -p`:
 | Per-model breakdown | ✅ | ✅ |
 | **Active hours** (5-min gap heuristic) | ❌ | ✅ |
 | **Activity categories** (not just folder name) | ❌ | ✅ |
-| **One-sentence narrative per session** | ❌ | ✅ via local `claude -p` |
+| **One-sentence narrative per session** | ❌ | ✅ from Claude Code's own `aiTitle` (no extra API call) |
 | **Output-tokens-based period comparison** | ❌ (uses total_tokens) | ✅ |
 | Live quota | ⚠️ via `blocks` | ❌ |
 
@@ -73,6 +77,8 @@ ccstory reads the `aiTitle` records Claude Code already writes into each
 session's jsonl (the gray title at the top of the CLI). For outcome-focused
 narratives ("Refactored auth middleware…"), use `--rich`, which falls back to
 your local `claude -p` when an `aiTitle` is missing.
+
+**New here?** Read the [5-minute tutorial](TUTORIAL.md) before diving in.
 
 ## Usage
 
