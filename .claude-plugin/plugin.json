@@ -1,0 +1,10 @@
+{
+  "name": "ccstory",
+  "description": "Claude Code usage recap with narrative. Pairs with ccusage — ccusage tells you the bill, ccstory tells the story.",
+  "author": {
+    "name": "atomchung"
+  },
+  "homepage": "https://github.com/atomchung/ccstory",
+  "repository": "https://github.com/atomchung/ccstory",
+  "license": "MIT"
+}

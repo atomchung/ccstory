@@ -62,15 +62,35 @@ ccstory month          # what you spent it on
 
 ## Install
 
+ccstory ships in two layers — the **CLI** (does the work) and the **Claude Code plugin** (lets you invoke it inside a Claude Code chat as `/ccstory:recap`).
+
+### Option 1 — CLI only (terminal users)
+
 ```bash
-pipx install ccstory
-# or, for one-off:
-pip install ccstory
+pipx install git+https://github.com/atomchung/ccstory.git
+ccstory init       # one-time auto-categorize from recent sessions
+ccstory week       # generate a recap
 ```
 
-Requires Python 3.11+ and the `claude` CLI on PATH (for narrative summaries).
-Without `claude` on PATH, ccstory still runs — narratives fall back to the
-first user message of each session.
+### Option 2 — CLI + Claude Code plugin (so `/ccstory:recap` works in chat)
+
+```bash
+# 1. install the CLI as in Option 1
+pipx install git+https://github.com/atomchung/ccstory.git
+
+# 2. add the ccstory plugin marketplace (this repo IS the marketplace)
+/plugin marketplace add atomchung/ccstory
+
+# 3. install the plugin from it
+/plugin install ccstory@ccstory
+```
+
+After that, in any Claude Code session: `/ccstory:recap` (or just ask "what did I do this week?" and Claude will trigger it).
+
+### Requirements
+
+- Python 3.11+
+- `claude` CLI on PATH (used for per-session narrative summaries; without it, narratives fall back to the first user message)
 
 ## Usage
 
@@ -186,6 +206,8 @@ tokens stay comparable month over month.
 - [x] v0.1.1 — Per-bucket colors, date-range title, ★ Top focus highlight
 - [x] v0.1.2 — vs-previous-window comparison + `ccstory trend` sparklines
 - [x] v0.1.3 — `ccstory init` auto-categorization + quota burn % in trend
+- [x] v0.1.5 — Claude Code plugin wrapper (`/ccstory:recap` in chat) +
+      self-hosted marketplace so this repo is installable without official approval
 - [ ] v0.2 — Per-category aggregate narrative (2-3 line summary of "what
       the whole bucket was about this period")
 - [ ] v0.3 — Session-level classification (override folder bucket via
