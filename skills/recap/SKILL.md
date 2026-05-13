@@ -1,6 +1,7 @@
 ---
 description: Show a recap of recent Claude Code usage with narrative summary, comparison vs the previous window, and sparkline trends. Use when the user asks "what did I do this week", "claude usage summary", "where did my time go", or mentions ccstory / recap / trend.
-allowed-tools: Bash(ccstory *), Bash(which ccstory), Bash(pipx *)
+argument-hint: "[week | month | YYYY-MM | all | trend ...]"
+allowed-tools: Bash(ccstory *), Bash(which ccstory)
 ---
 
 # ccstory recap

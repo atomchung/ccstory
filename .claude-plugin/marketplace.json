@@ -1,5 +1,6 @@
 {
   "name": "ccstory",
+  "description": "Personal marketplace hosting the ccstory plugin — Claude Code usage recap with narrative.",
   "owner": {
     "name": "atomchung",
     "url": "https://github.com/atomchung"
@@ -7,8 +8,10 @@
   "plugins": [
     {
       "name": "ccstory",
-      "source": ".",
-      "description": "Claude Code usage recap with narrative summary, vs-previous comparison, and N-week sparkline trends."
+      "source": "./",
+      "description": "Claude Code usage recap with narrative summary, vs-previous comparison, and N-week sparkline trends.",
+      "category": "productivity",
+      "tags": ["usage", "analytics", "recap", "narrative", "ccusage-companion"]
     }
   ]
 }

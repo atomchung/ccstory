@@ -74,14 +74,17 @@ ccstory week       # generate a recap
 
 ### Option 2 — CLI + Claude Code plugin (so `/ccstory:recap` works in chat)
 
+**1. Install the CLI in a terminal:**
+
 ```bash
-# 1. install the CLI as in Option 1
 pipx install git+https://github.com/atomchung/ccstory.git
+pipx ensurepath        # restart your shell after this if `ccstory` isn't found
+```
 
-# 2. add the ccstory plugin marketplace (this repo IS the marketplace)
+**2. Inside a Claude Code session, add the marketplace and install the plugin** (these are Claude Code slash commands, not shell commands):
+
+```text
 /plugin marketplace add atomchung/ccstory
-
-# 3. install the plugin from it
 /plugin install ccstory@ccstory
 ```
 
@@ -89,8 +92,8 @@ After that, in any Claude Code session: `/ccstory:recap` (or just ask "what did 
 
 ### Requirements
 
-- Python 3.11+
-- `claude` CLI on PATH (used for per-session narrative summaries; without it, narratives fall back to the first user message)
+- **Python 3.11+** and **pipx** (`brew install pipx` on macOS, [other platforms](https://pipx.pypa.io/stable/installation/))
+- **Claude Code CLI** on PATH — used for per-session narrative summaries. Without it, narratives fall back to the first user message. If `/plugin` is missing inside Claude Code, update to the latest version per the [Claude Code troubleshooting docs](https://code.claude.com/docs/en/troubleshooting).
 
 ## Usage
 
