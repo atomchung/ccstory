@@ -221,10 +221,28 @@ def main(argv: list[str] | None = None) -> int:
         logging.basicConfig(level=logging.WARNING)
         return _run_init(raw[1:], console)
 
-    parser = argparse.ArgumentParser(prog="ccstory")
+    parser = argparse.ArgumentParser(
+        prog="ccstory",
+        description="Claude Code usage recap with narrative. "
+                    "ccusage tells you the bill; ccstory tells the story.",
+        epilog=(
+            "Subcommands:\n"
+            "  ccstory init [--days N] [--dry-run] [-y]\n"
+            "      Scan recent sessions and propose category buckets via\n"
+            "      one claude -p call. Writes ~/.ccstory/config.toml.\n"
+            "  ccstory trend [--weeks N | --months N]\n"
+            "      Per-bucket sparklines + burn-% over N periods.\n"
+            "\n"
+            "Examples:\n"
+            "  ccstory week                  # last 7 days + vs previous\n"
+            "  ccstory 2026-04               # specific month\n"
+            "  ccstory trend --months 6      # 6-month sparkline view\n"
+            "  ccstory init -y               # auto-categorize (no prompt)"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("window", nargs="?", default="month",
-                        help="week | month | all | YYYY-MM (default: month). "
-                             "Also: `trend` runs the trend subcommand.")
+                        help="week | month | all | YYYY-MM (default: month)")
     parser.add_argument("--no-summary", action="store_true",
                         help="Skip claude -p per-session narrative (faster)")
     parser.add_argument("--no-compare", action="store_true",
