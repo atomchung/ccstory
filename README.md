@@ -68,9 +68,11 @@ pipx install ccstory
 pip install ccstory
 ```
 
-Requires Python 3.11+ and the `claude` CLI on PATH (for narrative summaries).
-Without `claude` on PATH, ccstory still runs — narratives fall back to the
-first user message of each session.
+Requires Python 3.11+. No external CLI needed for the default fast path —
+ccstory reads the `aiTitle` records Claude Code already writes into each
+session's jsonl (the gray title at the top of the CLI). For outcome-focused
+narratives ("Refactored auth middleware…"), use `--rich`, which falls back to
+your local `claude -p` when an `aiTitle` is missing.
 
 ## Usage
 
@@ -87,7 +89,8 @@ ccstory trend            # last 8 weeks of sparklines
 ccstory trend --weeks 12 # custom range
 ccstory trend --months 6 # by calendar months
 
-ccstory --no-summary     # skip claude -p (faster, no narrative)
+ccstory --rich           # outcome-focused narratives via local `claude -p`
+ccstory --no-summary     # skip per-session narratives entirely
 ccstory --no-compare     # skip the vs-previous block
 ```
 
@@ -157,8 +160,11 @@ Matching rules:
 Everything runs locally. ccstory never sends your conversation data anywhere.
 
 - **Data source**: `~/.claude/projects/**/*.jsonl` — Claude Code's own logs.
-- **Narratives**: subprocess-call your *local* `claude -p`, which uses your
-  own Claude Code session / quota. No API key required, no cost to ccstory.
+- **Narratives (default)**: the `aiTitle` records Claude Code itself writes
+  into each session's jsonl. Pure local file read, no LLM call.
+- **Narratives (`--rich`)**: subprocess-call your *local* `claude -p`, which
+  uses your own Claude Code session / quota. No API key required, no cost
+  to ccstory.
 - **Cache**: `~/.ccstory/cache.db` (sqlite, per-session summaries).
 - **Reports**: `~/.ccstory/reports/recap-*.md`.
 
@@ -186,7 +192,9 @@ tokens stay comparable month over month.
 - [x] v0.1.1 — Per-bucket colors, date-range title, ★ Top focus highlight
 - [x] v0.1.2 — vs-previous-window comparison + `ccstory trend` sparklines
 - [x] v0.1.3 — `ccstory init` auto-categorization + quota burn % in trend
-- [ ] v0.2 — Per-category aggregate narrative (2-3 line summary of "what
+- [x] v0.2 — Read `aiTitle` from jsonl by default (instant, no `claude -p`);
+      `--rich` opts in to outcome-focused narratives
+- [ ] v0.3 — Per-category aggregate narrative (2-3 line summary of "what
       the whole bucket was about this period")
 - [ ] v0.3 — Session-level classification (override folder bucket via
       `claude -p` content-aware tagging)

@@ -7,8 +7,11 @@
     python -m ccstory all
 
 Flags:
-    --no-summary       Skip claude -p summarization (fast, but no narrative)
-    --no-aggregate     Skip per-category aggregate narrative
+    --rich             Use `claude -p` to author outcome-focused narratives
+                       (slower; costs turns). Default reads `aiTitle` records
+                       Claude Code already writes into each session's jsonl.
+    --no-summary       Skip per-session narratives entirely
+    --no-compare       Skip the vs-previous-window comparison block
     --reports-dir PATH Override default ~/.ccstory/reports/
 """
 
@@ -111,15 +114,25 @@ def _print_first_run_preview(console: Console) -> None:
     )
 
 
-def _backfill_with_progress(sessions, console: Console) -> dict[str, int]:
-    """Run claude -p summarization with a Rich progress bar."""
+def _backfill_with_progress(
+    sessions, console: Console, rich: bool = False,
+) -> dict[str, int]:
+    """Resolve per-session narratives. Default: read aiTitle from jsonl
+    (instant, no subprocess). With rich=True: fall back to `claude -p` when
+    no aiTitle is present.
+    """
     by_id = {s.session_id: s for s in sessions if getattr(s, "session_id", None)}
     miss = missing_ids(list(by_id.keys()))
-    counts = {"summarized": 0, "fallback": 0, "skipped": 0,
+    counts = {"ai_title": 0, "auto": 0, "fallback": 0, "skipped": 0,
               "already": len(by_id) - len(miss)}
     if not miss:
         return counts
 
+    label = (
+        "Resolving session titles (--rich: claude -p fallback)"
+        if rich else
+        "Reading session titles from jsonl"
+    )
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -129,9 +142,7 @@ def _backfill_with_progress(sessions, console: Console) -> dict[str, int]:
         console=console,
         transient=False,
     ) as progress:
-        task = progress.add_task(
-            "Summarizing sessions via claude -p", total=len(miss)
-        )
+        task = progress.add_task(label, total=len(miss))
         for sid in miss:
             sess = by_id[sid]
             jsonl_path = SUMMARIZER_PROJECTS_DIR / sess.project / f"{sid}.jsonl"
@@ -144,12 +155,15 @@ def _backfill_with_progress(sessions, console: Console) -> dict[str, int]:
                     counts["skipped"] += 1
                     progress.advance(task)
                     continue
-            result = summarize_session(sid, jsonl_path)
-            if result and result.source == "auto":
-                counts["summarized"] += 1
-                latest = result.summary
-                progress.update(task, description=f"[dim]↳ {latest[:50]}[/dim]")
-            elif result and result.source == "fallback":
+            result = summarize_session(sid, jsonl_path, rich=rich)
+            src = result.source if result else None
+            if src == "ai-title":
+                counts["ai_title"] += 1
+                progress.update(task, description=f"[dim]↳ {result.summary[:50]}[/dim]")
+            elif src == "auto":
+                counts["auto"] += 1
+                progress.update(task, description=f"[dim]↳ {result.summary[:50]}[/dim]")
+            elif src == "fallback":
                 counts["fallback"] += 1
             else:
                 counts["skipped"] += 1
@@ -244,7 +258,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("window", nargs="?", default="month",
                         help="week | month | all | YYYY-MM (default: month)")
     parser.add_argument("--no-summary", action="store_true",
-                        help="Skip claude -p per-session narrative (faster)")
+                        help="Skip per-session narratives entirely")
+    parser.add_argument("--rich", action="store_true",
+                        help="Use `claude -p` for outcome-focused narratives "
+                             "when no aiTitle is present (slower; costs turns)")
     parser.add_argument("--no-compare", action="store_true",
                         help="Skip the vs-previous-window comparison block")
     parser.add_argument("--reports-dir", type=Path, default=REPORTS_DIR,
@@ -290,17 +307,23 @@ def main(argv: list[str] | None = None) -> int:
     summaries: dict = {}
     period_aggregates: dict[str, str] = {}
     if not args.no_summary:
-        if not claude_bin_available():
+        if args.rich and not claude_bin_available():
             console.print(
-                "[yellow]![/yellow] [dim]`claude` not on PATH — summaries "
-                "will fall back to first user message[/dim]\n"
+                "[yellow]![/yellow] [dim]`claude` not on PATH — --rich will "
+                "fall back to first user message when no aiTitle[/dim]\n"
             )
-        counts = _backfill_with_progress(sessions, console)
-        console.print(
-            f"[green]✓[/green] [dim]summarized={counts['summarized']} · "
-            f"fallback={counts['fallback']} · skipped={counts['skipped']} · "
-            f"cached={counts['already']}[/dim]\n"
-        )
+        counts = _backfill_with_progress(sessions, console, rich=args.rich)
+        bits = [
+            f"ai-title={counts['ai_title']}",
+            f"cached={counts['already']}",
+        ]
+        if args.rich and counts["auto"]:
+            bits.append(f"claude-p={counts['auto']}")
+        if counts["fallback"]:
+            bits.append(f"fallback={counts['fallback']}")
+        if counts["skipped"]:
+            bits.append(f"skipped={counts['skipped']}")
+        console.print(f"[green]✓[/green] [dim]{' · '.join(bits)}[/dim]\n")
         summaries = get_many([s.session_id for s in sessions])
 
     comparison = None
