@@ -28,17 +28,28 @@ A Claude Code usage recap that answers the question token counters can't:
 in cyan, writing in magenta — and `★ Top focus` highlights the biggest bucket
 with the longest session's narrative.)
 
-The markdown report goes further — one-sentence narrative per session, written
-by your own local `claude -p`:
+The markdown report goes further — each bucket gets a 2-3 sentence **synthesis**
+across its sessions, followed by per-session one-liners, all written by your
+own local `claude -p`:
 
 ```
 ### investment
 
-- 2026-05-09 10:59 · 28m · 76 msg — Evaluated ONDS pre-earnings add/trim
-  strategy and defined scoring metrics for AI semis exposure.
-- 2026-05-08 23:53 · 22m · 88 msg — Screened Q1 AI application-layer winners
-  after the megacap earnings wave to identify next-leg setups.
+Investment work centered on portfolio thesis maintenance and AI-chain
+deep-dives: parallel wiki refreshes across NVDA/AMD/MU/TSLA/ORCL/DDOG, a
+Cambricon SELL initiation at RMB 650, plus targeted analyses of AVGO-OpenAI
+Nexus, CoreWeave, Cloudflare, and ServiceNow's agentic-coding thesis.
+
+- 2026-05-10 03:24 · 123m · 212 msg — Researched which software vendors
+  benefit or suffer from agentic coding's rise across the dev-to-ops chain.
+- 2026-05-08 12:30 · 67m · 294 msg — Produced SELL rating and RMB 650
+  target price for Cambricon Technologies initiating coverage report.
 ```
+
+The synthesis layer is what makes ccstory more than a fancier ccusage:
+numbers + per-session lines you can get elsewhere, but the cross-session
+**thread** — what was this category actually about this week? — only emerges
+when you let the model read all of them together.
 
 ## What ccstory gives you that ccusage doesn't
 
@@ -211,8 +222,8 @@ tokens stay comparable month over month.
 - [x] v0.1.3 — `ccstory init` auto-categorization + quota burn % in trend
 - [x] v0.1.5 — Claude Code plugin wrapper (`/ccstory:recap` in chat) +
       self-hosted marketplace so this repo is installable without official approval
-- [ ] v0.2 — Per-category aggregate narrative (2-3 line summary of "what
-      the whole bucket was about this period")
+- [x] v0.2.0 — Per-category aggregate narrative wired into the default flow
+      (2-3 sentence synthesis per bucket; `--no-aggregate` to skip)
 - [ ] v0.3 — Session-level classification (override folder bucket via
       `claude -p` content-aware tagging)
 - [ ] v0.4 — Claude Code plugin form (`/ccstory` slash command)

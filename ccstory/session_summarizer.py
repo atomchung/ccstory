@@ -263,6 +263,110 @@ def summarize_session(session_id: str, jsonl_path: Path) -> SessionSummary | Non
     return get(session_id)
 
 
+_AGG_PROMPT = """Below are the one-line summaries of every session in a single category for one time window. Each line is one session.
+
+Write 2-3 sentences (max 60 words, English) synthesizing what the user was actually working on in this category for the period. Focus on:
+- The main thread (most recurring theme)
+- Any key decisions / outcomes
+- If there are clear sub-themes, group them
+
+Good example:
+- Investment work focused on AI semiconductor chain deep-dives: Cambricon SELL initiation at RMB 650, AVGO Q1 wiki refresh against SemiAnalysis consensus, plus a Q1 thesis update across NVDA/AMD/MU/TSLA/ORCL via parallel agents. Also established a weekly portfolio-watch routine.
+
+Avoid:
+- Repeating individual session contents (synthesize, don't list)
+- Bullet points (write prose)
+- Going over 3 sentences / 200 chars
+
+Category: {category}
+Sessions in period: {count}
+
+Session summaries:
+{summaries}
+
+Output the synthesized prose only — no quotes, no prefix, no fences."""
+
+
+def aggregate_for_period(
+    period_key: str,
+    category: str,
+    session_ids: list[str],
+    summaries: list[str],
+    force_refresh: bool = False,
+    timeout: int = 90,
+) -> str | None:
+    """Synthesize a 2-3 sentence narrative for one category in a period.
+
+    Cache key: (period_key, category). If the set of session ids differs
+    from the cached entry, regenerate (sessions added/removed since last run).
+    Returns None on LLM failure.
+    """
+    conn = _connect()
+    try:
+        cur = conn.execute(
+            "SELECT summary, session_ids FROM period_aggregates "
+            "WHERE period_key = ? AND category = ?",
+            (period_key, category),
+        ).fetchone()
+        cached_ids = set(cur[1].split(",")) if cur else set()
+        new_ids = set(session_ids)
+        if cur and not force_refresh and cached_ids == new_ids:
+            return cur[0]
+    finally:
+        conn.close()
+
+    if not summaries:
+        return None
+    bullets = "\n".join(f"- {s}" for s in summaries)
+    prompt = _AGG_PROMPT.format(
+        category=category, count=len(summaries), summaries=bullets[:6000],
+    )
+    if not claude_bin_available():
+        return None
+    try:
+        r = subprocess.run(
+            [CLAUDE_BIN, "-p", "--output-format", "text",
+             "--no-session-persistence", prompt],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+        if r.returncode != 0:
+            LOG.warning("aggregate claude -p failed: %s", r.stderr.strip()[:200])
+            return None
+        narrative = r.stdout.strip().strip('"').strip("'")
+        if len(narrative) < 10:
+            return None
+    except (subprocess.SubprocessError, OSError) as e:
+        LOG.warning("aggregate errored: %s", e)
+        return None
+
+    conn = _connect()
+    try:
+        conn.execute(
+            """INSERT OR REPLACE INTO period_aggregates
+               (period_key, category, summary, session_ids, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (period_key, category, narrative,
+             ",".join(sorted(session_ids)), time.time()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return narrative
+
+
+def get_period_aggregates(period_key: str) -> dict[str, str]:
+    """Return {category: summary} for a period, only ones already in cache."""
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT category, summary FROM period_aggregates WHERE period_key = ?",
+            (period_key,),
+        ).fetchall()
+        return {r[0]: r[1] for r in rows}
+    finally:
+        conn.close()
+
+
 def backfill_for_sessions(sessions: list, on_progress=None) -> dict:
     """Summarize any sessions not yet in DB.
 

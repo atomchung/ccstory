@@ -46,6 +46,7 @@ from .report import (
 )
 from .session_summarizer import (
     PROJECTS_DIR as SUMMARIZER_PROJECTS_DIR,
+    aggregate_for_period,
     claude_bin_available,
     get_many,
     missing_ids,
@@ -109,6 +110,60 @@ def _print_first_run_preview(console: Console) -> None:
     console.print(
         "[dim]Customize buckets: edit ~/.ccstory/config.toml[/dim]\n"
     )
+
+
+def _aggregate_with_progress(
+    label: str,
+    sessions: list,
+    rollups: list,
+    summaries: dict,
+    console: Console,
+) -> dict[str, str]:
+    """Synthesize a 2-3 line narrative per bucket via one claude -p call each.
+
+    Cache-friendly: aggregate_for_period only re-runs claude -p when the set
+    of session ids in a bucket changes since the cached aggregate was written.
+    """
+    sessions_by_cat: dict[str, list] = {}
+    for s in sessions:
+        sessions_by_cat.setdefault(s.category, []).append(s)
+
+    out: dict[str, str] = {}
+    buckets_with_data = [r for r in rollups
+                         if any(summaries.get(s.session_id) for s in sessions_by_cat.get(r.category, []))]
+    if not buckets_with_data:
+        return out
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(bar_width=None),
+        MofNCompleteColumn(),
+        TimeRemainingColumn(),
+        console=console,
+        transient=False,
+    ) as progress:
+        task = progress.add_task(
+            "Synthesizing per-bucket narrative (claude -p)",
+            total=len(buckets_with_data),
+        )
+        for r in buckets_with_data:
+            sids: list[str] = []
+            texts: list[str] = []
+            for s in sessions_by_cat.get(r.category, []):
+                summ = summaries.get(s.session_id)
+                if summ and summ.source in ("auto", "record"):
+                    sids.append(s.session_id)
+                    texts.append(summ.summary)
+            if not texts:
+                progress.advance(task)
+                continue
+            narrative = aggregate_for_period(label, r.category, sids, texts)
+            if narrative:
+                out[r.category] = narrative
+                progress.update(task, description=f"[dim]↳ {r.category}: synthesized[/dim]")
+            progress.advance(task)
+    return out
 
 
 def _backfill_with_progress(sessions, console: Console) -> dict[str, int]:
@@ -234,7 +289,9 @@ def main(argv: list[str] | None = None) -> int:
             "      Per-bucket sparklines + burn-% over N periods.\n"
             "\n"
             "Examples:\n"
-            "  ccstory week                  # last 7 days + vs previous\n"
+            "  ccstory week                  # last 7 days + vs previous +\n"
+            "                                # per-bucket aggregate narrative\n"
+            "  ccstory week --no-aggregate   # faster, skip aggregate synthesis\n"
             "  ccstory 2026-04               # specific month\n"
             "  ccstory trend --months 6      # 6-month sparkline view\n"
             "  ccstory init -y               # auto-categorize (no prompt)"
@@ -245,6 +302,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="week | month | all | YYYY-MM (default: month)")
     parser.add_argument("--no-summary", action="store_true",
                         help="Skip claude -p per-session narrative (faster)")
+    parser.add_argument("--no-aggregate", action="store_true",
+                        help="Skip the per-bucket aggregate narrative "
+                             "(one claude -p call per non-empty bucket)")
     parser.add_argument("--no-compare", action="store_true",
                         help="Skip the vs-previous-window comparison block")
     parser.add_argument("--reports-dir", type=Path, default=REPORTS_DIR,
@@ -302,6 +362,16 @@ def main(argv: list[str] | None = None) -> int:
             f"cached={counts['already']}[/dim]\n"
         )
         summaries = get_many([s.session_id for s in sessions])
+
+        if not args.no_aggregate and summaries:
+            period_aggregates = _aggregate_with_progress(
+                label, sessions, rollups, summaries, console,
+            )
+            if period_aggregates:
+                console.print(
+                    f"[green]✓[/green] [dim]aggregated "
+                    f"{len(period_aggregates)} bucket(s)[/dim]\n"
+                )
 
     comparison = None
     if not args.no_compare and args.window != "all":
