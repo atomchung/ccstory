@@ -52,7 +52,6 @@ from .session_summarizer import (
     SRC_FIRST_USER,
     SRC_SKIPPED,
     get_many,
-    missing_ids,
     summarize_session,
     upsert,
 )
@@ -115,20 +114,42 @@ def _print_first_run_preview(console: Console) -> None:
     )
 
 
+def _resolve_jsonl(sess) -> Path | None:
+    """Resolve a session's jsonl path, with rglob fallback for moved projects."""
+    p = SUMMARIZER_PROJECTS_DIR / sess.project / f"{sess.session_id}.jsonl"
+    if p.exists():
+        return p
+    matches = list(SUMMARIZER_PROJECTS_DIR.rglob(f"{sess.session_id}.jsonl"))
+    return matches[0] if matches else None
+
+
 def _backfill_with_progress(
     sessions,
     console: Console,
 ) -> dict[str, int]:
-    """Resolve narratives for sessions not yet in cache.
+    """Resolve narratives for each session. Pure jsonl reads.
 
-    Pure jsonl reads: built-in `/recap` output (`system/away_summary`) when
-    available, first user message otherwise. No subprocess, no LLM call.
+    Two work paths inside `summarize_session`:
+      - Cold cache  → extract Tier 1 (away_summary), else Tier 2 (first user msg).
+      - Stale cache → jsonl was written after the cache row's `created_at`.
+        Re-extract Tier 1 and promote/replace if there's new content. This
+        catches `/recap` writes that happened after ccstory first saw the
+        session (`/recap` is asynchronous — fires after 3+ min idle).
+
+    Fresh-cache sessions (jsonl mtime ≤ cache.created_at) short-circuit
+    inside `summarize_session` with a single stat() — no jsonl read.
     """
     by_id = {s.session_id: s for s in sessions if getattr(s, "session_id", None)}
-    miss = missing_ids(list(by_id.keys()))
-    counts = {SRC_AWAY_SUMMARY: 0, SRC_FIRST_USER: 0, SRC_SKIPPED: 0,
-              "already": len(by_id) - len(miss)}
-    if not miss:
+    before_map = get_many(list(by_id.keys()))
+
+    counts = {
+        SRC_AWAY_SUMMARY: 0,
+        SRC_FIRST_USER: 0,
+        SRC_SKIPPED: 0,
+        "refreshed": 0,
+        "cached": 0,
+    }
+    if not by_id:
         return counts
 
     with Progress(
@@ -141,28 +162,37 @@ def _backfill_with_progress(
         transient=False,
     ) as progress:
         task = progress.add_task(
-            "Reading recap / first-msg from jsonl", total=len(miss),
+            "Reading recap / first-msg from jsonl", total=len(by_id),
         )
-        for sid in miss:
-            sess = by_id[sid]
-            jsonl_path = SUMMARIZER_PROJECTS_DIR / sess.project / f"{sid}.jsonl"
-            if not jsonl_path.exists():
-                matches = list(SUMMARIZER_PROJECTS_DIR.rglob(f"{sid}.jsonl"))
-                if matches:
-                    jsonl_path = matches[0]
-                else:
+        for sid, sess in by_id.items():
+            before = before_map.get(sid)
+            jsonl_path = _resolve_jsonl(sess)
+            if jsonl_path is None:
+                if before is None:
                     upsert(sid, "(jsonl not found)", SRC_SKIPPED, project=sess.project)
                     counts[SRC_SKIPPED] += 1
-                    progress.advance(task)
-                    continue
+                else:
+                    counts["cached"] += 1
+                progress.advance(task)
+                continue
+
             result = summarize_session(sid, jsonl_path)
-            if result and result.source == SRC_AWAY_SUMMARY:
-                counts[SRC_AWAY_SUMMARY] += 1
-                progress.update(task, description=f"[dim]↳ {result.summary[:50]}[/dim]")
-            elif result and result.source == SRC_FIRST_USER:
-                counts[SRC_FIRST_USER] += 1
+            if before is None:
+                # newly cached
+                if result and result.source == SRC_AWAY_SUMMARY:
+                    counts[SRC_AWAY_SUMMARY] += 1
+                    progress.update(task, description=f"[dim]↳ {result.summary[:50]}[/dim]")
+                elif result and result.source == SRC_FIRST_USER:
+                    counts[SRC_FIRST_USER] += 1
+                else:
+                    counts[SRC_SKIPPED] += 1
+            elif result and result.summary != before.summary:
+                # content changed → refreshed (typically a T2→T1 promotion)
+                counts["refreshed"] += 1
+                progress.update(task, description=f"[dim]↳ refreshed {result.summary[:42]}[/dim]")
             else:
-                counts[SRC_SKIPPED] += 1
+                # cache fresh OR re-checked but no new content
+                counts["cached"] += 1
             progress.advance(task)
     return counts
 
@@ -308,8 +338,9 @@ def main(argv: list[str] | None = None) -> int:
         console.print(
             f"[green]✓[/green] [dim]away_summary={counts[SRC_AWAY_SUMMARY]} · "
             f"first_user_msg={counts[SRC_FIRST_USER]} · "
+            f"refreshed={counts['refreshed']} · "
             f"skipped={counts[SRC_SKIPPED]} · "
-            f"cached={counts['already']}[/dim]\n"
+            f"cached={counts['cached']}[/dim]\n"
         )
         summaries = get_many([s.session_id for s in sessions])
 

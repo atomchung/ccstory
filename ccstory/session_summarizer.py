@@ -111,6 +111,25 @@ def get(session_id: str) -> SessionSummary | None:
         conn.close()
 
 
+def _touch_cache(session_id: str) -> None:
+    """Bump `created_at` to now without changing content.
+
+    Used after a stale-cache re-check that found nothing new — marks "we
+    revisited at time T" so subsequent runs only re-check when the jsonl
+    has been written after T. Without this, every run would re-extract
+    away_summary for the same non-promoting rows forever.
+    """
+    conn = _connect()
+    try:
+        conn.execute(
+            "UPDATE session_summaries SET created_at = ? WHERE session_id = ?",
+            (time.time(), session_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def get_many(session_ids: list[str]) -> dict[str, SessionSummary]:
     if not session_ids:
         return {}
@@ -125,13 +144,6 @@ def get_many(session_ids: list[str]) -> dict[str, SessionSummary]:
         return {r[0]: SessionSummary(*r) for r in rows}
     finally:
         conn.close()
-
-
-def missing_ids(session_ids: list[str]) -> list[str]:
-    if not session_ids:
-        return []
-    have = set(get_many(session_ids).keys())
-    return [sid for sid in session_ids if sid not in have]
 
 
 def _project_of(jsonl_path: Path) -> str:
@@ -250,26 +262,50 @@ def _first_user_narrative(excerpt: str) -> str:
     return line[:120]
 
 
+def _jsonl_mtime(jsonl_path: Path) -> float:
+    try:
+        return jsonl_path.stat().st_mtime if jsonl_path.exists() else 0.0
+    except OSError:
+        return 0.0
+
+
 def summarize_session(
     session_id: str,
     jsonl_path: Path,
 ) -> SessionSummary | None:
-    """Idempotent — returns cached entry if present.
+    """Resolve a session's narrative, with automatic refresh on jsonl change.
 
-    Tier 1: built-in /recap output (`system/away_summary`) if present.
-    Tier 2: first user message as fallback.
+    Tier 1: built-in /recap output (`system/away_summary`)
+    Tier 2: first user message (fallback)
 
-    Both tiers read jsonl directly. No subprocess, no LLM call, no cost.
+    Cache freshness is mtime-based: if the jsonl has been written after the
+    cache entry, we re-extract Tier 1 and promote/replace when there's
+    new content. `/recap` fires asynchronously (background after 3+ min
+    idle, or manual `/recap`), so a session cached at T2 today often has
+    a Tier 1 record added later — this refresh path picks it up.
+
+    All paths read jsonl directly. No subprocess, no LLM call, no cost.
     """
     existing = get(session_id)
-    if existing:
+    if existing and _jsonl_mtime(jsonl_path) <= existing.created_at:
         return existing
 
     project = _project_of(jsonl_path)
 
     recap = extract_away_summary(jsonl_path)
     if recap:
-        upsert(session_id, recap, SRC_AWAY_SUMMARY, project=project)
+        # T1 hit. Either fresh content or unchanged from before; upsert
+        # either way so created_at advances and the row is at SRC_AWAY_SUMMARY.
+        if not existing or recap != existing.summary or existing.source != SRC_AWAY_SUMMARY:
+            upsert(session_id, recap, SRC_AWAY_SUMMARY, project=project)
+        else:
+            _touch_cache(session_id)
+        return get(session_id)
+
+    if existing:
+        # Stale re-check found no Tier 1; keep existing row but mark
+        # checked-now so subsequent runs short-circuit until jsonl changes again.
+        _touch_cache(session_id)
         return get(session_id)
 
     excerpt = _extract_excerpt(jsonl_path)
@@ -278,45 +314,3 @@ def summarize_session(
         return get(session_id)
     upsert(session_id, _first_user_narrative(excerpt), SRC_FIRST_USER, project=project)
     return get(session_id)
-
-
-def backfill_for_sessions(
-    sessions: list,
-    on_progress=None,
-) -> dict:
-    """Resolve narratives for sessions not yet in cache.
-
-    `sessions` is a list of objects with `.session_id` and `.project` attrs.
-    Pure jsonl reads — no LLM, no subprocess, no cost.
-    Returns {"away_summary": N, "first_user_msg": F, "skipped": M, "already": K}.
-    """
-    by_id = {s.session_id: s for s in sessions if getattr(s, "session_id", None)}
-    miss = missing_ids(list(by_id.keys()))
-    away = first_user = skipped = 0
-    for i, sid in enumerate(miss):
-        sess = by_id[sid]
-        jsonl_path = PROJECTS_DIR / sess.project / f"{sid}.jsonl"
-        if not jsonl_path.exists():
-            matches = list(PROJECTS_DIR.rglob(f"{sid}.jsonl"))
-            if not matches:
-                upsert(sid, "(jsonl not found)", SRC_SKIPPED, project=sess.project)
-                skipped += 1
-                if on_progress:
-                    on_progress(i + 1, len(miss), sid, SRC_SKIPPED)
-                continue
-            jsonl_path = matches[0]
-        result = summarize_session(sid, jsonl_path)
-        if result and result.source == SRC_AWAY_SUMMARY:
-            away += 1
-        elif result and result.source == SRC_FIRST_USER:
-            first_user += 1
-        else:
-            skipped += 1
-        if on_progress:
-            on_progress(i + 1, len(miss), sid, result.source if result else "fail")
-    return {
-        "away_summary": away,
-        "first_user_msg": first_user,
-        "skipped": skipped,
-        "already": len(by_id) - len(miss),
-    }
