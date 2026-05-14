@@ -54,11 +54,9 @@ def render_report(
     rollups: list[CategoryRollup],
     usage: UsageReport,
     summaries: dict[str, SessionSummary],
-    period_aggregates: dict[str, str] | None = None,
     comparison: PeriodComparison | None = None,
 ) -> str:
     """Produce the full markdown report."""
-    period_aggregates = period_aggregates or {}
     total_min = sum(r.active_min for r in rollups)
     total_h = total_min / 60
     total_msgs = sum(r.messages for r in rollups)
@@ -107,10 +105,6 @@ def render_report(
     lines.append("")
     for r in rollups:
         lines.append(f"### {r.category}")
-        narrative = period_aggregates.get(r.category)
-        if narrative:
-            lines.append("")
-            lines.append(narrative)
         lines.append("")
         for s in r.top_sessions:
             summ = summaries.get(s.session_id)
@@ -180,13 +174,11 @@ def render_terminal_card(
     rollups: list[CategoryRollup],
     usage: UsageReport,
     summaries: dict | None = None,
-    period_aggregates: dict[str, str] | None = None,
     report_path: str | None = None,
     comparison: PeriodComparison | None = None,
 ) -> Panel:
     """Rich Panel summarizing the recap. Designed for screenshot sharing."""
     summaries = summaries or {}
-    period_aggregates = period_aggregates or {}
     total_min = sum(r.active_min for r in rollups)
     total_h = total_min / 60
 
@@ -249,19 +241,6 @@ def render_terminal_card(
     parts.append(Text(""))
     parts.append(Text("Time by category", style="bold underline"))
     parts.append(bars)
-
-    if period_aggregates:
-        parts.append(Text(""))
-        parts.append(Text("What you did", style="bold underline"))
-        for r in rollups:
-            narrative = period_aggregates.get(r.category)
-            if narrative:
-                color = color_for(r.category)
-                line = Text()
-                line.append("• ", style="dim")
-                line.append(r.category, style=f"bold {color}")
-                line.append(f"  {narrative}", style="dim")
-                parts.append(line)
 
     if comparison:
         parts.extend(render_comparison_block(comparison))

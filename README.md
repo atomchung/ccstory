@@ -6,17 +6,17 @@ A Claude Code usage recap that answers the question token counters can't:
 **what did you actually do?**
 
 ```
-╭──────────────── Claude Code Recap · May 5 – 12, 2026 ────────────────╮
+╭──────────────── Claude Code Recap · May 7 – 14, 2026 ────────────────╮
 │                                                                      │
-│  ★ Top focus  coding  10.9h  (53% of active time)                    │
+│  ★ Top focus  coding  13.1h  (57% of active time)                    │
 │    ↳ Built /show-routine slash command using bash+python to fetch…   │
 │                                                                      │
-│  Active  20.6h  Sessions  74   Output  2.92M                         │
-│  Turns   3,692  Cache     96%  Cost    $1,608                        │
+│  Active  23.0h  Sessions  84   Output  3.28M                         │
+│  Turns   4,093  Cache     96%  Cost    $1,770                        │
 │                                                                      │
 │  Time by category                                                    │
-│  coding          ███████████████░░░░░░░░░░░░░   10.9h    53%         │
-│  investment      █████████████░░░░░░░░░░░░░░░    9.6h    47%         │
+│  coding          ████████████████░░░░░░░░░░░░   13.1h    57%         │
+│  investment      ████████████░░░░░░░░░░░░░░░░    9.8h    43%         │
 │  writing         ░░░░░░░░░░░░░░░░░░░░░░░░░░░░    0.1h     0%         │
 │                                                                      │
 │  Full report → ~/.ccstory/reports/recap-2026-W19.md                  │
@@ -28,28 +28,22 @@ A Claude Code usage recap that answers the question token counters can't:
 in cyan, writing in magenta — and `★ Top focus` highlights the biggest bucket
 with the longest session's narrative.)
 
-The markdown report goes further — each bucket gets a 2-3 sentence **synthesis**
-across its sessions, followed by per-session one-liners, all written by your
-own local `claude -p`:
+## How the per-session narrative works (zero cost, zero subprocess)
 
-```
-### investment
+ccstory reads `~/.claude/projects/*/`*.jsonl directly. Two tiers, both
+native, both free:
 
-Investment work centered on portfolio thesis maintenance and AI-chain
-deep-dives: parallel wiki refreshes across NVDA/AMD/MU/TSLA/ORCL/DDOG, a
-Cambricon SELL initiation at RMB 650, plus targeted analyses of AVGO-OpenAI
-Nexus, CoreWeave, Cloudflare, and ServiceNow's agentic-coding thesis.
+| Tier | Source | Quality |
+|---|---|---|
+| 1 | Built-in `/recap` output — `{"type":"system","subtype":"away_summary","content":"…"}` in the jsonl. Claude Code (v2.1.114+) writes this for every manual `/recap` and every auto-fired recap after 3+ min idle. | Multi-sentence; progress + next step. |
+| 2 | First user message of the session. | Raw prompt; always present. |
 
-- 2026-05-10 03:24 · 123m · 212 msg — Researched which software vendors
-  benefit or suffer from agentic coding's rise across the dev-to-ops chain.
-- 2026-05-08 12:30 · 67m · 294 msg — Produced SELL rating and RMB 650
-  target price for Cambricon Technologies initiating coverage report.
-```
+**ccstory never invokes `claude -p`** — no subprocess, no API key, no cost.
+It also never silently reads non-native databases (e.g. user-side extensions
+under `~/.claude/*` that aren't shipped by Claude Code itself).
 
-The synthesis layer is what makes ccstory more than a fancier ccusage:
-numbers + per-session lines you can get elsewhere, but the cross-session
-**thread** — what was this category actually about this week? — only emerges
-when you let the model read all of them together.
+ccstory's own cache lives at `~/.ccstory/cache.db`. Nothing is ever written
+inside `~/.claude/*` (that namespace belongs to Anthropic).
 
 ## What ccstory gives you that ccusage doesn't
 
@@ -60,7 +54,7 @@ when you let the model read all of them together.
 | Per-model breakdown | ✅ | ✅ |
 | **Active hours** (5-min gap heuristic) | ❌ | ✅ |
 | **Activity categories** (not just folder name) | ❌ | ✅ |
-| **One-sentence narrative per session** | ❌ | ✅ via local `claude -p` |
+| **One-sentence narrative per session** | ❌ | ✅ via native jsonl read |
 | **Output-tokens-based period comparison** | ❌ (uses total_tokens) | ✅ |
 | Live quota | ⚠️ via `blocks` | ❌ |
 
@@ -79,7 +73,7 @@ ccstory ships in two layers — the **CLI** (does the work) and the **Claude Cod
 
 ```bash
 pipx install git+https://github.com/atomchung/ccstory.git
-ccstory init       # one-time auto-categorize from recent sessions
+ccstory init       # one-time rule-based bucket suggestion (no LLM call)
 ccstory week       # generate a recap
 ```
 
@@ -104,12 +98,12 @@ After that, in any Claude Code session: `/ccstory:recap` (or just ask "what did 
 ### Requirements
 
 - **Python 3.11+** and **pipx** (`brew install pipx` on macOS, [other platforms](https://pipx.pypa.io/stable/installation/))
-- **Claude Code CLI** on PATH — used for per-session narrative summaries. Without it, narratives fall back to the first user message. If `/plugin` is missing inside Claude Code, update to the latest version per the [Claude Code troubleshooting docs](https://code.claude.com/docs/en/troubleshooting).
+- **Claude Code** itself — ccstory reads its session jsonl files. No `claude` binary on PATH required.
 
 ## Usage
 
 ```bash
-ccstory init             # one-shot: scan recent sessions and propose buckets
+ccstory init             # rule-based bucket suggestion from past 30 days
 ccstory init --dry-run   # preview without writing config
 
 ccstory                  # current month so far (default)
@@ -121,14 +115,13 @@ ccstory trend            # last 8 weeks of sparklines
 ccstory trend --weeks 12 # custom range
 ccstory trend --months 6 # by calendar months
 
-ccstory --no-summary     # skip claude -p (faster, no narrative)
+ccstory --no-summary     # skip per-session narrative entirely
 ccstory --no-compare     # skip the vs-previous block
 ```
 
 **Recommended first run**: `ccstory init` scans the last 30 days of sessions
-and asks claude (via a single `claude -p` call, ~15s) to suggest a category
-bucket for each project. It writes a starter `~/.ccstory/config.toml` you can
-edit later.
+and applies the built-in keyword classifier to each project. Writes a
+starter `~/.ccstory/config.toml` you can edit later. No LLM call.
 
 `ccstory week` / `ccstory month` automatically appends a **vs-previous-window**
 comparison (▲/▼ deltas per bucket). `ccstory trend` shows per-bucket
@@ -188,16 +181,19 @@ Matching rules:
 
 ## Privacy
 
-Everything runs locally. ccstory never sends your conversation data anywhere.
+Everything runs locally. ccstory never sends your conversation data anywhere
+and never spawns a subprocess.
 
 - **Data source**: `~/.claude/projects/**/*.jsonl` — Claude Code's own logs.
-- **Narratives**: subprocess-call your *local* `claude -p`, which uses your
-  own Claude Code session / quota. No API key required, no cost to ccstory.
-- **Cache**: `~/.ccstory/cache.db` (sqlite, per-session summaries).
+- **Narrative source**: same jsonl, two record types:
+  - `{"type":"system","subtype":"away_summary","content":"…"}` (Claude Code's
+    built-in `/recap` output)
+  - first user message of the session, as fallback
+- **Cache**: `~/.ccstory/cache.db` (sqlite — ccstory's own, namespaced).
 - **Reports**: `~/.ccstory/reports/recap-*.md`.
 
-No telemetry, no network calls, no upload buttons. The repo can verify this
-in [ccstory/session_summarizer.py](ccstory/session_summarizer.py).
+No telemetry, no network calls, no `claude -p`, no upload buttons. Verify
+it in [ccstory/session_summarizer.py](ccstory/session_summarizer.py).
 
 ## How time is measured
 
@@ -222,12 +218,14 @@ tokens stay comparable month over month.
 - [x] v0.1.3 — `ccstory init` auto-categorization + quota burn % in trend
 - [x] v0.1.5 — Claude Code plugin wrapper (`/ccstory:recap` in chat) +
       self-hosted marketplace so this repo is installable without official approval
-- [x] v0.2.0 — Per-category aggregate narrative wired into the default flow
-      (2-3 sentence synthesis per bucket; `--no-aggregate` to skip)
-- [ ] v0.3 — Session-level classification (override folder bucket via
-      `claude -p` content-aware tagging)
-- [ ] v0.4 — Claude Code plugin form (`/ccstory` slash command)
-- [ ] v0.5 — Optional PNG card export
+- [x] v0.2.0 — Per-category aggregate narrative (later removed — see v0.4.0)
+- [x] v0.3.0 — Instant fallback default + import from a personal-recap cache
+      (later removed — see v0.4.0)
+- [x] **v0.4.0** — Native-only narratives: Tier 1 built-in `/recap` output
+      (`system/away_summary`), Tier 2 first user message. Dropped `claude -p`,
+      dropped non-native DB auto-import, dropped per-bucket aggregate.
+- [ ] v0.5 — `aiTitle` as an intermediate tier (tracked separately)
+- [ ] v0.6 — Optional PNG card export
 
 ## License
 

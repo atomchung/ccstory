@@ -1,41 +1,60 @@
-"""Session-level summaries cached to SQLite, generated via local `claude -p`.
+"""Per-session narratives sourced ONLY from native Claude Code data.
 
-This is the differentiator: ccusage gives numbers, ccstory gives a one-line
-narrative per session. We invoke the user's *local* Claude Code CLI through
-subprocess — no API key, no cost to us, no privacy concerns.
+Reads directly from `~/.claude/projects/*/`*.jsonl. No `claude -p`, no
+subprocess, no external API call, no cost.
 
-Extracted from ting/personal_os/core/session_summarizer.py. Simplified for v1:
-  - Single source ("auto") — dropped the personal_os curated "record" source
-  - DB lives at ~/.ccstory/cache.db (not polluting Claude Code's own dir)
+Two-tier fallback (both native, both free):
+
+  Tier 1: Built-in `/recap` output
+      Claude Code v2.1.114+ writes each generated recap into the session
+      jsonl as `{"type":"system","subtype":"away_summary","content":"..."}`.
+      Multi-sentence, includes progress + next step. Highest quality.
+
+  Tier 2: First user message
+      100% covered fallback when no recap record exists in the jsonl.
+
+ccstory's own cache lives at ~/.ccstory/cache.db. We **never** write inside
+~/.claude/* (Anthropic's namespace) and **never** silently read from
+non-native databases under ~/.claude/ (those are written by other tools, not
+Claude Code itself).
+
+(`aiTitle` as a middle tier is tracked in a separate issue for testing.)
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import shutil
+import re
 import sqlite3
-import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 LOG = logging.getLogger("ccstory.summarizer")
 DB_PATH = Path.home() / ".ccstory" / "cache.db"
-RECAP_DB_PATH = Path.home() / ".claude" / "session_summaries.db"
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
-CLAUDE_BIN = "claude"
+
+# Source labels stored on each cached row. Stable strings — used by the CLI
+# progress counters and by anyone querying the cache directly.
+SRC_AWAY_SUMMARY = "away_summary"   # Tier 1: built-in /recap output
+SRC_FIRST_USER = "first_user_msg"   # Tier 2: opening user prompt
+SRC_SKIPPED = "skipped"             # no usable content found
 
 N_USER_HEAD = 3
 N_USER_TAIL = 2
 N_ASSISTANT_TAIL = 1
+
+# Trailing hint Claude Code appends to its built-in /recap output. We strip
+# it so the narrative reads cleanly inside the recap card.
+_RECAP_HINT_RE = re.compile(r"\s*\(disable recaps in /config\)\s*$")
 
 
 @dataclass
 class SessionSummary:
     session_id: str
     summary: str
-    source: str  # "auto" | "skipped" | "fallback"
+    source: str
     project: str | None = None
     created_at: float = 0.0
 
@@ -51,18 +70,6 @@ def _connect() -> sqlite3.Connection:
             source     TEXT NOT NULL,
             project    TEXT,
             created_at REAL NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS period_aggregates (
-            period_key   TEXT NOT NULL,
-            category     TEXT NOT NULL,
-            summary      TEXT NOT NULL,
-            session_ids  TEXT NOT NULL,
-            created_at   REAL NOT NULL,
-            PRIMARY KEY (period_key, category)
         )
         """
     )
@@ -120,44 +127,6 @@ def get_many(session_ids: list[str]) -> dict[str, SessionSummary]:
         conn.close()
 
 
-def import_from_claude_recap() -> int:
-    """Pull cached summaries from ~/.claude/session_summaries.db (written by
-    the personal_os /recap skill) into ccstory's cache.
-
-    Idempotent — uses INSERT OR IGNORE so existing ccstory entries are
-    preserved. Drops the recap-only `task_slug` column since ccstory's
-    schema doesn't carry it. Silently returns 0 if the recap DB is absent
-    (fresh users won't have it).
-    """
-    if not RECAP_DB_PATH.exists():
-        return 0
-    conn = _connect()
-    try:
-        try:
-            conn.execute(f"ATTACH DATABASE '{RECAP_DB_PATH}' AS recap")
-        except sqlite3.OperationalError as e:
-            LOG.warning("attach recap DB failed: %s", e)
-            return 0
-        try:
-            cur = conn.execute(
-                """INSERT OR IGNORE INTO session_summaries
-                   (session_id, summary, source, project, created_at)
-                   SELECT session_id, summary, source, project, created_at
-                   FROM recap.session_summaries
-                   WHERE summary IS NOT NULL AND summary <> ''"""
-            )
-            n = cur.rowcount or 0
-            conn.commit()
-            return n
-        finally:
-            conn.execute("DETACH DATABASE recap")
-    except sqlite3.Error as e:
-        LOG.warning("recap import failed: %s", e)
-        return 0
-    finally:
-        conn.close()
-
-
 def missing_ids(session_ids: list[str]) -> list[str]:
     if not session_ids:
         return []
@@ -165,15 +134,57 @@ def missing_ids(session_ids: list[str]) -> list[str]:
     return [sid for sid in session_ids if sid not in have]
 
 
-def _extract_excerpt(jsonl_path: Path) -> tuple[str, str]:
-    """Extract user-facing text excerpt for summarization. Returns (project, excerpt)."""
+def _project_of(jsonl_path: Path) -> str:
+    try:
+        return jsonl_path.relative_to(PROJECTS_DIR).parts[0]
+    except ValueError:
+        return jsonl_path.parent.name
+
+
+def extract_away_summary(jsonl_path: Path) -> str | None:
+    """Return the most recent built-in /recap output stored in this session's
+    jsonl, or None if no `away_summary` record exists.
+
+    Schema: Claude Code (v2.1.114+) writes each /recap (manual or auto-fired
+    after 3+ min idle) into the session jsonl as
+        {"type":"system","subtype":"away_summary","content":"<recap>", ...}
+
+    Multiple records may appear in one session — we take the last one. The
+    trailing "(disable recaps in /config)" hint is stripped.
+    """
+    latest: str | None = None
+    try:
+        with jsonl_path.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if d.get("type") != "system":
+                    continue
+                if d.get("subtype") != "away_summary":
+                    continue
+                content = (d.get("content") or "").strip()
+                content = _RECAP_HINT_RE.sub("", content).strip()
+                if content:
+                    latest = content
+    except OSError:
+        return None
+    return latest
+
+
+def _extract_excerpt(jsonl_path: Path) -> str:
+    """Tier-2 source: first user message of the session.
+
+    Also collects head/tail user + tail assistant messages for context, but
+    only the first user message is used as narrative. The wider excerpt is
+    retained as a single block in case future tiers want it.
+    """
     user_msgs: list[str] = []
     assistant_msgs: list[str] = []
-    try:
-        project = jsonl_path.relative_to(PROJECTS_DIR).parts[0]
-    except ValueError:
-        project = jsonl_path.parent.name
-
     try:
         with jsonl_path.open(encoding="utf-8") as f:
             for line in f:
@@ -211,7 +222,7 @@ def _extract_excerpt(jsonl_path: Path) -> tuple[str, str]:
                 else:
                     assistant_msgs.append(text[:500])
     except OSError:
-        return project, ""
+        return ""
 
     parts: list[str] = []
     head_set = set(user_msgs[:N_USER_HEAD])
@@ -225,70 +236,14 @@ def _extract_excerpt(jsonl_path: Path) -> tuple[str, str]:
     for m in assistant_msgs[-N_ASSISTANT_TAIL:]:
         parts.append(f"[ASSISTANT END]\n{m[:300]}")
 
-    return project, "\n\n".join(parts)
+    return "\n\n".join(parts)
 
 
-_PROMPT_TEMPLATE = """Below is an excerpt of a Claude Code conversation (first/last user + assistant messages).
-
-Write ONE sentence (max 18 words, English) summarizing what this session ACTUALLY DID — focus on outcomes, not process.
-
-Good examples:
-- Refactored auth middleware to extract token validation into shared util
-- Investigated TLS handshake failure on staging, traced to expired intermediate cert
-- Drafted PR description for the v2 migration epic
-
-Bad examples (don't do this):
-- User asked X, Claude answered Y  (process, not outcome)
-- A conversation about coding  (too vague)
-
-Excerpt:
-{excerpt}
-
-Output only the one-sentence summary, no quotes, no prefix."""
-
-
-def claude_bin_available() -> bool:
-    return shutil.which(CLAUDE_BIN) is not None
-
-
-def summarize_via_claude_p(excerpt: str, timeout: int = 60) -> str | None:
-    """Call local `claude -p` to summarize. Returns None on failure.
-
-    Uses subprocess so we draw on the user's own Claude Code session/quota.
-    No API key, no cost to ccstory.
-    """
-    if not excerpt.strip():
-        return None
-    if not claude_bin_available():
-        return None
-    prompt = _PROMPT_TEMPLATE.format(excerpt=excerpt[:8000])
-    try:
-        r = subprocess.run(
-            [
-                CLAUDE_BIN, "-p",
-                "--output-format", "text",
-                "--no-session-persistence",
-                prompt,
-            ],
-            capture_output=True, text=True, timeout=timeout, check=False,
-        )
-        if r.returncode != 0:
-            LOG.warning("claude -p failed (rc=%s): %s", r.returncode, r.stderr.strip()[:200])
-            return None
-        out = r.stdout.strip().split("\n", 1)[0].strip().strip('"').strip("'")
-        if len(out) < 4 or len(out) > 200:
-            return None
-        return out
-    except (subprocess.SubprocessError, OSError) as e:
-        LOG.warning("claude -p errored: %s", e)
-        return None
-
-
-def _fallback_narrative(excerpt: str) -> str:
+def _first_user_narrative(excerpt: str) -> str:
     """First non-empty user message line as a poor-man's narrative.
 
-    Format of excerpt is `[USER 1]\n<text>\n\n[USER 2]\n...`, so [1] after
-    splitting on newline is the first user message body.
+    Format of excerpt is `[USER 1]\\n<text>\\n\\n[USER 2]\\n...`, so the
+    second line after splitting is the first user message body.
     """
     parts = excerpt.split("\n", 2)
     line = parts[1] if len(parts) > 1 else excerpt
@@ -298,176 +253,70 @@ def _fallback_narrative(excerpt: str) -> str:
 def summarize_session(
     session_id: str,
     jsonl_path: Path,
-    use_llm: bool = False,
 ) -> SessionSummary | None:
-    """Idempotent: returns cached entry if present.
+    """Idempotent — returns cached entry if present.
 
-    Default (`use_llm=False`) is instant — generates a fallback narrative
-    from the session's first user message and caches it as `source=fallback`.
+    Tier 1: built-in /recap output (`system/away_summary`) if present.
+    Tier 2: first user message as fallback.
 
-    Set `use_llm=True` to attempt `claude -p` polish (slow, ~30-60s/session
-    cold start). On `claude -p` failure, falls through to the same fallback
-    narrative.
+    Both tiers read jsonl directly. No subprocess, no LLM call, no cost.
     """
     existing = get(session_id)
     if existing:
         return existing
-    project, excerpt = _extract_excerpt(jsonl_path)
-    if not excerpt:
-        upsert(session_id, "(no meaningful conversation)", "skipped", project=project)
+
+    project = _project_of(jsonl_path)
+
+    recap = extract_away_summary(jsonl_path)
+    if recap:
+        upsert(session_id, recap, SRC_AWAY_SUMMARY, project=project)
         return get(session_id)
-    if use_llm:
-        summary = summarize_via_claude_p(excerpt)
-        if summary:
-            upsert(session_id, summary, "auto", project=project)
-            return get(session_id)
-    upsert(session_id, _fallback_narrative(excerpt), "fallback", project=project)
+
+    excerpt = _extract_excerpt(jsonl_path)
+    if not excerpt:
+        upsert(session_id, "(no meaningful conversation)", SRC_SKIPPED, project=project)
+        return get(session_id)
+    upsert(session_id, _first_user_narrative(excerpt), SRC_FIRST_USER, project=project)
     return get(session_id)
-
-
-_AGG_PROMPT = """Below are the one-line summaries of every session in a single category for one time window. Each line is one session.
-
-Write 2-3 sentences (max 60 words, English) synthesizing what the user was actually working on in this category for the period. Focus on:
-- The main thread (most recurring theme)
-- Any key decisions / outcomes
-- If there are clear sub-themes, group them
-
-Good example:
-- Investment work focused on AI semiconductor chain deep-dives: Cambricon SELL initiation at RMB 650, AVGO Q1 wiki refresh against SemiAnalysis consensus, plus a Q1 thesis update across NVDA/AMD/MU/TSLA/ORCL via parallel agents. Also established a weekly portfolio-watch routine.
-
-Avoid:
-- Repeating individual session contents (synthesize, don't list)
-- Bullet points (write prose)
-- Going over 3 sentences / 200 chars
-
-Category: {category}
-Sessions in period: {count}
-
-Session summaries:
-{summaries}
-
-Output the synthesized prose only — no quotes, no prefix, no fences."""
-
-
-def aggregate_for_period(
-    period_key: str,
-    category: str,
-    session_ids: list[str],
-    summaries: list[str],
-    force_refresh: bool = False,
-    timeout: int = 90,
-) -> str | None:
-    """Synthesize a 2-3 sentence narrative for one category in a period.
-
-    Cache key: (period_key, category). If the set of session ids differs
-    from the cached entry, regenerate (sessions added/removed since last run).
-    Returns None on LLM failure.
-    """
-    conn = _connect()
-    try:
-        cur = conn.execute(
-            "SELECT summary, session_ids FROM period_aggregates "
-            "WHERE period_key = ? AND category = ?",
-            (period_key, category),
-        ).fetchone()
-        cached_ids = set(cur[1].split(",")) if cur else set()
-        new_ids = set(session_ids)
-        if cur and not force_refresh and cached_ids == new_ids:
-            return cur[0]
-    finally:
-        conn.close()
-
-    if not summaries:
-        return None
-    bullets = "\n".join(f"- {s}" for s in summaries)
-    prompt = _AGG_PROMPT.format(
-        category=category, count=len(summaries), summaries=bullets[:6000],
-    )
-    if not claude_bin_available():
-        return None
-    try:
-        r = subprocess.run(
-            [CLAUDE_BIN, "-p", "--output-format", "text",
-             "--no-session-persistence", prompt],
-            capture_output=True, text=True, timeout=timeout, check=False,
-        )
-        if r.returncode != 0:
-            LOG.warning("aggregate claude -p failed: %s", r.stderr.strip()[:200])
-            return None
-        narrative = r.stdout.strip().strip('"').strip("'")
-        if len(narrative) < 10:
-            return None
-    except (subprocess.SubprocessError, OSError) as e:
-        LOG.warning("aggregate errored: %s", e)
-        return None
-
-    conn = _connect()
-    try:
-        conn.execute(
-            """INSERT OR REPLACE INTO period_aggregates
-               (period_key, category, summary, session_ids, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            (period_key, category, narrative,
-             ",".join(sorted(session_ids)), time.time()),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-    return narrative
-
-
-def get_period_aggregates(period_key: str) -> dict[str, str]:
-    """Return {category: summary} for a period, only ones already in cache."""
-    conn = _connect()
-    try:
-        rows = conn.execute(
-            "SELECT category, summary FROM period_aggregates WHERE period_key = ?",
-            (period_key,),
-        ).fetchall()
-        return {r[0]: r[1] for r in rows}
-    finally:
-        conn.close()
 
 
 def backfill_for_sessions(
     sessions: list,
     on_progress=None,
-    use_llm: bool = False,
 ) -> dict:
-    """Summarize any sessions not yet in DB.
+    """Resolve narratives for sessions not yet in cache.
 
-    `sessions` is a list of objects with `.session_id` and `.project` attributes.
-    `use_llm=False` (default) uses the instant first-user-msg fallback;
-    `use_llm=True` opts into `claude -p` polish per session.
-    Returns {"summarized": N, "fallback": F, "skipped": M, "already": K}.
+    `sessions` is a list of objects with `.session_id` and `.project` attrs.
+    Pure jsonl reads — no LLM, no subprocess, no cost.
+    Returns {"away_summary": N, "first_user_msg": F, "skipped": M, "already": K}.
     """
     by_id = {s.session_id: s for s in sessions if getattr(s, "session_id", None)}
     miss = missing_ids(list(by_id.keys()))
-    summarized = fallback = skipped = 0
+    away = first_user = skipped = 0
     for i, sid in enumerate(miss):
         sess = by_id[sid]
         jsonl_path = PROJECTS_DIR / sess.project / f"{sid}.jsonl"
         if not jsonl_path.exists():
             matches = list(PROJECTS_DIR.rglob(f"{sid}.jsonl"))
             if not matches:
-                upsert(sid, "(jsonl not found)", "skipped", project=sess.project)
+                upsert(sid, "(jsonl not found)", SRC_SKIPPED, project=sess.project)
                 skipped += 1
                 if on_progress:
-                    on_progress(i + 1, len(miss), sid, "skipped")
+                    on_progress(i + 1, len(miss), sid, SRC_SKIPPED)
                 continue
             jsonl_path = matches[0]
-        result = summarize_session(sid, jsonl_path, use_llm=use_llm)
-        if result and result.source == "auto":
-            summarized += 1
-        elif result and result.source == "fallback":
-            fallback += 1
+        result = summarize_session(sid, jsonl_path)
+        if result and result.source == SRC_AWAY_SUMMARY:
+            away += 1
+        elif result and result.source == SRC_FIRST_USER:
+            first_user += 1
         else:
             skipped += 1
         if on_progress:
             on_progress(i + 1, len(miss), sid, result.source if result else "fail")
     return {
-        "summarized": summarized,
-        "fallback": fallback,
+        "away_summary": away,
+        "first_user_msg": first_user,
         "skipped": skipped,
         "already": len(by_id) - len(miss),
     }
