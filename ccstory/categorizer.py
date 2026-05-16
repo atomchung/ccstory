@@ -96,7 +96,12 @@ class CategoryRule:
 
 
 def _load_toml(path: Path) -> dict | None:
-    """Load toml using stdlib tomllib (3.11+). Returns None on any error."""
+    """Load toml using stdlib tomllib (3.11+). Returns None on any error.
+
+    Parse failures escalate to stderr so the user notices — a malformed
+    config silently falling back to defaults caused subtle miscategorization
+    in the past (issue #9).
+    """
     if not path.exists():
         return None
     try:
@@ -111,6 +116,13 @@ def _load_toml(path: Path) -> dict | None:
         with path.open("rb") as f:
             return tomllib.load(f)
     except (OSError, ValueError) as e:
+        import sys as _sys
+        msg = (
+            f"ccstory: warning: could not parse {path}: {e}\n"
+            f"ccstory: falling back to built-in defaults. "
+            f"Fix the file or rerun `ccstory init` to regenerate."
+        )
+        print(msg, file=_sys.stderr)
         LOG.warning("failed to parse %s: %s", path, e)
         return None
 
