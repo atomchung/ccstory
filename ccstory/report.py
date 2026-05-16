@@ -141,7 +141,7 @@ def render_report(
     rollups: list[CategoryRollup],
     usage: UsageReport,
     summaries: dict[str, SessionSummary],
-    period_aggregates: dict[str, str] | None = None,
+    overall_narrative: str | None = None,
     comparison: PeriodComparison | None = None,
     flavor: str = "plain",
 ) -> str:
@@ -155,7 +155,6 @@ def render_report(
     """
     if flavor not in VALID_FLAVORS:
         raise ValueError(f"unsupported flavor: {flavor!r} (use one of {VALID_FLAVORS})")
-    period_aggregates = period_aggregates or {}
     total_min = sum(r.active_min for r in rollups)
     total_h = total_min / 60
     total_msgs = sum(r.messages for r in rollups)
@@ -203,15 +202,18 @@ def render_report(
     if comparison:
         lines.append(render_comparison_markdown(comparison))
 
-    # Per-category narrative + top sessions
-    lines.append("## What you did, by category")
+    # Overall narrative (3-sentence synthesis across the whole period)
+    if overall_narrative:
+        lines.append("## What you did")
+        lines.append("")
+        lines.append(overall_narrative)
+        lines.append("")
+
+    # Per-category session breakdown
+    lines.append("## Sessions, by category")
     lines.append("")
     for r in rollups:
         lines.append(f"### {r.category}")
-        narrative = period_aggregates.get(r.category)
-        if narrative:
-            lines.append("")
-            lines.append(narrative)
         lines.append("")
         for s in r.top_sessions:
             summ = summaries.get(s.session_id)
@@ -289,13 +291,12 @@ def render_terminal_card(
     rollups: list[CategoryRollup],
     usage: UsageReport,
     summaries: dict | None = None,
-    period_aggregates: dict[str, str] | None = None,
+    overall_narrative: str | None = None,
     report_path: str | None = None,
     comparison: PeriodComparison | None = None,
 ) -> Panel:
     """Rich Panel summarizing the recap. Designed for screenshot sharing."""
     summaries = summaries or {}
-    period_aggregates = period_aggregates or {}
     total_min = sum(r.active_min for r in rollups)
     total_h = total_min / 60
 
@@ -359,18 +360,10 @@ def render_terminal_card(
     parts.append(Text("Time by category", style="bold underline"))
     parts.append(bars)
 
-    if period_aggregates:
+    if overall_narrative:
         parts.append(Text(""))
         parts.append(Text("What you did", style="bold underline"))
-        for r in rollups:
-            narrative = period_aggregates.get(r.category)
-            if narrative:
-                color = color_for(r.category)
-                line = Text()
-                line.append("• ", style="dim")
-                line.append(r.category, style=f"bold {color}")
-                line.append(f"  {narrative}", style="dim")
-                parts.append(line)
+        parts.append(Text(overall_narrative, style="dim"))
 
     if comparison:
         parts.extend(render_comparison_block(comparison))

@@ -55,7 +55,6 @@ from .report import (
 )
 from .session_summarizer import (
     PROJECTS_DIR as SUMMARIZER_PROJECTS_DIR,
-    aggregate_for_period,
     claude_bin_available,
     classify_sessions_by_content,
     get_many,
@@ -66,6 +65,7 @@ from .session_summarizer import (
     missing_ids,
     summarize_session,
     synthesize_comparison,
+    synthesize_overall_for_period,
     upsert,
 )
 from .time_tracking import CLAUDE_PROJECTS, collect_sessions, rollup_by_category
@@ -140,58 +140,40 @@ def _print_first_run_preview(console: Console) -> None:
     )
 
 
-def _aggregate_with_progress(
+def _synthesize_overall_with_progress(
     label: str,
     sessions: list,
     rollups: list,
     summaries: dict,
     console: Console,
-) -> dict[str, str]:
-    """Synthesize a 2-3 line narrative per bucket via one claude -p call each.
+) -> str | None:
+    """Synthesize ONE 3-sentence overall narrative for the period.
 
-    Cache-friendly: aggregate_for_period only re-runs claude -p when the set
-    of session ids in a bucket changes since the cached aggregate was written.
+    Single `claude -p` call across all categories — replaces the old
+    per-bucket aggregate path. Cache-friendly: only re-runs when the set
+    of session ids changes since the cached narrative was written.
     """
-    sessions_by_cat: dict[str, list] = {}
+    sessions_by_cat: dict[str, list[tuple[str, str]]] = {}
     for s in sessions:
-        sessions_by_cat.setdefault(s.category, []).append(s)
-
-    out: dict[str, str] = {}
-    buckets_with_data = [r for r in rollups
-                         if any(summaries.get(s.session_id) for s in sessions_by_cat.get(r.category, []))]
-    if not buckets_with_data:
-        return out
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(bar_width=None),
-        MofNCompleteColumn(),
-        TimeRemainingColumn(),
-        console=console,
-        transient=False,
-    ) as progress:
-        task = progress.add_task(
-            "Synthesizing per-bucket narrative (claude -p)",
-            total=len(buckets_with_data),
+        summ = summaries.get(s.session_id)
+        if not summ or summ.source not in ("auto", "record"):
+            continue
+        sessions_by_cat.setdefault(s.category, []).append(
+            (s.session_id, summ.summary)
         )
-        for r in buckets_with_data:
-            sids: list[str] = []
-            texts: list[str] = []
-            for s in sessions_by_cat.get(r.category, []):
-                summ = summaries.get(s.session_id)
-                if summ and summ.source in ("auto", "record"):
-                    sids.append(s.session_id)
-                    texts.append(summ.summary)
-            if not texts:
-                progress.advance(task)
-                continue
-            narrative = aggregate_for_period(label, r.category, sids, texts)
-            if narrative:
-                out[r.category] = narrative
-                progress.update(task, description=f"[dim]↳ {r.category}: synthesized[/dim]")
-            progress.advance(task)
-    return out
+    if not sessions_by_cat:
+        return None
+
+    category_hours = [(r.category, r.active_min / 60) for r in rollups]
+
+    with console.status(
+        "[dim]Synthesizing 3-sentence overall narrative (claude -p)…[/dim]"
+    ):
+        return synthesize_overall_for_period(
+            period_key=label,
+            category_hours=category_hours,
+            sessions_by_category=sessions_by_cat,
+        )
 
 
 def _apply_content_classification(
@@ -514,10 +496,10 @@ def main(argv: list[str] | None = None) -> int:
             "\n"
             "Examples:\n"
             "  ccstory week                  # last 7 days, instant fallback\n"
-            "                                # narratives + aggregate synthesis\n"
+            "                                # narratives + overall synthesis\n"
             "  ccstory week --llm-narrative  # polish per-session via claude -p\n"
             "                                # (slow; shows ETA before batch)\n"
-            "  ccstory week --no-aggregate   # skip aggregate synthesis\n"
+            "  ccstory week --no-aggregate   # skip overall synthesis\n"
             "  ccstory week --refresh        # re-classify cached sessions in window\n"
             "  ccstory 2026-04               # specific month\n"
             "  ccstory trend --months 6      # 6-month sparkline view\n"
@@ -539,8 +521,8 @@ def main(argv: list[str] | None = None) -> int:
                              "before batch). Default is an instant "
                              "first-user-msg fallback.")
     parser.add_argument("--no-aggregate", action="store_true",
-                        help="Skip the per-bucket aggregate narrative "
-                             "(one claude -p call per non-empty bucket)")
+                        help="Skip the 3-sentence overall narrative "
+                             "(one claude -p call across all buckets)")
     parser.add_argument("--no-compare", action="store_true",
                         help="Skip the vs-previous-window comparison block")
     parser.add_argument("--for", dest="flavor", choices=VALID_FLAVORS,
@@ -647,7 +629,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     summaries: dict = {}
-    period_aggregates: dict[str, str] = {}
+    overall_narrative: str | None = None
     if not args.minimal:
         imported = import_from_claude_recap()
         if imported:
@@ -682,13 +664,13 @@ def main(argv: list[str] | None = None) -> int:
             rollups = rollup_by_category(sessions)
 
         if not args.no_aggregate and summaries:
-            period_aggregates = _aggregate_with_progress(
+            overall_narrative = _synthesize_overall_with_progress(
                 label, sessions, rollups, summaries, console,
             )
-            if period_aggregates:
+            if overall_narrative:
                 console.print(
-                    f"[green]✓[/green] [dim]aggregated "
-                    f"{len(period_aggregates)} bucket(s)[/dim]\n"
+                    "[green]✓[/green] [dim]synthesized overall narrative"
+                    "[/dim]\n"
                 )
 
     comparison = None
@@ -741,7 +723,7 @@ def main(argv: list[str] | None = None) -> int:
         rollups=rollups,
         usage=usage,
         summaries=summaries,
-        period_aggregates=period_aggregates,
+        overall_narrative=overall_narrative,
         comparison=comparison,
         flavor=args.flavor,
     )
@@ -754,7 +736,7 @@ def main(argv: list[str] | None = None) -> int:
         rollups=rollups,
         usage=usage,
         summaries=summaries,
-        period_aggregates=period_aggregates,
+        overall_narrative=overall_narrative,
         report_path=str(out_path),
         comparison=comparison,
         console=console,

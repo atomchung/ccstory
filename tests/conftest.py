@@ -34,6 +34,13 @@ def tmp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "RECAP_DB_PATH",
         home / ".claude" / "session_summaries.db",
     )
+    monkeypatch.setattr(
+        session_summarizer,
+        "CLAUDE_MD_PATH",
+        home / ".claude" / "CLAUDE.md",
+    )
+    # language_directive() is @lru_cache'd; flush so per-test CLAUDE.md edits take effect.
+    session_summarizer.language_directive.cache_clear()
     monkeypatch.setattr(categorizer, "CONFIG_PATH", ccstory_dir / "config.toml")
     return home
 
