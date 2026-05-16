@@ -112,6 +112,40 @@ class TestLoadPricesConfig:
         assert "custom" in prices
         assert prices["custom"]["inp"] == 1.0
 
+    def test_partial_new_model_fills_missing_keys_as_zero(self, tmp_path: Path):
+        # User defines a new model with ONLY `input` — missing keys must
+        # default to 0.0 so cost code can index the dict directly without
+        # KeyError. Regression test for #23 follow-up.
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            "[prices.custom]\ninput = 1.0\n",
+            encoding="utf-8",
+        )
+        prices, _ = load_prices_config(cfg)
+        assert prices["custom"] == {"inp": 1.0, "out": 0.0, "cw": 0.0, "cr": 0.0}
+
+    def test_partial_new_model_cost_does_not_crash(self, tmp_path: Path):
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            "[prices.custom]\ninput = 1.0\n",
+            encoding="utf-8",
+        )
+        prices, snapshot = load_prices_config(cfg)
+        apply_prices(prices, snapshot_date=snapshot)
+        mu = ModelUsage(
+            model="custom-model-v1",
+            input_tokens=1_000_000,
+            output_tokens=1_000_000,
+            cache_creation=1_000_000,
+            cache_read=1_000_000,
+        )
+        # Only `input` priced; output / cache_write / cache_read are 0.
+        # cost_usd = (1M*1 + 1M*0 + 1M*0 + 1M*0) / 1M = 1.0
+        assert mu.cost_usd == 1.0
+        # cost_uncached_usd charges cache tokens at the input rate, so:
+        # (1M*1 + 1M*0 + 1M*1 + 1M*1) / 1M = 3.0
+        assert mu.cost_uncached_usd == 3.0
+
 
 class TestApplyPrices:
     def test_apply_replaces_active(self):

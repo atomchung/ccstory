@@ -108,6 +108,14 @@ def load_prices_config(config_path: Path) -> tuple[dict[str, dict[str, float]], 
                     LOG.warning(
                         "ignoring non-numeric [prices.%s].%s", model_key, cfg_key,
                     )
+        missing = [k for k in ("inp", "out", "cw", "cr") if k not in target]
+        if missing:
+            for k in missing:
+                target[k] = 0.0
+            LOG.warning(
+                "[prices.%s] missing %s; treating as $0.0/M",
+                model_key, ", ".join(missing),
+            )
     return merged, snapshot
 
 
