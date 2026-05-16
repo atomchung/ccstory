@@ -275,7 +275,8 @@ def ensure_default_config(path: Path = CONFIG_PATH) -> bool:
 # First-match-wins. Tokens are matched against the *normalized* project leaf
 # name (worktree suffix + path prefix stripped, split by `-`).
 #
-# Tip: run `ccstory init` to auto-populate this from your recent sessions.
+# Tip: run `ccstory init` to auto-populate this from your recent sessions,
+# or `ccstory category set <bucket> <keyword>...` to add rules one at a time.
 
 # Fallback bucket for unmatched projects
 default_bucket = "coding"
@@ -299,6 +300,149 @@ monthly_quota_usd = 3500
     except OSError as e:
         LOG.warning("could not write template config to %s: %s", path, e)
         return False
+
+
+def _render_config(
+    categories: dict[str, list[str]],
+    default_bucket: str,
+    monthly_quota_usd: float,
+) -> str:
+    """Re-render config.toml from scratch from in-memory state.
+
+    Comments and section ordering are stable across writes so successive
+    `category set/unset` commands produce minimal diffs.
+    """
+    import json as _json
+    lines = [
+        "# ccstory configuration",
+        "#",
+        "# Maintained by `ccstory category set/unset` and `ccstory init`.",
+        "# Hand-edit is fine — the CLI re-renders on the next write.",
+        "",
+        f'default_bucket = "{default_bucket}"',
+        "",
+        "# API-equivalent monthly quota for burn-% display in `ccstory trend`.",
+        "# Set to 0 to hide the burn-% row entirely.",
+        f"monthly_quota_usd = {monthly_quota_usd:g}",
+        "",
+    ]
+    if categories:
+        lines.append("[categories]")
+        for bucket in sorted(categories):
+            kws = categories[bucket]
+            if not kws:
+                continue
+            kw_list = ", ".join(_json.dumps(k) for k in kws)
+            lines.append(f'"{bucket}" = [{kw_list}]')
+    else:
+        lines.append("[categories]")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _load_state(path: Path) -> tuple[dict[str, list[str]], str, float]:
+    """Read existing config (or defaults) into (categories, default_bucket, quota)."""
+    cfg = _load_toml(path) or {}
+    raw_cats = cfg.get("categories") if isinstance(cfg.get("categories"), dict) else {}
+    categories: dict[str, list[str]] = {}
+    for bucket, kws in raw_cats.items():
+        if isinstance(kws, list) and all(isinstance(k, str) for k in kws):
+            categories[str(bucket)] = [k for k in kws]
+    default_bucket = str(cfg.get("default_bucket", DEFAULT_FALLBACK_BUCKET))
+    try:
+        quota = float(cfg.get("monthly_quota_usd", DEFAULT_MONTHLY_QUOTA_USD))
+    except (TypeError, ValueError):
+        quota = DEFAULT_MONTHLY_QUOTA_USD
+    return categories, default_bucket, quota
+
+
+def add_category_keywords(
+    bucket: str,
+    keywords: list[str],
+    path: Path | None = None,
+) -> tuple[dict[str, list[str]], list[tuple[str, str]]]:
+    """Add `keywords` to `bucket` in config.toml.
+
+    Returns `(updated_categories, moved)` where `moved` lists any
+    `(keyword, prev_bucket)` keywords lifted from an existing bucket. Keywords
+    are stored lowercased to match the load path's case-insensitive matching.
+    """
+    if path is None:
+        path = CONFIG_PATH
+    bucket = bucket.strip()
+    if not bucket:
+        raise ValueError("bucket name cannot be empty")
+    cleaned: list[str] = []
+    for kw in keywords:
+        kw = kw.strip().lower()
+        if kw and kw not in cleaned:
+            cleaned.append(kw)
+    if not cleaned:
+        raise ValueError("at least one non-empty keyword required")
+
+    categories, default_bucket, quota = _load_state(path)
+    moved: list[tuple[str, str]] = []
+    for kw in cleaned:
+        for b, kws in list(categories.items()):
+            if b != bucket and kw in kws:
+                kws.remove(kw)
+                moved.append((kw, b))
+                if not kws:
+                    del categories[b]
+    target = categories.setdefault(bucket, [])
+    for kw in cleaned:
+        if kw not in target:
+            target.append(kw)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        _render_config(categories, default_bucket, quota),
+        encoding="utf-8",
+    )
+    return categories, moved
+
+
+def remove_category_keywords(
+    bucket: str,
+    keywords: list[str],
+    path: Path | None = None,
+) -> tuple[dict[str, list[str]], list[str]]:
+    """Remove `keywords` from `bucket`. Returns `(updated_categories, missing)`
+    where `missing` lists keywords that were not present (callers can warn).
+    Bucket is dropped if it becomes empty.
+    """
+    if path is None:
+        path = CONFIG_PATH
+    bucket = bucket.strip()
+    cleaned = [k.strip().lower() for k in keywords if k.strip()]
+    if not cleaned:
+        raise ValueError("at least one non-empty keyword required")
+
+    categories, default_bucket, quota = _load_state(path)
+    missing: list[str] = []
+    target = categories.get(bucket, [])
+    for kw in cleaned:
+        if kw in target:
+            target.remove(kw)
+        else:
+            missing.append(kw)
+    if bucket in categories and not categories[bucket]:
+        del categories[bucket]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        _render_config(categories, default_bucket, quota),
+        encoding="utf-8",
+    )
+    return categories, missing
+
+
+def list_user_categories(
+    path: Path | None = None,
+) -> dict[str, list[str]]:
+    """Return the current user `[categories]` mapping (empty if none)."""
+    if path is None:
+        path = CONFIG_PATH
+    categories, _, _ = _load_state(path)
+    return categories
 
 
 if __name__ == "__main__":

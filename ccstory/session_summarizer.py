@@ -450,6 +450,71 @@ def get_period_aggregates(period_key: str) -> dict[str, str]:
         conn.close()
 
 
+def invalidate_period_aggregates(period_key: str | None = None) -> int:
+    """Wipe per-period aggregate narratives so they regenerate next run.
+
+    Pass `period_key` to clear one window only; `None` clears all. Returns
+    the number of rows deleted. Callers: rule changes (any bucket assignment
+    shift invalidates the prior aggregate prose), `--refresh`.
+    """
+    conn = _connect()
+    try:
+        if period_key is None:
+            cur = conn.execute("DELETE FROM period_aggregates")
+        else:
+            cur = conn.execute(
+                "DELETE FROM period_aggregates WHERE period_key = ?",
+                (period_key,),
+            )
+        deleted = cur.rowcount or 0
+        conn.commit()
+        return deleted
+    finally:
+        conn.close()
+
+
+def invalidate_content_buckets(session_ids: list[str] | None = None) -> int:
+    """Wipe content-classification cache so sessions get re-classified.
+
+    Pass a session_id list to scope the invalidation; `None` clears all rows.
+    Returns the number of rows deleted. Callers: `--refresh` (scoped to the
+    sessions in the current window) and `--refresh-all`.
+    """
+    conn = _connect()
+    try:
+        if session_ids is None:
+            cur = conn.execute("DELETE FROM session_content_buckets")
+        elif not session_ids:
+            return 0
+        else:
+            placeholders = ",".join("?" for _ in session_ids)
+            cur = conn.execute(
+                f"DELETE FROM session_content_buckets "
+                f"WHERE session_id IN ({placeholders})",
+                session_ids,
+            )
+        deleted = cur.rowcount or 0
+        conn.commit()
+        return deleted
+    finally:
+        conn.close()
+
+
+def invalidate_comparison_narratives() -> int:
+    """Wipe all cross-period comparison narratives. Any cached prose was
+    written against the old bucket assignment, so a rule change makes it
+    stale even if the underlying session ids didn't move.
+    """
+    conn = _connect()
+    try:
+        cur = conn.execute("DELETE FROM comparison_narratives")
+        deleted = cur.rowcount or 0
+        conn.commit()
+        return deleted
+    finally:
+        conn.close()
+
+
 _COMPARISON_PROMPT = """Below are session one-line summaries from two consecutive time windows for one user's Claude Code work, plus the per-bucket time deltas.
 
 Write ONE OR TWO sentences (max 50 words, English) describing how the user's focus SHIFTED between the previous window and the current one. Focus on:
