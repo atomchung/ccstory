@@ -18,17 +18,52 @@ import sqlite3
 import subprocess
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 LOG = logging.getLogger("ccstory.summarizer")
 DB_PATH = Path.home() / ".ccstory" / "cache.db"
 RECAP_DB_PATH = Path.home() / ".claude" / "session_summaries.db"
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
+CLAUDE_MD_PATH = Path.home() / ".claude" / "CLAUDE.md"
 CLAUDE_BIN = "claude"
 
 N_USER_HEAD = 3
 N_USER_TAIL = 2
 N_ASSISTANT_TAIL = 1
+
+
+_CLAUDE_MD_MAX_CHARS = 500
+
+
+@lru_cache(maxsize=1)
+def language_directive(path: Path | None = None) -> str:
+    """Build the prompt block that tells `claude -p` what language to use.
+
+    We don't parse CLAUDE.md ourselves — we just paste its first ~500 chars
+    into the prompt and let the model honor whatever language directive
+    the user wrote (or default to English when CLAUDE.md is absent).
+
+    Cached because every prompt assembly calls it; flushed only on
+    process restart, which matches CLAUDE.md's edit cadence.
+    """
+    target = path or CLAUDE_MD_PATH
+    try:
+        text = target.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        text = ""
+    if not text:
+        return "Respond in English."
+    excerpt = text[:_CLAUDE_MD_MAX_CHARS]
+    return (
+        "The user's ~/.claude/CLAUDE.md begins below between the markers. "
+        "If it specifies a response language, respect it; otherwise default "
+        "to English. Keep the same length / format limits regardless of "
+        "language.\n"
+        "--- CLAUDE.md ---\n"
+        f"{excerpt}\n"
+        "--- end ---"
+    )
 
 
 @dataclass
@@ -249,11 +284,13 @@ def _extract_excerpt(jsonl_path: Path) -> tuple[str, str]:
     return project, "\n\n".join(parts)
 
 
-_PROMPT_TEMPLATE = """Below is an excerpt of a Claude Code conversation (first/last user + assistant messages).
+_PROMPT_TEMPLATE = """{language_directive}
 
-Write ONE sentence (max 18 words, English) summarizing what this session ACTUALLY DID — focus on outcomes, not process.
+Below is an excerpt of a Claude Code conversation (first/last user + assistant messages).
 
-Good examples:
+Write ONE sentence (max 18 words) summarizing what this session ACTUALLY DID — focus on outcomes, not process.
+
+Good examples (English style; mirror this in whichever language you respond in):
 - Refactored auth middleware to extract token validation into shared util
 - Investigated TLS handshake failure on staging, traced to expired intermediate cert
 - Drafted PR description for the v2 migration epic
@@ -282,7 +319,9 @@ def summarize_via_claude_p(excerpt: str, timeout: int = 60) -> str | None:
         return None
     if not claude_bin_available():
         return None
-    prompt = _PROMPT_TEMPLATE.format(excerpt=excerpt[:8000])
+    prompt = _PROMPT_TEMPLATE.format(
+        excerpt=excerpt[:8000], language_directive=language_directive(),
+    )
     try:
         r = subprocess.run(
             [
@@ -346,66 +385,89 @@ def summarize_session(
     return get(session_id)
 
 
-_AGG_PROMPT = """Below are the one-line summaries of every session in a single category for one time window. Each line is one session.
+_OVERALL_PROMPT = """{language_directive}
 
-Write 2-3 sentences (max 60 words, English) synthesizing what the user was actually working on in this category for the period. Focus on:
-- The main thread (most recurring theme)
-- Any key decisions / outcomes
-- If there are clear sub-themes, group them
+Below is a breakdown of every Claude Code session in a single time window, grouped by category. Each line under a category is one session's one-line summary.
 
-Good example:
-- Investment work focused on AI semiconductor chain deep-dives: Cambricon SELL initiation at RMB 650, AVGO Q1 wiki refresh against SemiAnalysis consensus, plus a Q1 thesis update across NVDA/AMD/MU/TSLA/ORCL via parallel agents. Also established a weekly portfolio-watch routine.
+Write EXACTLY 3 sentences (max 90 words total) synthesizing what the user did across the WHOLE period. Cover:
+1. The dominant focus (the biggest category and its main thread)
+2. The other meaningful threads, grouped briefly
+3. Any cross-cutting decision, outcome, or shift worth flagging
 
-Avoid:
-- Repeating individual session contents (synthesize, don't list)
-- Bullet points (write prose)
-- Going over 3 sentences / 200 chars
+Style:
+- Prose only — no bullets, no headers, no lists.
+- Concrete nouns (tickers, file names, tools) beat generic verbs.
+- Synthesize across categories; do NOT list every session.
 
-Category: {category}
-Sessions in period: {count}
+Period: {period}
+Categories (hours): {category_summary}
 
-Session summaries:
-{summaries}
+Session breakdown by category:
+{breakdown}
 
-Output the synthesized prose only — no quotes, no prefix, no fences."""
+Output the 3-sentence prose only — no quotes, no prefix, no fences."""
+
+OVERALL_KEY = "__overall__"
 
 
-def aggregate_for_period(
+def synthesize_overall_for_period(
     period_key: str,
-    category: str,
-    session_ids: list[str],
-    summaries: list[str],
+    category_hours: list[tuple[str, float]],
+    sessions_by_category: dict[str, list[tuple[str, str]]],
     force_refresh: bool = False,
     timeout: int = 90,
 ) -> str | None:
-    """Synthesize a 2-3 sentence narrative for one category in a period.
+    """Synthesize ONE 3-sentence overall narrative for the whole period.
 
-    Cache key: (period_key, category). If the set of session ids differs
-    from the cached entry, regenerate (sessions added/removed since last run).
-    Returns None on LLM failure.
+    `category_hours` is `[(category, hours), ...]` already sorted from
+    largest to smallest. `sessions_by_category` is `{category:
+    [(session_id, summary), ...]}` — only sessions with a real summary
+    should be passed in.
+
+    Cache key: (period_key, "__overall__"). Reuses the period_aggregates
+    table; invalidates when the union of session ids differs.
+    Returns None on LLM failure or empty input.
     """
+    all_ids: list[str] = sorted(
+        sid for items in sessions_by_category.values() for sid, _ in items
+    )
+    if not all_ids:
+        return None
+
     conn = _connect()
     try:
         cur = conn.execute(
             "SELECT summary, session_ids FROM period_aggregates "
             "WHERE period_key = ? AND category = ?",
-            (period_key, category),
+            (period_key, OVERALL_KEY),
         ).fetchone()
-        cached_ids = set(cur[1].split(",")) if cur else set()
-        new_ids = set(session_ids)
-        if cur and not force_refresh and cached_ids == new_ids:
+        cached_ids = cur[1].split(",") if cur else []
+        if cur and not force_refresh and cached_ids == all_ids:
             return cur[0]
     finally:
         conn.close()
 
-    if not summaries:
-        return None
-    bullets = "\n".join(f"- {s}" for s in summaries)
-    prompt = _AGG_PROMPT.format(
-        category=category, count=len(summaries), summaries=bullets[:6000],
-    )
     if not claude_bin_available():
         return None
+
+    cat_hours_line = ", ".join(
+        f"{cat} {hrs:.1f}h" for cat, hrs in category_hours if hrs > 0
+    ) or "(none)"
+    breakdown_blocks: list[str] = []
+    for cat, _ in category_hours:
+        items = sessions_by_category.get(cat) or []
+        if not items:
+            continue
+        bullets = "\n".join(f"  - {summary}" for _, summary in items)
+        breakdown_blocks.append(f"{cat}:\n{bullets}")
+    breakdown = "\n\n".join(breakdown_blocks)[:6000]
+    prompt = _OVERALL_PROMPT.format(
+        language_directive=language_directive(),
+        period=period_key,
+        category_summary=cat_hours_line,
+        breakdown=breakdown,
+    )
+
     try:
         r = subprocess.run(
             [CLAUDE_BIN, "-p", "--output-format", "text",
@@ -413,13 +475,13 @@ def aggregate_for_period(
             capture_output=True, text=True, timeout=timeout, check=False,
         )
         if r.returncode != 0:
-            LOG.warning("aggregate claude -p failed: %s", r.stderr.strip()[:200])
+            LOG.warning("overall claude -p failed: %s", r.stderr.strip()[:200])
             return None
         narrative = r.stdout.strip().strip('"').strip("'")
         if len(narrative) < 10:
             return None
     except (subprocess.SubprocessError, OSError) as e:
-        LOG.warning("aggregate errored: %s", e)
+        LOG.warning("overall errored: %s", e)
         return None
 
     conn = _connect()
@@ -428,8 +490,8 @@ def aggregate_for_period(
             """INSERT OR REPLACE INTO period_aggregates
                (period_key, category, summary, session_ids, created_at)
                VALUES (?, ?, ?, ?, ?)""",
-            (period_key, category, narrative,
-             ",".join(sorted(session_ids)), time.time()),
+            (period_key, OVERALL_KEY, narrative,
+             ",".join(all_ids), time.time()),
         )
         conn.commit()
     finally:
@@ -437,15 +499,16 @@ def aggregate_for_period(
     return narrative
 
 
-def get_period_aggregates(period_key: str) -> dict[str, str]:
-    """Return {category: summary} for a period, only ones already in cache."""
+def get_overall_narrative(period_key: str) -> str | None:
+    """Return cached overall narrative for a period, if any."""
     conn = _connect()
     try:
-        rows = conn.execute(
-            "SELECT category, summary FROM period_aggregates WHERE period_key = ?",
-            (period_key,),
-        ).fetchall()
-        return {r[0]: r[1] for r in rows}
+        row = conn.execute(
+            "SELECT summary FROM period_aggregates "
+            "WHERE period_key = ? AND category = ?",
+            (period_key, OVERALL_KEY),
+        ).fetchone()
+        return row[0] if row else None
     finally:
         conn.close()
 
@@ -515,14 +578,16 @@ def invalidate_comparison_narratives() -> int:
         conn.close()
 
 
-_COMPARISON_PROMPT = """Below are session one-line summaries from two consecutive time windows for one user's Claude Code work, plus the per-bucket time deltas.
+_COMPARISON_PROMPT = """{language_directive}
 
-Write ONE OR TWO sentences (max 50 words, English) describing how the user's focus SHIFTED between the previous window and the current one. Focus on:
+Below are session one-line summaries from two consecutive time windows for one user's Claude Code work, plus the per-bucket time deltas.
+
+Write ONE OR TWO sentences (max 50 words) describing how the user's focus SHIFTED between the previous window and the current one. Focus on:
 - What dominated each window
 - The biggest shift (which bucket grew or shrank most, and what replaced it)
 - Concrete content where possible (don't just say "more coding"; say what kind of coding)
 
-Good example:
+Good example (English style; mirror this in whichever language you respond in):
 - Investment work dropped 40% as Cambricon coverage wrapped up; ccstory plugin packaging took its place, explaining the coding swing.
 
 Avoid:
@@ -625,6 +690,7 @@ def synthesize_comparison(
         return "\n".join(lines)
 
     prompt = _COMPARISON_PROMPT.format(
+        language_directive=language_directive(),
         previous_label=previous_key,
         current_label=current_key,
         deltas=_fmt_deltas(deltas),

@@ -16,11 +16,15 @@ from ccstory import session_summarizer as ss
 from ccstory.session_summarizer import (
     _extract_excerpt,
     _fallback_narrative,
+    OVERALL_KEY,
     get,
     get_many,
+    get_overall_narrative,
     import_from_claude_recap,
+    language_directive,
     missing_ids,
     summarize_session,
+    synthesize_overall_for_period,
     upsert,
 )
 
@@ -172,6 +176,121 @@ class TestSummarizeSession:
         result = summarize_session("sess-empty", path, use_llm=False)
         assert result is not None
         assert result.source == "skipped"
+
+
+class TestLanguageDirective:
+    def test_missing_claude_md_falls_back_to_english(self, tmp_home: Path):
+        # No CLAUDE.md written → expect the English fallback line.
+        ss.language_directive.cache_clear()
+        assert language_directive() == "Respond in English."
+
+    def test_pastes_claude_md_excerpt(self, tmp_home: Path):
+        md_path = tmp_home / ".claude" / "CLAUDE.md"
+        md_path.parent.mkdir(parents=True, exist_ok=True)
+        md_path.write_text(
+            "# 個人偏好\nAlways respond in Traditional Chinese.\n",
+            encoding="utf-8",
+        )
+        ss.language_directive.cache_clear()
+        directive = language_directive()
+        assert "--- CLAUDE.md ---" in directive
+        assert "Traditional Chinese" in directive
+        assert "個人偏好" in directive
+
+    def test_truncates_long_claude_md(self, tmp_home: Path):
+        md_path = tmp_home / ".claude" / "CLAUDE.md"
+        md_path.parent.mkdir(parents=True, exist_ok=True)
+        md_path.write_text("x" * 5000, encoding="utf-8")
+        ss.language_directive.cache_clear()
+        directive = language_directive()
+        # Body between the markers should be capped at _CLAUDE_MD_MAX_CHARS.
+        body = directive.split("--- CLAUDE.md ---\n", 1)[1].split("\n--- end ---", 1)[0]
+        assert len(body) <= ss._CLAUDE_MD_MAX_CHARS
+
+
+class TestSynthesizeOverallForPeriod:
+    def test_empty_input_returns_none(self, tmp_home: Path):
+        out = synthesize_overall_for_period(
+            period_key="2026-05",
+            category_hours=[],
+            sessions_by_category={},
+        )
+        assert out is None
+
+    def test_cache_hit_skips_claude_call(self, tmp_home: Path, monkeypatch):
+        # Pre-seed the period_aggregates table with an overall narrative.
+        from ccstory.session_summarizer import _connect
+        import time as _time
+        conn = _connect()
+        try:
+            conn.execute(
+                """INSERT INTO period_aggregates
+                   (period_key, category, summary, session_ids, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                ("2026-05", OVERALL_KEY, "cached prose", "sess-a,sess-b", _time.time()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # If claude_bin_available is reached we'd return None — assert we don't
+        # get there. Patch to raise so a cache miss would surface as an error.
+        def boom():
+            raise AssertionError("claude_bin_available should not be called on cache hit")
+        monkeypatch.setattr(ss, "claude_bin_available", boom)
+
+        out = synthesize_overall_for_period(
+            period_key="2026-05",
+            category_hours=[("coding", 2.0), ("ops", 1.0)],
+            sessions_by_category={
+                "coding": [("sess-a", "did A")],
+                "ops": [("sess-b", "did B")],
+            },
+        )
+        assert out == "cached prose"
+
+    def test_cache_invalidates_when_session_ids_change(self, tmp_home: Path, monkeypatch):
+        from ccstory.session_summarizer import _connect
+        import time as _time
+        conn = _connect()
+        try:
+            conn.execute(
+                """INSERT INTO period_aggregates
+                   (period_key, category, summary, session_ids, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                ("2026-05", OVERALL_KEY, "stale prose", "sess-a", _time.time()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Different session set → cache should miss and try to call claude.
+        # We stub claude as unavailable so we get None (instead of running it),
+        # which proves we *attempted* a refresh.
+        monkeypatch.setattr(ss, "claude_bin_available", lambda: False)
+        out = synthesize_overall_for_period(
+            period_key="2026-05",
+            category_hours=[("coding", 2.0)],
+            sessions_by_category={"coding": [("sess-a", "A"), ("sess-c", "C")]},
+        )
+        assert out is None
+
+    def test_get_overall_narrative_roundtrip(self, tmp_home: Path):
+        from ccstory.session_summarizer import _connect
+        import time as _time
+        assert get_overall_narrative("2026-05") is None
+        conn = _connect()
+        try:
+            conn.execute(
+                """INSERT INTO period_aggregates
+                   (period_key, category, summary, session_ids, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                ("2026-05", OVERALL_KEY, "overall text", "s1", _time.time()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        assert get_overall_narrative("2026-05") == "overall text"
 
 
 class TestImportFromClaudeRecap:
