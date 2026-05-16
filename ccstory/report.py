@@ -309,6 +309,8 @@ def render_comparison_block(cmp: PeriodComparison) -> list:
     parts.append(Text(""))
     parts.append(Text(f"vs previous window  ({cmp.previous_label})",
                       style="bold underline"))
+    if cmp.narrative:
+        parts.append(Text(cmp.narrative, style="italic"))
     table = Table.grid(padding=(0, 1))
     table.add_column(width=14)
     table.add_column(justify="right", width=8, style="bright_white")
@@ -347,6 +349,12 @@ def render_comparison_markdown(cmp: PeriodComparison) -> str:
     lines.append("")
     lines.append(f"_Compared to_ `{cmp.previous_label}`")
     lines.append("")
+    if cmp.narrative:
+        # Multiline narratives must keep the `> ` prefix on every line, or
+        # only the first line renders as a blockquote.
+        for nl in cmp.narrative.splitlines() or [""]:
+            lines.append(f"> {nl}" if nl else ">")
+        lines.append("")
     lines.append("| Metric | Current | Previous | Change |")
     lines.append("|---|---:|---:|---:|")
     def fmt_pct(c: float, p: float) -> str:

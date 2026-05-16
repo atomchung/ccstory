@@ -57,6 +57,7 @@ from .session_summarizer import (
     import_from_claude_recap,
     missing_ids,
     summarize_session,
+    synthesize_comparison,
     upsert,
 )
 from .time_tracking import CLAUDE_PROJECTS, collect_sessions, rollup_by_category
@@ -411,6 +412,10 @@ def main(argv: list[str] | None = None) -> int:
                              "(one claude -p call per non-empty bucket)")
     parser.add_argument("--no-compare", action="store_true",
                         help="Skip the vs-previous-window comparison block")
+    parser.add_argument("--no-compare-narrative", action="store_true",
+                        help="Skip the 1-2 sentence claude -p synthesis "
+                             "under the comparison table (numeric deltas "
+                             "still render)")
     parser.add_argument("--classify", choices=["folder", "content", "hybrid"],
                         default="hybrid",
                         help="How to bucket sessions. `folder` uses only "
@@ -528,6 +533,34 @@ def main(argv: list[str] | None = None) -> int:
                 since=since,
                 until=until,
             )
+        if (
+            comparison
+            and not args.no_compare_narrative
+            and not args.no_summary
+            and summaries
+        ):
+            prev_summaries = get_many(comparison.previous_session_ids)
+            with console.status(
+                "[dim]Synthesizing week-over-week narrative (claude -p)…[/dim]"
+            ):
+                comparison.narrative = synthesize_comparison(
+                    current_key=label,
+                    previous_key=comparison.previous_label,
+                    current_summaries=[
+                        (s.session_id, summaries[s.session_id].summary)
+                        for s in sessions
+                        if s.session_id in summaries
+                    ],
+                    previous_summaries=[
+                        (sid, prev_summaries[sid].summary)
+                        for sid in comparison.previous_session_ids
+                        if sid in prev_summaries
+                    ],
+                    deltas=[
+                        (d.category, d.current_min, d.previous_min)
+                        for d in comparison.deltas
+                    ],
+                )
 
     args.reports_dir.mkdir(parents=True, exist_ok=True)
     out_path = args.reports_dir / f"recap-{label}.md"
