@@ -14,11 +14,14 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from .categorizer import color_for, load_settings
+from .categorizer import color_for, load_settings, normalize_project_name
 from .session_summarizer import SessionSummary
 from .time_tracking import CategoryRollup, SessionStat
 from .token_usage import UsageReport, fmt_tokens
 from .trends import PeriodComparison, PeriodPoint, sparkline, trend_by_category
+
+# Supported markdown flavors for render_report().
+VALID_FLAVORS = ("plain", "obsidian")
 
 
 def _format_date_range(since: datetime, until: datetime) -> str:
@@ -46,6 +49,34 @@ def _top_session_text(rollup: CategoryRollup, summaries: dict, max_chars: int = 
     return text
 
 
+def _obsidian_frontmatter(
+    since: datetime,
+    until: datetime,
+    rollups: list[CategoryRollup],
+    usage: UsageReport,
+) -> list[str]:
+    """YAML front-matter for the Obsidian flavor.
+
+    Front-matter properties are queryable in Obsidian's Dataview / Bases —
+    e.g. `WHERE top_focus = "coding"` to pull recap notes by bucket.
+    """
+    total_min = sum(r.active_min for r in rollups)
+    total_h = total_min / 60
+    top_focus = rollups[0].category if rollups else ""
+    buckets = [r.category for r in rollups]
+    lines = ["---"]
+    lines.append(f"date_start: {since.date().isoformat()}")
+    lines.append(f"date_end: {until.date().isoformat()}")
+    lines.append(f"active_hours: {total_h:.1f}")
+    if top_focus:
+        lines.append(f"top_focus: {top_focus}")
+    lines.append("buckets: [" + ", ".join(buckets) + "]")
+    lines.append(f"cost_usd: {usage.total_cost_usd:.2f}")
+    lines.append(f"output_tokens: {usage.total_output}")
+    lines.append("---")
+    return lines
+
+
 def render_report(
     label: str,
     since: datetime,
@@ -56,14 +87,28 @@ def render_report(
     summaries: dict[str, SessionSummary],
     period_aggregates: dict[str, str] | None = None,
     comparison: PeriodComparison | None = None,
+    flavor: str = "plain",
 ) -> str:
-    """Produce the full markdown report."""
+    """Produce the full markdown report.
+
+    `flavor`:
+      - "plain" (default): vanilla markdown, works in any viewer
+      - "obsidian": adds YAML front-matter + [[wikilinks]] around project
+        names in per-session lines, so notes drop into a PKM vault with
+        live cross-linking on day one
+    """
+    if flavor not in VALID_FLAVORS:
+        raise ValueError(f"unsupported flavor: {flavor!r} (use one of {VALID_FLAVORS})")
     period_aggregates = period_aggregates or {}
     total_min = sum(r.active_min for r in rollups)
     total_h = total_min / 60
     total_msgs = sum(r.messages for r in rollups)
 
     lines: list[str] = []
+    if flavor == "obsidian":
+        lines.extend(_obsidian_frontmatter(since, until, rollups, usage))
+        lines.append("")
+
     date_range = _format_date_range(since, until)
     lines.append(f"# Claude Code Recap · {date_range}")
     lines.append("")
@@ -117,9 +162,16 @@ def render_report(
             text = summ.summary if summ else s.first_user_text[:100]
             time_str = s.start.strftime("%Y-%m-%d %H:%M")
             mins = int(s.active_sec // 60)
-            lines.append(
-                f"- **{time_str}** · {mins}m · {s.msg_count} msg — {text}"
-            )
+            if flavor == "obsidian":
+                leaf = normalize_project_name(s.project) or s.project
+                lines.append(
+                    f"- **{time_str}** · {mins}m · {s.msg_count} msg · "
+                    f"[[{leaf}]] — {text}"
+                )
+            else:
+                lines.append(
+                    f"- **{time_str}** · {mins}m · {s.msg_count} msg — {text}"
+                )
         lines.append("")
 
     # Token usage
