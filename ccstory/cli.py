@@ -9,7 +9,8 @@
 Flags:
     --llm-narrative    Polish per-session narratives via `claude -p`
                        (slow, opt-in; shows ETA before batch)
-    --no-summary       Skip per-session narrative entirely (fastest)
+    --minimal          Skip per-session narrative entirely (fastest)
+                       (deprecated alias: --no-summary)
     --no-aggregate     Skip per-category aggregate narrative
     --reports-dir PATH Override default ~/.ccstory/reports/
 """
@@ -328,8 +329,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("window", nargs="?", default="month",
                         help="week | month | all | YYYY-MM (default: month)")
+    parser.add_argument("--minimal", action="store_true",
+                        help="Skip per-session narrative entirely — numbers "
+                             "only, no per-session lines (fastest path)")
     parser.add_argument("--no-summary", action="store_true",
-                        help="Skip per-session narrative entirely (fastest)")
+                        help=argparse.SUPPRESS)  # deprecated alias for --minimal
     parser.add_argument("--llm-narrative", action="store_true",
                         help="Polish per-session narratives via `claude -p` "
                              "(slow ~40s/session cold start; shows ETA "
@@ -346,6 +350,18 @@ def main(argv: list[str] | None = None) -> int:
                         version=f"ccstory {__version__}")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(raw)
+
+    # Deprecation: --no-summary is the old name for --minimal. The flag's
+    # documented behavior ("skip claude -p") never matched the code path
+    # (which skips the entire narrative pipeline), so --minimal is the
+    # honest name. Keep the old flag for one minor release as an alias.
+    if args.no_summary and not args.minimal:
+        print(
+            "ccstory: warning: --no-summary is deprecated and will be removed "
+            "in a future release. Use --minimal instead.",
+            file=sys.stderr,
+        )
+        args.minimal = True
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.WARNING,
@@ -382,7 +398,7 @@ def main(argv: list[str] | None = None) -> int:
 
     summaries: dict = {}
     period_aggregates: dict[str, str] = {}
-    if not args.no_summary:
+    if not args.minimal:
         imported = import_from_claude_recap()
         if imported:
             console.print(
