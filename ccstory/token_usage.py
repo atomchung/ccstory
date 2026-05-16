@@ -24,21 +24,111 @@ LOG = logging.getLogger("ccstory.token_usage")
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
 
-# Anthropic API list prices, USD per 1M tokens (as of 2026-01).
+# Anthropic API list prices, USD per 1M tokens.
 # inp = fresh input, out = output, cw = cache creation (write), cr = cache read.
-_PRICES = {
+PRICES_SNAPSHOT_DATE = "2026-01"
+
+DEFAULT_PRICES: dict[str, dict[str, float]] = {
     "opus":   dict(inp=15.00, out=75.00, cw=18.75, cr=1.50),
     "sonnet": dict(inp=3.00,  out=15.00, cw=3.75,  cr=0.30),
     "haiku":  dict(inp=0.80,  out=4.00,  cw=1.00,  cr=0.08),
 }
 
+# Mutable active price table — `apply_prices()` swaps it. Defaults to
+# DEFAULT_PRICES until the cli loads a user override from config.toml.
+# Tests can monkeypatch this attribute directly to isolate behavior.
+_active_prices: dict[str, dict[str, float]] = {k: dict(v) for k, v in DEFAULT_PRICES.items()}
+_active_snapshot_date: str = PRICES_SNAPSHOT_DATE
+
 
 def _price_for(model: str) -> dict | None:
     m = (model or "").lower()
-    for key, p in _PRICES.items():
+    for key, p in _active_prices.items():
         if key in m:
             return p
     return None
+
+
+def get_snapshot_date() -> str:
+    """Date the active price table was captured. Used for report disclosure."""
+    return _active_snapshot_date
+
+
+# Map user-facing config keys to the internal short keys used by _PRICES.
+_CONFIG_KEY_MAP = {
+    "input": "inp",
+    "output": "out",
+    "cache_write": "cw",
+    "cache_read": "cr",
+}
+
+
+def load_prices_config(config_path: Path) -> tuple[dict[str, dict[str, float]], str]:
+    """Read `[prices]` table from config.toml; merge with defaults.
+
+    Returns `(prices_dict, snapshot_date)`. Returns defaults if file or
+    `[prices]` block is absent or malformed.
+
+    Expected config shape:
+
+        [prices]
+        snapshot_date = "2026-03"   # optional; appears in report footer
+
+        [prices.opus]
+        input = 15.0
+        output = 75.0
+        cache_write = 18.75
+        cache_read = 1.5
+    """
+    from .categorizer import _load_toml  # categorizer doesn't import from us
+    cfg = _load_toml(config_path) or {}
+    block = cfg.get("prices")
+    if not isinstance(block, dict):
+        return {k: dict(v) for k, v in DEFAULT_PRICES.items()}, PRICES_SNAPSHOT_DATE
+
+    snapshot = block.get("snapshot_date", PRICES_SNAPSHOT_DATE)
+    if not isinstance(snapshot, str):
+        snapshot = PRICES_SNAPSHOT_DATE
+
+    merged: dict[str, dict[str, float]] = {
+        k: dict(v) for k, v in DEFAULT_PRICES.items()
+    }
+    for model_key, override in block.items():
+        if model_key == "snapshot_date":
+            continue
+        if not isinstance(override, dict):
+            LOG.warning("ignoring malformed [prices.%s] (must be a table)", model_key)
+            continue
+        target = merged.setdefault(model_key, {})
+        for cfg_key, internal_key in _CONFIG_KEY_MAP.items():
+            if cfg_key in override:
+                try:
+                    target[internal_key] = float(override[cfg_key])
+                except (TypeError, ValueError):
+                    LOG.warning(
+                        "ignoring non-numeric [prices.%s].%s", model_key, cfg_key,
+                    )
+        missing = [k for k in ("inp", "out", "cw", "cr") if k not in target]
+        if missing:
+            for k in missing:
+                target[k] = 0.0
+            LOG.warning(
+                "[prices.%s] missing %s; treating as $0.0/M",
+                model_key, ", ".join(missing),
+            )
+    return merged, snapshot
+
+
+def apply_prices(
+    prices: dict[str, dict[str, float]],
+    snapshot_date: str | None = None,
+) -> None:
+    """Replace the active price table. Called by cli on startup."""
+    global _active_snapshot_date
+    _active_prices.clear()
+    _active_prices.update({k: dict(v) for k, v in prices.items()})
+    if snapshot_date:
+        _active_snapshot_date = snapshot_date
 
 
 @dataclass
@@ -131,12 +221,21 @@ class UsageReport:
 
 
 def collect_usage(since: datetime, until: datetime | None = None) -> UsageReport:
-    """Scan all jsonl files and aggregate token usage in [since, until]."""
+    """Scan all jsonl files and aggregate token usage in [since, until].
+
+    Both bounds are normalized to UTC for comparison against the tz-aware
+    UTC timestamps in jsonl. Naive inputs are treated as UTC (not system
+    local) so test behavior is deterministic across hosts.
+    """
     if since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    else:
         since = since.astimezone(timezone.utc)
     if until is None:
         until = datetime.now(timezone.utc)
     elif until.tzinfo is None:
+        until = until.replace(tzinfo=timezone.utc)
+    else:
         until = until.astimezone(timezone.utc)
 
     by_model: dict[str, ModelUsage] = {}

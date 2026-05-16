@@ -16,7 +16,7 @@ import json
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .categorizer import classify
@@ -61,9 +61,12 @@ def _parse_ts(raw: str | None) -> datetime | None:
     if not raw:
         return None
     try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts
 
 
 def _extract_first_user_text(content) -> str:
@@ -155,10 +158,20 @@ def collect_sessions(
     until: datetime | None = None,
     engaged_only: bool = True,
 ) -> list[SessionStat]:
-    """All sessions overlapping [since, until). until=None means now."""
+    """All sessions overlapping [since, until). until=None means now.
+
+    `since` and `until` may be tz-aware or naive. Naive values are treated
+    as UTC so the comparison against tz-aware jsonl timestamps remains
+    well-defined. Callers that care about local-midnight boundaries (e.g.
+    cli._parse_arg) should pass tz-aware datetimes.
+    """
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    if until is not None and until.tzinfo is None:
+        until = until.replace(tzinfo=timezone.utc)
+
     stats: list[SessionStat] = []
     since_ts = since.timestamp()
-    until_naive = until.replace(tzinfo=None) if until else None
 
     for path_str in glob.glob(str(CLAUDE_PROJECTS / "**" / "*.jsonl"), recursive=True):
         path = Path(path_str)
@@ -174,9 +187,9 @@ def collect_sessions(
         s = parse_session(path)
         if not s:
             continue
-        if s.end.replace(tzinfo=None) < since.replace(tzinfo=None):
+        if s.end < since:
             continue
-        if until_naive is not None and s.start.replace(tzinfo=None) >= until_naive:
+        if until is not None and s.start >= until:
             continue
         if engaged_only and not s.engaged:
             continue

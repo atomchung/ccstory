@@ -11,7 +11,7 @@ The only thing that benefits from caching is per-session LLM narratives
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from .time_tracking import CategoryRollup, SessionStat, rollup_by_category
 from .token_usage import UsageReport, collect_usage
@@ -163,7 +163,11 @@ def _week_windows(now: datetime, count: int) -> list[tuple[str, datetime, dateti
 
 
 def _month_windows(now: datetime, count: int) -> list[tuple[str, datetime, datetime]]:
-    """N calendar months ending at the current month. Most recent last."""
+    """N calendar months ending at the current month. Most recent last.
+
+    Month boundaries inherit `now.tzinfo` so a tz-aware `now` produces
+    tz-aware window starts/ends. Naive `now` produces naive windows.
+    """
     out = []
     # Walk back N months
     year, month = now.year, now.month
@@ -176,8 +180,8 @@ def _month_windows(now: datetime, count: int) -> list[tuple[str, datetime, datet
             month -= 1
     months.reverse()
     for y, m in months:
-        start = datetime(y, m, 1)
-        nxt = datetime(y + (m // 12), (m % 12) + 1, 1)
+        start = datetime(y, m, 1, tzinfo=now.tzinfo)
+        nxt = datetime(y + (m // 12), (m % 12) + 1, 1, tzinfo=now.tzinfo)
         end = min(now, nxt)
         out.append((f"{y}-{m:02d}", start, end))
     return out
@@ -195,7 +199,9 @@ def collect_trend(
     """
     from .time_tracking import collect_sessions
 
-    now = now or datetime.now()
+    now = now or datetime.now().astimezone()  # tz-aware local
+    if now.tzinfo is None:
+        now = now.astimezone()  # naive caller input → local-tz aware
     if period == "week":
         windows = _week_windows(now, count)
     elif period == "month":
@@ -210,8 +216,7 @@ def collect_trend(
     for label, start, end in windows:
         in_window = [
             s for s in all_sessions
-            if s.start.replace(tzinfo=None) >= start.replace(tzinfo=None)
-            and s.start.replace(tzinfo=None) < end.replace(tzinfo=None)
+            if s.start >= start and s.start < end
         ]
         rollups = rollup_by_category(in_window)
         usage = collect_usage(start, end)
