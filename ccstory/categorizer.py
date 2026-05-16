@@ -212,6 +212,45 @@ def classify(
     return fallback
 
 
+def user_rule_match(
+    project_dir: str,
+    config_path: Path = CONFIG_PATH,
+) -> str | None:
+    """If the project leaf matches a rule defined in `~/.ccstory/config.toml`,
+    return that bucket name. Otherwise None.
+
+    Used by hybrid session-level classification (#25) to decide whether the
+    user has expressed an *explicit* opinion about this project. If yes, the
+    folder rule wins; if no, content-derived bucket takes over.
+    """
+    cfg = _load_toml(config_path) or {}
+    cats = cfg.get("categories")
+    if not isinstance(cats, dict):
+        return None
+    user_rules: list[CategoryRule] = []
+    for name, needles in cats.items():
+        if isinstance(needles, list) and all(isinstance(n, str) for n in needles):
+            user_rules.append(
+                CategoryRule(name=str(name), needles=[n.lower() for n in needles])
+            )
+    if not user_rules:
+        return None
+    leaf = normalize_project_name(project_dir)
+    if not leaf:
+        return None
+    tokens = leaf.split("-")
+    token_set = set(tokens)
+    joined = "-".join(tokens)
+    for rule in user_rules:
+        for needle in rule.needles:
+            if "-" in needle:
+                if needle in joined:
+                    return rule.name
+            elif needle in token_set:
+                return rule.name
+    return None
+
+
 def preview_classification(projects: list[str]) -> dict[str, list[tuple[str, str]]]:
     """Return {bucket: [(leaf, raw), ...]} for displaying first-run preview."""
     rules = load_rules()

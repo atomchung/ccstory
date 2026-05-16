@@ -9,7 +9,8 @@
 Flags:
     --llm-narrative    Polish per-session narratives via `claude -p`
                        (slow, opt-in; shows ETA before batch)
-    --no-summary       Skip per-session narrative entirely (fastest)
+    --minimal          Skip per-session narrative entirely (fastest)
+                       (deprecated alias: --no-summary)
     --no-aggregate     Skip per-category aggregate narrative
     --reports-dir PATH Override default ~/.ccstory/reports/
 """
@@ -20,7 +21,7 @@ import argparse
 import logging
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from rich.console import Console
@@ -39,6 +40,7 @@ from .categorizer import (
     ensure_default_config,
     normalize_project_name,
     preview_classification,
+    user_rule_match,
 )
 from .report import (
     print_terminal_card,
@@ -50,6 +52,7 @@ from .session_summarizer import (
     PROJECTS_DIR as SUMMARIZER_PROJECTS_DIR,
     aggregate_for_period,
     claude_bin_available,
+    classify_sessions_by_content,
     get_many,
     import_from_claude_recap,
     missing_ids,
@@ -57,16 +60,28 @@ from .session_summarizer import (
     upsert,
 )
 from .time_tracking import CLAUDE_PROJECTS, collect_sessions, rollup_by_category
-from .token_usage import collect_usage
+from .token_usage import (
+    apply_prices,
+    collect_usage,
+    get_snapshot_date,
+    load_prices_config,
+)
 from .trends import collect_trend, compare_to_previous
 
 LOG = logging.getLogger("ccstory.cli")
 REPORTS_DIR = Path.home() / ".ccstory" / "reports"
+CONFIG_PATH = Path.home() / ".ccstory" / "config.toml"
 
 
 def _parse_arg(raw: str | None) -> tuple[datetime, datetime, str]:
-    """Translate week|month|all|YYYY-MM → (since, until, label)."""
-    now = datetime.now()
+    """Translate week|month|all|YYYY-MM → (since, until, label).
+
+    Returns tz-aware datetimes in the user's local timezone. Month/week
+    boundaries are local-midnight aligned, so "ccstory week" means the past
+    7 days as the user perceives them — not 7 calendar days in UTC.
+    """
+    now = datetime.now().astimezone()  # tz-aware local
+    local_tz = now.tzinfo
     if raw is None or raw == "month":
         since = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         return since, now, since.strftime("%Y-%m")
@@ -75,12 +90,13 @@ def _parse_arg(raw: str | None) -> tuple[datetime, datetime, str]:
         iso = since.isocalendar()
         return since, now, f"{iso[0]}-W{iso[1]:02d}"
     if raw == "all":
-        return datetime(2000, 1, 1), now, "all"
+        return datetime(2000, 1, 1, tzinfo=local_tz), now, "all"
     m = re.match(r"^(\d{4})-(\d{2})$", raw)
     if m:
         year, month = int(m.group(1)), int(m.group(2))
-        since = datetime(year, month, 1)
-        nxt = datetime(year + (month // 12), (month % 12) + 1, 1)
+        since = datetime(year, month, 1, tzinfo=local_tz)
+        nxt = datetime(year + (month // 12), (month % 12) + 1, 1,
+                       tzinfo=local_tz)
         until = min(now, nxt)
         return since, until, raw
     sys.exit(f"unrecognized window: {raw!r} (use week|month|all|YYYY-MM)")
@@ -167,6 +183,55 @@ def _aggregate_with_progress(
                 progress.update(task, description=f"[dim]↳ {r.category}: synthesized[/dim]")
             progress.advance(task)
     return out
+
+
+def _apply_content_classification(
+    sessions: list,
+    summaries: dict,
+    mode: str,
+    console: Console,
+) -> None:
+    """Mutate `sessions[*].category` based on content (#25).
+
+    - mode="content": every session re-bucketed by content
+    - mode="hybrid": only sessions whose folder didn't match a USER rule
+      (i.e. an explicit override in config.toml) get re-bucketed
+    """
+    if mode == "hybrid":
+        eligible = [s for s in sessions if user_rule_match(s.project) is None]
+    else:
+        eligible = list(sessions)
+    if not eligible:
+        return
+
+    items: list[tuple[str, str, str]] = []
+    for s in eligible:
+        summ = summaries.get(s.session_id)
+        if not summ or not summ.summary:
+            continue
+        leaf = normalize_project_name(s.project) or s.project
+        items.append((s.session_id, leaf, summ.summary))
+    if not items:
+        return
+
+    with console.status(
+        f"[dim]Content-classifying {len(items)} session(s) (one batch "
+        f"claude -p call)…[/dim]"
+    ):
+        mapping = classify_sessions_by_content(items)
+    if not mapping:
+        return
+
+    changed = 0
+    for s in eligible:
+        new_bucket = mapping.get(s.session_id)
+        if new_bucket and new_bucket != s.category:
+            s.category = new_bucket
+            changed += 1
+    console.print(
+        f"[green]✓[/green] [dim]content-classified {len(mapping)} session(s), "
+        f"{changed} re-bucketed[/dim]\n"
+    )
 
 
 CLAUDE_P_SEC_PER_SESSION = 40  # rough cold-start average on M1 Pro
@@ -259,6 +324,8 @@ def _run_init(argv: list[str], console: Console) -> int:
 def _run_trend(argv: list[str], console: Console) -> int:
     if not CLAUDE_PROJECTS.exists():
         sys.exit(f"No Claude Code data at {CLAUDE_PROJECTS}.")
+    prices, snapshot = load_prices_config(CONFIG_PATH)
+    apply_prices(prices, snapshot)
     p = argparse.ArgumentParser(
         prog="ccstory trend",
         description="Show per-bucket sparklines over N periods.",
@@ -286,6 +353,7 @@ def _run_trend(argv: list[str], console: Console) -> int:
 
     console.print(render_trend_card(points, period))
     console.print(f"[dim]Full report → {out_path}[/dim]")
+    console.print(f"[dim]Prices as of {get_snapshot_date()}[/dim]")
     return 0
 
 
@@ -328,8 +396,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("window", nargs="?", default="month",
                         help="week | month | all | YYYY-MM (default: month)")
+    parser.add_argument("--minimal", action="store_true",
+                        help="Skip per-session narrative entirely — numbers "
+                             "only, no per-session lines (fastest path)")
     parser.add_argument("--no-summary", action="store_true",
-                        help="Skip per-session narrative entirely (fastest)")
+                        help=argparse.SUPPRESS)  # deprecated alias for --minimal
     parser.add_argument("--llm-narrative", action="store_true",
                         help="Polish per-session narratives via `claude -p` "
                              "(slow ~40s/session cold start; shows ETA "
@@ -340,12 +411,32 @@ def main(argv: list[str] | None = None) -> int:
                              "(one claude -p call per non-empty bucket)")
     parser.add_argument("--no-compare", action="store_true",
                         help="Skip the vs-previous-window comparison block")
+    parser.add_argument("--classify", choices=["folder", "content", "hybrid"],
+                        default="hybrid",
+                        help="How to bucket sessions. `folder` uses only "
+                             "config + folder-name rules. `content` runs a "
+                             "batch claude -p over each session's narrative. "
+                             "`hybrid` (default) keeps the folder bucket when "
+                             "a user rule in config.toml matched, otherwise "
+                             "falls back to content classification.")
     parser.add_argument("--reports-dir", type=Path, default=REPORTS_DIR,
                         help=f"Markdown report output dir (default: {REPORTS_DIR})")
     parser.add_argument("--version", action="version",
                         version=f"ccstory {__version__}")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(raw)
+
+    # Deprecation: --no-summary is the old name for --minimal. The flag's
+    # documented behavior ("skip claude -p") never matched the code path
+    # (which skips the entire narrative pipeline), so --minimal is the
+    # honest name. Keep the old flag for one minor release as an alias.
+    if args.no_summary and not args.minimal:
+        print(
+            "ccstory: warning: --no-summary is deprecated and will be removed "
+            "in a future release. Use --minimal instead.",
+            file=sys.stderr,
+        )
+        args.minimal = True
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.WARNING,
@@ -355,6 +446,10 @@ def main(argv: list[str] | None = None) -> int:
     if not CLAUDE_PROJECTS.exists():
         sys.exit(f"No Claude Code data at {CLAUDE_PROJECTS}. "
                  "Have you used Claude Code yet?")
+
+    # Load user price overrides (config [prices] table). No-op if absent.
+    prices, snapshot = load_prices_config(CONFIG_PATH)
+    apply_prices(prices, snapshot)
 
     _print_first_run_preview(console)
 
@@ -369,11 +464,8 @@ def main(argv: list[str] | None = None) -> int:
         if not sessions:
             sys.exit("No engaged sessions in this window.")
         rollups = rollup_by_category(sessions)
-        since_utc = (since.astimezone(timezone.utc) if since.tzinfo
-                     else since.replace(tzinfo=timezone.utc))
-        until_utc = (until.astimezone(timezone.utc) if until.tzinfo
-                     else until.replace(tzinfo=timezone.utc))
-        usage = collect_usage(since_utc, until_utc)
+        # since/until are tz-aware local; collect_usage normalizes to UTC.
+        usage = collect_usage(since, until)
 
     console.print(
         f"[green]✓[/green] {len(sessions)} sessions · "
@@ -382,7 +474,7 @@ def main(argv: list[str] | None = None) -> int:
 
     summaries: dict = {}
     period_aggregates: dict[str, str] = {}
-    if not args.no_summary:
+    if not args.minimal:
         imported = import_from_claude_recap()
         if imported:
             console.print(
@@ -404,6 +496,16 @@ def main(argv: list[str] | None = None) -> int:
             f"cached={counts['already']}[/dim]\n"
         )
         summaries = get_many([s.session_id for s in sessions])
+
+        # Session-level content classification (#25). Folder-only buckets
+        # mis-attribute monorepo / mixed-purpose sessions; one batch
+        # claude -p call resolves each session by its actual content.
+        if args.classify != "folder" and summaries:
+            _apply_content_classification(
+                sessions, summaries, args.classify, console,
+            )
+            # Re-roll up so per-bucket totals reflect the new categories
+            rollups = rollup_by_category(sessions)
 
         if not args.no_aggregate and summaries:
             period_aggregates = _aggregate_with_progress(
@@ -454,6 +556,7 @@ def main(argv: list[str] | None = None) -> int:
         comparison=comparison,
         console=console,
     )
+    console.print(f"[dim]Prices as of {get_snapshot_date()}[/dim]")
     return 0
 
 

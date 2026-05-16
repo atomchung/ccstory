@@ -26,6 +26,11 @@ dependencies = [
     "rich>=13.0",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+]
+
 [project.urls]
 Homepage = "https://github.com/atomchung/ccstory"
 Issues = "https://github.com/atomchung/ccstory/issues"
@@ -35,3 +40,8 @@ ccstory = "ccstory.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["ccstory"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers"

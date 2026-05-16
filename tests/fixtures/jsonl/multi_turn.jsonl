@@ -1,0 +1,4 @@
+{"type": "user", "timestamp": "2026-05-10T10:00:00.000Z", "message": {"role": "user", "content": "Refactor the auth middleware to share token validation"}}
+{"type": "assistant", "timestamp": "2026-05-10T10:00:15.000Z", "message": {"role": "assistant", "id": "msg_aaa", "model": "claude-opus-4-7", "content": [{"type": "text", "text": "I'll extract validate_token into shared util"}], "usage": {"input_tokens": 1500, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 50000, "output_tokens": 200}}}
+{"type": "user", "timestamp": "2026-05-10T10:02:00.000Z", "message": {"role": "user", "content": "Looks good, continue"}}
+{"type": "assistant", "timestamp": "2026-05-10T10:02:30.000Z", "message": {"role": "assistant", "id": "msg_bbb", "model": "claude-opus-4-7", "content": [{"type": "text", "text": "Done. Tests passing."}], "usage": {"input_tokens": 100, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 52000, "output_tokens": 50}}}
