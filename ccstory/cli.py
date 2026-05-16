@@ -43,6 +43,7 @@ from .categorizer import (
     user_rule_match,
 )
 from .report import (
+    VALID_FLAVORS,
     print_terminal_card,
     render_report,
     render_trend_card,
@@ -412,6 +413,11 @@ def main(argv: list[str] | None = None) -> int:
                              "(one claude -p call per non-empty bucket)")
     parser.add_argument("--no-compare", action="store_true",
                         help="Skip the vs-previous-window comparison block")
+    parser.add_argument("--for", dest="flavor", choices=VALID_FLAVORS,
+                        default="plain",
+                        help="Markdown variant for the saved report. "
+                             "`obsidian` adds YAML front-matter + [[wikilinks]] "
+                             "so the report drops into a PKM vault cleanly.")
     parser.add_argument("--no-compare-narrative", action="store_true",
                         help="Skip the 1-2 sentence claude -p synthesis "
                              "under the comparison table (numeric deltas "
@@ -574,6 +580,7 @@ def main(argv: list[str] | None = None) -> int:
         summaries=summaries,
         period_aggregates=period_aggregates,
         comparison=comparison,
+        flavor=args.flavor,
     )
     out_path.write_text(md, encoding="utf-8")
 

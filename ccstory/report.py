@@ -7,6 +7,7 @@ when the CLI finishes.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
 from rich.console import Console, Group
@@ -14,11 +15,14 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from .categorizer import color_for, load_settings
+from .categorizer import color_for, load_settings, normalize_project_name
 from .session_summarizer import SessionSummary
 from .time_tracking import CategoryRollup, SessionStat
 from .token_usage import UsageReport, fmt_tokens
 from .trends import PeriodComparison, PeriodPoint, sparkline, trend_by_category
+
+# Supported markdown flavors for render_report().
+VALID_FLAVORS = ("plain", "obsidian")
 
 
 def _format_date_range(since: datetime, until: datetime) -> str:
@@ -46,6 +50,89 @@ def _top_session_text(rollup: CategoryRollup, summaries: dict, max_chars: int = 
     return text
 
 
+_YAML_IMPLICIT_NON_STRING = frozenset({
+    # YAML 1.1 booleans (Obsidian / Dataview parsers tend to use 1.1 semantics)
+    "y", "Y", "yes", "Yes", "YES",
+    "n", "N", "no", "No", "NO",
+    "true", "True", "TRUE",
+    "false", "False", "FALSE",
+    "on", "On", "ON",
+    "off", "Off", "OFF",
+    # null
+    "null", "Null", "NULL", "~",
+})
+
+
+def _yaml_scalar(value: str) -> str:
+    """Quote a string so it is safe as a YAML scalar.
+
+    Bare strings made of a leading letter plus [A-Za-z0-9_-] pass through
+    unquoted, unless they collide with a YAML implicit scalar that would
+    deserialize as bool/null. Everything else (digits-led, dates, dotted
+    numbers, punctuation, booleans, nulls) is emitted JSON-style — JSON
+    strings are valid YAML scalars.
+    """
+    if (
+        value
+        and value[0].isalpha()
+        and all(c.isalnum() or c in "-_" for c in value)
+        and value not in _YAML_IMPLICIT_NON_STRING
+    ):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _obsidian_wikilink_target(name: str) -> str:
+    """Sanitize a string so it can sit inside `[[...]]` without breaking the link.
+
+    Newlines, `[`, `]`, `|`, `#`, `^` all have meaning in Obsidian wikilink
+    syntax (alias separator, block/heading refs, link terminator). Replace
+    them with `-` to keep the link parseable.
+    """
+    cleaned = name.replace("\r", " ").replace("\n", " ")
+    for ch in ("[", "]", "|", "#", "^"):
+        cleaned = cleaned.replace(ch, "-")
+    cleaned = cleaned.strip()
+    return cleaned or "untitled"
+
+
+def _obsidian_frontmatter(
+    since: datetime,
+    until: datetime,
+    rollups: list[CategoryRollup],
+    usage: UsageReport,
+) -> list[str]:
+    """YAML front-matter for the Obsidian flavor.
+
+    Front-matter properties are queryable in Obsidian's Dataview / Bases —
+    e.g. `WHERE top_focus = "coding"` to pull recap notes by bucket.
+    """
+    total_min = sum(r.active_min for r in rollups)
+    total_h = total_min / 60
+    # Don't rely on caller-side sort; compute the top by active_min directly.
+    # Tiebreak by category name so output is deterministic regardless of
+    # caller-side iteration order.
+    top_focus = (
+        max(rollups, key=lambda r: (r.active_min, r.category)).category
+        if rollups
+        else ""
+    )
+    buckets = [r.category for r in rollups]
+    lines = ["---"]
+    lines.append(f"date_start: {since.date().isoformat()}")
+    lines.append(f"date_end: {until.date().isoformat()}")
+    lines.append(f"active_hours: {total_h:.1f}")
+    if top_focus:
+        lines.append(f"top_focus: {_yaml_scalar(top_focus)}")
+    lines.append(
+        "buckets: [" + ", ".join(_yaml_scalar(b) for b in buckets) + "]"
+    )
+    lines.append(f"cost_usd: {usage.total_cost_usd:.2f}")
+    lines.append(f"output_tokens: {usage.total_output}")
+    lines.append("---")
+    return lines
+
+
 def render_report(
     label: str,
     since: datetime,
@@ -56,14 +143,28 @@ def render_report(
     summaries: dict[str, SessionSummary],
     period_aggregates: dict[str, str] | None = None,
     comparison: PeriodComparison | None = None,
+    flavor: str = "plain",
 ) -> str:
-    """Produce the full markdown report."""
+    """Produce the full markdown report.
+
+    `flavor`:
+      - "plain" (default): vanilla markdown, works in any viewer
+      - "obsidian": adds YAML front-matter + [[wikilinks]] around project
+        names in per-session lines, so notes drop into a PKM vault with
+        live cross-linking on day one
+    """
+    if flavor not in VALID_FLAVORS:
+        raise ValueError(f"unsupported flavor: {flavor!r} (use one of {VALID_FLAVORS})")
     period_aggregates = period_aggregates or {}
     total_min = sum(r.active_min for r in rollups)
     total_h = total_min / 60
     total_msgs = sum(r.messages for r in rollups)
 
     lines: list[str] = []
+    if flavor == "obsidian":
+        lines.extend(_obsidian_frontmatter(since, until, rollups, usage))
+        lines.append("")
+
     date_range = _format_date_range(since, until)
     lines.append(f"# Claude Code Recap · {date_range}")
     lines.append("")
@@ -117,9 +218,17 @@ def render_report(
             text = summ.summary if summ else s.first_user_text[:100]
             time_str = s.start.strftime("%Y-%m-%d %H:%M")
             mins = int(s.active_sec // 60)
-            lines.append(
-                f"- **{time_str}** · {mins}m · {s.msg_count} msg — {text}"
-            )
+            if flavor == "obsidian":
+                leaf = normalize_project_name(s.project) or s.project
+                leaf = _obsidian_wikilink_target(leaf)
+                lines.append(
+                    f"- **{time_str}** · {mins}m · {s.msg_count} msg · "
+                    f"[[{leaf}]] — {text}"
+                )
+            else:
+                lines.append(
+                    f"- **{time_str}** · {mins}m · {s.msg_count} msg — {text}"
+                )
         lines.append("")
 
     # Token usage
