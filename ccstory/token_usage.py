@@ -131,12 +131,21 @@ class UsageReport:
 
 
 def collect_usage(since: datetime, until: datetime | None = None) -> UsageReport:
-    """Scan all jsonl files and aggregate token usage in [since, until]."""
+    """Scan all jsonl files and aggregate token usage in [since, until].
+
+    Both bounds are normalized to UTC for comparison against the tz-aware
+    UTC timestamps in jsonl. Naive inputs are treated as UTC (not system
+    local) so test behavior is deterministic across hosts.
+    """
     if since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    else:
         since = since.astimezone(timezone.utc)
     if until is None:
         until = datetime.now(timezone.utc)
     elif until.tzinfo is None:
+        until = until.replace(tzinfo=timezone.utc)
+    else:
         until = until.astimezone(timezone.utc)
 
     by_model: dict[str, ModelUsage] = {}
