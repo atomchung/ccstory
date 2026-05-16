@@ -34,18 +34,39 @@ def _mk_cmp(narrative: str | None = None) -> PeriodComparison:
 
 class TestSignature:
     def test_same_sets_same_signature(self):
-        s1 = _comparison_signature(["a", "b"], ["c", "d"])
-        s2 = _comparison_signature(["b", "a"], ["d", "c"])  # different order
+        s1 = _comparison_signature(
+            [("a", "sa"), ("b", "sb")], [("c", "sc"), ("d", "sd")],
+        )
+        s2 = _comparison_signature(
+            [("b", "sb"), ("a", "sa")], [("d", "sd"), ("c", "sc")],
+        )  # different order
         assert s1 == s2
 
     def test_different_current_changes_signature(self):
-        s1 = _comparison_signature(["a", "b"], ["c", "d"])
-        s2 = _comparison_signature(["a", "b", "e"], ["c", "d"])
+        s1 = _comparison_signature([("a", "sa")], [("c", "sc")])
+        s2 = _comparison_signature(
+            [("a", "sa"), ("e", "se")], [("c", "sc")],
+        )
         assert s1 != s2
 
     def test_different_previous_changes_signature(self):
-        s1 = _comparison_signature(["a"], ["b"])
-        s2 = _comparison_signature(["a"], ["c"])
+        s1 = _comparison_signature([("a", "sa")], [("b", "sb")])
+        s2 = _comparison_signature([("a", "sa")], [("c", "sc")])
+        assert s1 != s2
+
+    def test_different_summary_content_changes_signature(self):
+        # Same session ids, different summary text — must invalidate the
+        # cached narrative (regression: previous version only hashed ids).
+        s1 = _comparison_signature([("a", "old summary")], [("b", "x")])
+        s2 = _comparison_signature([("a", "new summary")], [("b", "x")])
+        assert s1 != s2
+
+    def test_deltas_change_signature(self):
+        s1 = _comparison_signature([("a", "sa")], [("b", "sb")], deltas=None)
+        s2 = _comparison_signature(
+            [("a", "sa")], [("b", "sb")],
+            deltas=[("coding", 600.0, 300.0)],
+        )
         assert s1 != s2
 
 
@@ -73,7 +94,9 @@ class TestSynthesizeComparison:
         from ccstory.session_summarizer import DB_PATH, _connect
         _connect().close()  # ensure schema exists
 
-        sig = _comparison_signature(["c1"], ["p1"])
+        current = [("c1", "current")]
+        previous = [("p1", "previous")]
+        sig = _comparison_signature(current, previous)
         conn = sqlite3.connect(str(DB_PATH))
         try:
             conn.execute(
@@ -92,8 +115,8 @@ class TestSynthesizeComparison:
             result = synthesize_comparison(
                 current_key="k_cur",
                 previous_key="k_prev",
-                current_summaries=[("c1", "current")],
-                previous_summaries=[("p1", "previous")],
+                current_summaries=current,
+                previous_summaries=previous,
             )
         assert result == "cached prose"
 
@@ -101,7 +124,7 @@ class TestSynthesizeComparison:
         # Prime cache with one signature
         from ccstory.session_summarizer import DB_PATH, _connect
         _connect().close()
-        old_sig = _comparison_signature(["c1"], ["p1"])
+        old_sig = _comparison_signature([("c1", "x")], [("p1", "z")])
         conn = sqlite3.connect(str(DB_PATH))
         try:
             conn.execute(
@@ -125,6 +148,61 @@ class TestSynthesizeComparison:
             )
         # claude unavailable → None (not the stale cached value)
         assert result is None
+
+    def test_refreshed_summary_invalidates_cache(self, tmp_home: Path):
+        # Same session ids, summary content was refreshed → cache must
+        # regenerate. Regression for the id-only signature.
+        from ccstory.session_summarizer import DB_PATH, _connect
+        _connect().close()
+        stale_sig = _comparison_signature(
+            [("c1", "old summary")], [("p1", "p")],
+        )
+        conn = sqlite3.connect(str(DB_PATH))
+        try:
+            conn.execute(
+                """INSERT INTO comparison_narratives VALUES (?, ?, ?, ?, ?)""",
+                ("k_cur", "k_prev", stale_sig, "stale prose", 1.0),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with patch("ccstory.session_summarizer.claude_bin_available",
+                   return_value=False):
+            result = synthesize_comparison(
+                current_key="k_cur",
+                previous_key="k_prev",
+                current_summaries=[("c1", "REFRESHED summary")],
+                previous_summaries=[("p1", "p")],
+            )
+        assert result is None  # not the stale value
+
+    def test_deltas_passed_into_prompt(self, tmp_home: Path):
+        captured = {}
+
+        def capture(cmd, *, capture_output, text, timeout, check):
+            captured["prompt"] = cmd[-1]
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="ok narrative\n", stderr="",
+            )
+
+        with patch("ccstory.session_summarizer.claude_bin_available",
+                   return_value=True), \
+             patch("ccstory.session_summarizer.subprocess.run",
+                   side_effect=capture):
+            synthesize_comparison(
+                current_key="k_cur",
+                previous_key="k_prev",
+                current_summaries=[("c1", "x")],
+                previous_summaries=[("p1", "y")],
+                deltas=[
+                    ("coding", 600.0, 300.0),
+                    ("writing", 60.0, 120.0),
+                ],
+            )
+        prompt = captured["prompt"]
+        assert "coding: 5.0h → 10.0h (+5.0h)" in prompt
+        assert "writing: 2.0h → 1.0h (-1.0h)" in prompt
 
     def test_claude_unavailable_returns_none(self, tmp_home: Path):
         with patch("ccstory.session_summarizer.claude_bin_available",
@@ -194,3 +272,22 @@ class TestRenderWithNarrative:
         # Ensure the table still renders (numeric path unaffected)
         assert "## vs previous window" in md
         assert "| `coding` |" in md
+
+    def test_multiline_narrative_preserves_blockquote(self):
+        # If the LLM returns 2 sentences with a newline, every line must
+        # still start with `> ` or the blockquote breaks at line 2.
+        narrative = "Coding doubled as ccstory shipped.\nInvestment work shrank by 40%."
+        cmp = _mk_cmp(narrative=narrative)
+        md = render_comparison_markdown(cmp)
+        assert "> Coding doubled as ccstory shipped." in md
+        assert "> Investment work shrank by 40%." in md
+
+    def test_blank_line_in_narrative_uses_bare_quote_marker(self):
+        narrative = "Line one.\n\nLine three."
+        cmp = _mk_cmp(narrative=narrative)
+        md = render_comparison_markdown(cmp)
+        # A blank quoted line should appear as a bare ">" so the blockquote
+        # remains a single contiguous block in markdown renderers.
+        assert "> Line one." in md
+        assert ">\n" in md  # bare-marker blank line
+        assert "> Line three." in md

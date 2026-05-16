@@ -454,6 +454,10 @@ def main(argv: list[str] | None = None) -> int:
                         for sid in comparison.previous_session_ids
                         if sid in prev_summaries
                     ],
+                    deltas=[
+                        (d.category, d.current_min, d.previous_min)
+                        for d in comparison.deltas
+                    ],
                 )
 
     args.reports_dir.mkdir(parents=True, exist_ok=True)

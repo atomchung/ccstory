@@ -350,7 +350,10 @@ def render_comparison_markdown(cmp: PeriodComparison) -> str:
     lines.append(f"_Compared to_ `{cmp.previous_label}`")
     lines.append("")
     if cmp.narrative:
-        lines.append(f"> {cmp.narrative}")
+        # Multiline narratives must keep the `> ` prefix on every line, or
+        # only the first line renders as a blockquote.
+        for nl in cmp.narrative.splitlines() or [""]:
+            lines.append(f"> {nl}" if nl else ">")
         lines.append("")
     lines.append("| Metric | Current | Previous | Change |")
     lines.append("|---|---:|---:|---:|")

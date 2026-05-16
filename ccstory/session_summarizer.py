@@ -441,7 +441,7 @@ def get_period_aggregates(period_key: str) -> dict[str, str]:
         conn.close()
 
 
-_COMPARISON_PROMPT = """Below are session one-line summaries from two consecutive time windows for one user's Claude Code work.
+_COMPARISON_PROMPT = """Below are session one-line summaries from two consecutive time windows for one user's Claude Code work, plus the per-bucket time deltas.
 
 Write ONE OR TWO sentences (max 50 words, English) describing how the user's focus SHIFTED between the previous window and the current one. Focus on:
 - What dominated each window
@@ -456,6 +456,9 @@ Avoid:
 - "More X, less Y" without context
 - More than 2 sentences
 
+PER-BUCKET TIME DELTA (current − previous, in hours):
+{deltas}
+
 PREVIOUS window ({previous_label}):
 {previous_summaries}
 
@@ -465,12 +468,28 @@ CURRENT window ({current_label}):
 Output the synthesized prose only — no quotes, no prefix, no fences."""
 
 
-def _comparison_signature(current_ids: list[str], previous_ids: list[str]) -> str:
-    """Stable hash of the two session-id sets. Used to invalidate the cache
-    when either side's roster changes."""
-    cur = ",".join(sorted(current_ids))
-    prev = ",".join(sorted(previous_ids))
-    return f"{cur}|{prev}"
+def _comparison_signature(
+    current_summaries: list[tuple[str, str]],
+    previous_summaries: list[tuple[str, str]],
+    deltas: list[tuple[str, float, float]] | None = None,
+) -> str:
+    """Stable hash of both windows' (id, summary) pairs and the delta block.
+
+    Including the summary content prevents the cache from returning a stale
+    narrative when a session's summary is refreshed (e.g. via --force-refresh
+    on session_summarizer) without its id changing.
+    """
+    import hashlib
+    cur = sorted(current_summaries)
+    prev = sorted(previous_summaries)
+    delta_part = sorted(deltas or [])
+    h = hashlib.sha256()
+    h.update(repr(cur).encode())
+    h.update(b"|")
+    h.update(repr(prev).encode())
+    h.update(b"|")
+    h.update(repr(delta_part).encode())
+    return h.hexdigest()[:16]
 
 
 def synthesize_comparison(
@@ -478,22 +497,26 @@ def synthesize_comparison(
     previous_key: str,
     current_summaries: list[tuple[str, str]],
     previous_summaries: list[tuple[str, str]],
+    deltas: list[tuple[str, float, float]] | None = None,
     force_refresh: bool = False,
     timeout: int = 90,
 ) -> str | None:
     """Cross-period prose synthesis. ~50-word delta narrative.
 
     `current_summaries` / `previous_summaries` are `[(session_id, summary), ...]`
-    lists. The cache key is `(current_key, previous_key)`; the cached row is
-    invalidated when the signature (hash of both id sets) changes — so adding
-    new sessions to either window triggers regeneration.
+    lists. `deltas` is an optional `[(category, current_min, previous_min), ...]`
+    list passed into the prompt so the model can ground the "biggest shift"
+    claim on real numbers rather than inferring from summary text.
+
+    The cache key is `(current_key, previous_key)`; the cached row is
+    invalidated when the signature (hash of both id+summary sets and the
+    delta block) changes — so adding new sessions, refreshing summaries,
+    or shifting bucket allocations all trigger regeneration.
 
     Returns the narrative string, or None on claude -p failure / absent
     summaries.
     """
-    cur_ids = [sid for sid, _ in current_summaries]
-    prev_ids = [sid for sid, _ in previous_summaries]
-    sig = _comparison_signature(cur_ids, prev_ids)
+    sig = _comparison_signature(current_summaries, previous_summaries, deltas)
 
     conn = _connect()
     try:
@@ -515,9 +538,22 @@ def synthesize_comparison(
     def _fmt(items: list[tuple[str, str]]) -> str:
         return "\n".join(f"- {s}" for _, s in items)
 
+    def _fmt_deltas(items: list[tuple[str, float, float]] | None) -> str:
+        if not items:
+            return "(no per-bucket breakdown provided)"
+        lines = []
+        for cat, cur_min, prev_min in items:
+            delta_h = (cur_min - prev_min) / 60.0
+            lines.append(
+                f"- {cat}: {prev_min/60:.1f}h → {cur_min/60:.1f}h "
+                f"({delta_h:+.1f}h)"
+            )
+        return "\n".join(lines)
+
     prompt = _COMPARISON_PROMPT.format(
         previous_label=previous_key,
         current_label=current_key,
+        deltas=_fmt_deltas(deltas),
         previous_summaries=_fmt(previous_summaries)[:3000],
         current_summaries=_fmt(current_summaries)[:3000],
     )
