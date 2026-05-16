@@ -50,14 +50,34 @@ def _top_session_text(rollup: CategoryRollup, summaries: dict, max_chars: int = 
     return text
 
 
+_YAML_IMPLICIT_NON_STRING = frozenset({
+    # YAML 1.1 booleans (Obsidian / Dataview parsers tend to use 1.1 semantics)
+    "y", "Y", "yes", "Yes", "YES",
+    "n", "N", "no", "No", "NO",
+    "true", "True", "TRUE",
+    "false", "False", "FALSE",
+    "on", "On", "ON",
+    "off", "Off", "OFF",
+    # null
+    "null", "Null", "NULL", "~",
+})
+
+
 def _yaml_scalar(value: str) -> str:
     """Quote a string so it is safe as a YAML scalar.
 
-    Bare strings made only of [A-Za-z0-9_-] pass through unquoted; anything
-    else is emitted JSON-style (double-quoted with backslash escapes), which
-    is also valid YAML.
+    Bare strings made of a leading letter plus [A-Za-z0-9_-] pass through
+    unquoted, unless they collide with a YAML implicit scalar that would
+    deserialize as bool/null. Everything else (digits-led, dates, dotted
+    numbers, punctuation, booleans, nulls) is emitted JSON-style — JSON
+    strings are valid YAML scalars.
     """
-    if value and all(c.isalnum() or c in "-_" for c in value):
+    if (
+        value
+        and value[0].isalpha()
+        and all(c.isalnum() or c in "-_" for c in value)
+        and value not in _YAML_IMPLICIT_NON_STRING
+    ):
         return value
     return json.dumps(value, ensure_ascii=False)
 
@@ -90,8 +110,12 @@ def _obsidian_frontmatter(
     total_min = sum(r.active_min for r in rollups)
     total_h = total_min / 60
     # Don't rely on caller-side sort; compute the top by active_min directly.
+    # Tiebreak by category name so output is deterministic regardless of
+    # caller-side iteration order.
     top_focus = (
-        max(rollups, key=lambda r: r.active_min).category if rollups else ""
+        max(rollups, key=lambda r: (r.active_min, r.category)).category
+        if rollups
+        else ""
     )
     buckets = [r.category for r in rollups]
     lines = ["---"]

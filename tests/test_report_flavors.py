@@ -186,6 +186,55 @@ class TestObsidianFlavor:
         assert "top_focus: coding" in md
 
 
+class TestObsidianYamlImplicitScalars:
+    def test_bucket_named_yes_is_quoted(self):
+        # `yes` parses as boolean True under YAML 1.1 (which Obsidian /
+        # Dataview tend to use) — must be quoted so top_focus stays a string.
+        s = _stat("yes", "-Users-alice-code-foo", "s1", mins=60)
+        md = render_report(
+            label="2026-05",
+            since=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 31, tzinfo=timezone.utc),
+            sessions=[s],
+            rollups=[_rollup("yes", [s])],
+            usage=_usage(),
+            summaries={},
+            flavor="obsidian",
+        )
+        assert 'top_focus: "yes"' in md
+        assert 'buckets: ["yes"]' in md
+
+    def test_bucket_digits_only_is_quoted(self):
+        s = _stat("123", "-Users-alice-code-foo", "s1", mins=60)
+        md = render_report(
+            label="2026-05",
+            since=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 31, tzinfo=timezone.utc),
+            sessions=[s],
+            rollups=[_rollup("123", [s])],
+            usage=_usage(),
+            summaries={},
+            flavor="obsidian",
+        )
+        assert 'top_focus: "123"' in md
+        assert 'buckets: ["123"]' in md
+
+    def test_bucket_date_like_is_quoted(self):
+        # 2026-05-16 would otherwise parse as a YAML date.
+        s = _stat("2026-05-16", "-Users-alice-code-foo", "s1", mins=60)
+        md = render_report(
+            label="2026-05",
+            since=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 31, tzinfo=timezone.utc),
+            sessions=[s],
+            rollups=[_rollup("2026-05-16", [s])],
+            usage=_usage(),
+            summaries={},
+            flavor="obsidian",
+        )
+        assert 'top_focus: "2026-05-16"' in md
+
+
 class TestObsidianYamlEscaping:
     def test_bucket_with_special_chars_is_quoted(self):
         s = _stat("client: acme, inc", "-Users-alice-code-foo", "s1", mins=60)
