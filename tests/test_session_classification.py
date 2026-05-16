@@ -197,3 +197,71 @@ class TestClassifySessionsByContent:
             result = classify_sessions_by_content([("s1", "x", "y")])
         assert result == {"s1": "coding"}
         assert "ghost" not in result
+
+    def test_more_than_batch_size_is_chunked(self, tmp_home: Path):
+        # 200 pending sessions with batch_size=80 must produce 3 claude
+        # invocations and classify every session — regression for the
+        # pending[:80] silent truncation.
+        items = [(f"s{i:03d}", "myapp", "did stuff") for i in range(200)]
+
+        def mock_run(cmd, *, capture_output, text, timeout, check):
+            # Reconstruct which session ids are in this chunk's prompt
+            prompt = cmd[-1]
+            sids = [
+                line.split("]")[0].lstrip("[")
+                for line in prompt.splitlines()
+                if line.startswith("[s")
+            ]
+            stdout = "".join(
+                f'{{"session_id": "{sid}", "bucket": "coding"}}\n' for sid in sids
+            )
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout=stdout, stderr="",
+            )
+
+        with patch("ccstory.session_summarizer.claude_bin_available",
+                   return_value=True), \
+             patch("ccstory.session_summarizer.subprocess.run",
+                   side_effect=mock_run) as run_mock:
+            result = classify_sessions_by_content(items, batch_size=80)
+
+        assert run_mock.call_count == 3  # 80 + 80 + 40
+        assert len(result) == 200
+        assert all(b == "coding" for b in result.values())
+
+    def test_one_failed_chunk_does_not_kill_remaining(self, tmp_home: Path):
+        items = [(f"s{i:03d}", "myapp", "did stuff") for i in range(160)]
+        results_seq = [
+            subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="boom"),
+            subprocess.CompletedProcess(
+                args=[], returncode=0,
+                stdout="".join(
+                    f'{{"session_id": "s{i:03d}", "bucket": "writing"}}\n'
+                    for i in range(80, 160)
+                ),
+                stderr="",
+            ),
+        ]
+        with patch("ccstory.session_summarizer.claude_bin_available",
+                   return_value=True), \
+             patch("ccstory.session_summarizer.subprocess.run",
+                   side_effect=results_seq):
+            result = classify_sessions_by_content(items, batch_size=80)
+        # First chunk failed → those sessions absent; second chunk succeeded.
+        assert len(result) == 80
+        assert all(sid.startswith("s") and int(sid[1:]) >= 80 for sid in result)
+
+
+class TestParseClassificationRejectsBlankBucket:
+    def test_whitespace_only_bucket_dropped(self):
+        # `"bucket": "   "` previously normalized to "" and got cached,
+        # locking the session out of future reclassification.
+        text = (
+            '{"session_id": "s1", "bucket": "   "}\n'
+            '{"session_id": "s2", "bucket": "coding"}\n'
+        )
+        assert _parse_classification_lines(text) == {"s2": "coding"}
+
+    def test_empty_string_bucket_dropped(self):
+        text = '{"session_id": "s1", "bucket": ""}\n'
+        assert _parse_classification_lines(text) == {}

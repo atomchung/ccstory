@@ -500,8 +500,10 @@ def _parse_classification_lines(text: str) -> dict[str, str]:
             continue
         sid = obj.get("session_id")
         bucket = obj.get("bucket")
-        if isinstance(sid, str) and isinstance(bucket, str) and bucket:
-            out[sid] = bucket.strip().lower()
+        if isinstance(sid, str) and isinstance(bucket, str):
+            normalized = bucket.strip().lower()
+            if normalized:
+                out[sid] = normalized
     return out
 
 
@@ -509,6 +511,7 @@ def classify_sessions_by_content(
     items: list[tuple[str, str, str]],
     force_refresh: bool = False,
     timeout: int = 120,
+    batch_size: int = 80,
 ) -> dict[str, str]:
     """Batch-classify sessions by content.
 
@@ -519,6 +522,10 @@ def classify_sessions_by_content(
 
     Caches each successful classification in `session_content_buckets`
     so subsequent runs hit zero claude -p calls for already-seen sessions.
+
+    Sends pending sessions to `claude -p` in chunks of `batch_size` so a
+    period with more than `batch_size` uncached sessions does not silently
+    leave the tail folder-classified.
     """
     if not items:
         return {}
@@ -530,32 +537,41 @@ def classify_sessions_by_content(
     if not pending or not claude_bin_available():
         return cached
 
-    rows = "\n".join(
-        f"[{sid}] folder: {leaf} | summary: {summ[:200]}"
-        for sid, leaf, summ in pending[:80]  # cap prompt size
-    )
-    prompt = _CONTENT_CLASSIFY_PROMPT.format(rows=rows)
-    try:
-        r = subprocess.run(
-            [CLAUDE_BIN, "-p", "--output-format", "text",
-             "--no-session-persistence", prompt],
-            capture_output=True, text=True, timeout=timeout, check=False,
-        )
-        if r.returncode != 0:
-            LOG.warning("content-classify claude -p failed: %s", r.stderr.strip()[:200])
-            return cached
-    except (subprocess.SubprocessError, OSError) as e:
-        LOG.warning("content-classify errored: %s", e)
-        return cached
-
-    parsed = _parse_classification_lines(r.stdout)
-    # Only accept rows that match a session id we actually sent
-    pending_ids = {sid for sid, _, _ in pending}
-    fresh = {sid: b for sid, b in parsed.items() if sid in pending_ids}
-    _classify_cache_upsert_many(fresh)
-
     combined = dict(cached)
-    combined.update(fresh)
+
+    for chunk_start in range(0, len(pending), batch_size):
+        chunk = pending[chunk_start:chunk_start + batch_size]
+        rows = "\n".join(
+            f"[{sid}] folder: {leaf} | summary: {summ[:200]}"
+            for sid, leaf, summ in chunk
+        )
+        prompt = _CONTENT_CLASSIFY_PROMPT.format(rows=rows)
+        try:
+            r = subprocess.run(
+                [CLAUDE_BIN, "-p", "--output-format", "text",
+                 "--no-session-persistence", prompt],
+                capture_output=True, text=True, timeout=timeout, check=False,
+            )
+            if r.returncode != 0:
+                LOG.warning(
+                    "content-classify claude -p failed (chunk %d-%d): %s",
+                    chunk_start, chunk_start + len(chunk),
+                    r.stderr.strip()[:200],
+                )
+                continue
+        except (subprocess.SubprocessError, OSError) as e:
+            LOG.warning("content-classify errored: %s", e)
+            continue
+
+        parsed = _parse_classification_lines(r.stdout)
+        # Only accept rows whose session id is in THIS chunk — guards
+        # against the model hallucinating ids or returning rows we never
+        # asked about.
+        chunk_ids = {sid for sid, _, _ in chunk}
+        fresh = {sid: b for sid, b in parsed.items() if sid in chunk_ids}
+        _classify_cache_upsert_many(fresh)
+        combined.update(fresh)
+
     return combined
 
 
