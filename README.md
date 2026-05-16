@@ -76,38 +76,18 @@ ccstory month          # what you spent it on
 
 ## Install
 
-ccstory ships in two layers — the **CLI** (does the work) and the **Claude Code plugin** (lets you invoke it inside a Claude Code chat as `/ccstory:recap`).
-
-### Option 1 — CLI only (terminal users)
-
 ```bash
 pipx install git+https://github.com/atomchung/ccstory.git
-ccstory init       # one-time auto-categorize from recent sessions
-ccstory week       # generate a recap
+pipx ensurepath        # restart your shell if `ccstory` isn't found
+
+ccstory init           # one-time auto-categorize from recent sessions
+ccstory week           # generate a recap
 ```
-
-### Option 2 — CLI + Claude Code plugin (so `/ccstory:recap` works in chat)
-
-**1. Install the CLI in a terminal:**
-
-```bash
-pipx install git+https://github.com/atomchung/ccstory.git
-pipx ensurepath        # restart your shell after this if `ccstory` isn't found
-```
-
-**2. Inside a Claude Code session, add the marketplace and install the plugin** (these are Claude Code slash commands, not shell commands):
-
-```text
-/plugin marketplace add atomchung/ccstory
-/plugin install ccstory@ccstory
-```
-
-After that, in any Claude Code session: `/ccstory:recap` (or just ask "what did I do this week?" and Claude will trigger it).
 
 ### Requirements
 
 - **Python 3.11+** and **pipx** (`brew install pipx` on macOS, [other platforms](https://pipx.pypa.io/stable/installation/))
-- **Claude Code CLI** on PATH — used for per-session narrative summaries. Without it, narratives fall back to the first user message. If `/plugin` is missing inside Claude Code, update to the latest version per the [Claude Code troubleshooting docs](https://code.claude.com/docs/en/troubleshooting).
+- **Claude Code CLI** on PATH — used for per-session narrative summaries. Without it, narratives fall back to the first user message.
 
 ## Usage
 
@@ -313,8 +293,7 @@ regenerates whenever any of those change. Drop it with
 - [x] v0.1.1 — Per-bucket colors, date-range title, ★ Top focus highlight
 - [x] v0.1.2 — vs-previous-window comparison + `ccstory trend` sparklines
 - [x] v0.1.3 — `ccstory init` auto-categorization + quota burn % in trend
-- [x] v0.1.5 — Claude Code plugin wrapper (`/ccstory:recap` in chat) +
-      self-hosted marketplace so this repo is installable without official approval
+- [x] v0.1.5 — _Claude Code plugin wrapper removed in v0.3 — see below; CLI-only now._
 - [x] v0.2.0 — Per-category aggregate narrative wired into the default flow
       (2-3 sentence synthesis per bucket; `--no-aggregate` to skip)
 - [x] v0.3.0 — Instant fallback default + import from `/recap` cache;
@@ -322,7 +301,9 @@ regenerates whenever any of those change. Drop it with
       content-aware classification (`--classify hybrid`); configurable
       pricing with snapshot disclosure; cross-period narrative synthesis;
       Obsidian export (`--for=obsidian`); `--no-summary` renamed to
-      `--minimal` (old name deprecated, still works)
+      `--minimal` (old name deprecated, still works); **dropped the
+      Claude Code plugin wrapper** — `/ccstory:recap` clashed with the
+      native `/recap` and added nothing the CLI didn't already do
 - [ ] v0.4 — More export flavors (Logseq, Notion)
 - [ ] v0.5 — Optional PNG card export
 
