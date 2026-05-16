@@ -56,11 +56,14 @@ when you let the model read all of them together.
 | | [ccusage](https://github.com/ryoppippi/ccusage) | **ccstory** |
 |---|---|---|
 | Role | The bill | The story |
-| Token / cost precision | ✅ daily/monthly/session/5h-block | (rough estimate) |
+| Token / cost precision | ✅ daily/monthly/session/5h-block | (configurable; rough by default) |
 | Per-model breakdown | ✅ | ✅ |
 | **Active hours** (5-min gap heuristic) | ❌ | ✅ |
-| **Activity categories** (not just folder name) | ❌ | ✅ |
+| **Activity categories** | ❌ | ✅ folder rules **or** content-aware via `claude -p` |
 | **One-sentence narrative per session** | ❌ | ✅ via local `claude -p` |
+| **Per-bucket synthesis** (cross-session thread) | ❌ | ✅ |
+| **Cross-period narrative** ("focus shifted from X to Y") | ❌ | ✅ |
+| **Obsidian-flavored export** (YAML + `[[wikilinks]]`) | ❌ | ✅ via `--for=obsidian` |
 | **Output-tokens-based period comparison** | ❌ (uses total_tokens) | ✅ |
 | Live quota | ⚠️ via `blocks` | ❌ |
 
@@ -73,56 +76,50 @@ ccstory month          # what you spent it on
 
 ## Install
 
-ccstory ships in two layers — the **CLI** (does the work) and the **Claude Code plugin** (lets you invoke it inside a Claude Code chat as `/ccstory:recap`).
-
-### Option 1 — CLI only (terminal users)
-
 ```bash
 pipx install git+https://github.com/atomchung/ccstory.git
-ccstory init       # one-time auto-categorize from recent sessions
-ccstory week       # generate a recap
+pipx ensurepath        # restart your shell if `ccstory` isn't found
+
+ccstory init           # one-time auto-categorize from recent sessions
+ccstory week           # generate a recap
 ```
-
-### Option 2 — CLI + Claude Code plugin (so `/ccstory:recap` works in chat)
-
-**1. Install the CLI in a terminal:**
-
-```bash
-pipx install git+https://github.com/atomchung/ccstory.git
-pipx ensurepath        # restart your shell after this if `ccstory` isn't found
-```
-
-**2. Inside a Claude Code session, add the marketplace and install the plugin** (these are Claude Code slash commands, not shell commands):
-
-```text
-/plugin marketplace add atomchung/ccstory
-/plugin install ccstory@ccstory
-```
-
-After that, in any Claude Code session: `/ccstory:recap` (or just ask "what did I do this week?" and Claude will trigger it).
 
 ### Requirements
 
 - **Python 3.11+** and **pipx** (`brew install pipx` on macOS, [other platforms](https://pipx.pypa.io/stable/installation/))
-- **Claude Code CLI** on PATH — used for per-session narrative summaries. Without it, narratives fall back to the first user message. If `/plugin` is missing inside Claude Code, update to the latest version per the [Claude Code troubleshooting docs](https://code.claude.com/docs/en/troubleshooting).
+- **Claude Code CLI** on PATH — used for per-session narrative summaries. Without it, narratives fall back to the first user message.
 
 ## Usage
 
 ```bash
-ccstory init             # one-shot: scan recent sessions and propose buckets
-ccstory init --dry-run   # preview without writing config
+ccstory init                  # one-shot: scan recent sessions and propose buckets
+ccstory init --dry-run        # preview without writing config
 
-ccstory                  # current month so far (default)
-ccstory week             # past 7 days
-ccstory 2026-04          # any specific month
-ccstory all              # entire history
+ccstory                       # current month so far (default)
+ccstory week                  # past 7 days
+ccstory 2026-04               # any specific month
+ccstory all                   # entire history
 
-ccstory trend            # last 8 weeks of sparklines
-ccstory trend --weeks 12 # custom range
-ccstory trend --months 6 # by calendar months
+ccstory trend                 # last 8 weeks of sparklines
+ccstory trend --weeks 12      # custom range
+ccstory trend --months 6      # by calendar months
 
-ccstory --no-summary     # skip claude -p (faster, no narrative)
-ccstory --no-compare     # skip the vs-previous block
+# Narrative depth
+ccstory --minimal             # numbers only, no per-session lines (fastest)
+ccstory --llm-narrative       # polish per-session via claude -p (slow, opt-in)
+ccstory --no-aggregate        # skip the per-bucket synthesis
+
+# Comparison block
+ccstory --no-compare          # skip the vs-previous block entirely
+ccstory --no-compare-narrative # keep the numeric deltas, drop the synthesis prose
+
+# Classification mode (how sessions get bucketed)
+ccstory --classify folder     # folder-name rules only
+ccstory --classify content    # batch claude -p over each session's narrative
+ccstory --classify hybrid     # folder rule when config.toml matched, else content (default)
+
+# Export flavor
+ccstory --for=obsidian        # YAML frontmatter + [[wikilinks]] for PKM vaults
 ```
 
 **Recommended first run**: `ccstory init` scans the last 30 days of sessions
@@ -131,9 +128,9 @@ bucket for each project. It writes a starter `~/.ccstory/config.toml` you can
 edit later.
 
 `ccstory week` / `ccstory month` automatically appends a **vs-previous-window**
-comparison (▲/▼ deltas per bucket). `ccstory trend` shows per-bucket
-sparklines so you can see the shape of your usage across N weeks/months in
-one glance:
+comparison (▲/▼ deltas per bucket) with a 1-2 sentence narrative on what
+shifted. `ccstory trend` shows per-bucket sparklines so you can see the shape
+of your usage across N weeks/months in one glance:
 
 ```
 Hours by bucket
@@ -186,6 +183,75 @@ Matching rules:
 - First-match-wins, case-insensitive.
 - Your rules take precedence over built-in defaults.
 
+## Content-aware classification
+
+Folder names lie. A session in your `playground/` repo could be a serious
+debugging dive into a production bug; a session in `myapp/` could be a 5-min
+README tweak. `--classify` lets `claude -p` look at what each session was
+*actually* about (its first/last messages) and re-bucket accordingly.
+
+| Mode | What it does |
+|---|---|
+| `folder` | Pure folder-name rules from `config.toml`. Fastest, no `claude -p` calls. |
+| `content` | Every session gets re-bucketed by content, one batched `claude -p` per ~80 sessions. |
+| `hybrid` (default) | If a *user-defined* rule in `config.toml` matched the folder, keep that bucket (explicit overrides win). Otherwise fall back to content classification. |
+
+Results cache in `~/.ccstory/cache.db` keyed by session id, so subsequent
+runs are free.
+
+## Obsidian export
+
+`ccstory --for=obsidian` swaps the plain markdown for a PKM-vault-ready
+variant:
+
+```yaml
+---
+date_start: 2026-05-10
+date_end: 2026-05-17
+active_hours: 20.6
+top_focus: coding
+buckets: [coding, investment, writing]
+cost_usd: 1608.42
+output_tokens: 2920000
+---
+```
+
+YAML frontmatter is queryable in Obsidian's Dataview / Bases
+(`WHERE top_focus = "coding"`), and per-session lines wrap the project leaf
+in `[[wikilinks]]` so the report drops into a vault with live cross-linking
+on day one. Bucket names with special characters are JSON-quoted so the
+frontmatter stays valid even for buckets like `client: acme, inc`.
+
+## Custom pricing
+
+Default API list prices snapshot to a date (currently `2026-01`) and the
+report footer always shows that snapshot date so a stale price table can't
+silently distort cost over time.
+
+Override per-model in `~/.ccstory/config.toml` (e.g. when Anthropic ships
+new pricing or you're modeling a custom contract):
+
+```toml
+[prices]
+snapshot_date = "2026-04"
+
+[prices.opus]
+input       = 15.0
+output      = 75.0
+cache_write = 18.75
+cache_read  = 1.5
+
+[prices.sonnet]
+input       = 3.0
+output      = 15.0
+cache_write = 3.75
+cache_read  = 0.3
+```
+
+Partial overrides are fine — unspecified keys keep their default. Defining a
+brand-new model name (e.g. `[prices.custom]`) with only some keys defaults the
+missing ones to `$0`, with a warning so misconfig is loud.
+
 ## Privacy
 
 Everything runs locally. ccstory never sends your conversation data anywhere.
@@ -214,19 +280,31 @@ When you run ccstory across multiple periods, the markdown report uses
 system prompt size — it's not a stable signal of actual work done. Output
 tokens stay comparable month over month.
 
+On top of the numeric deltas table, week/month reports include a 1-2
+sentence **synthesis narrative** describing how focus shifted between
+windows (which bucket grew or shrank most, what replaced what). The
+narrative caches on `(window_keys, summary_content, deltas)` so it
+regenerates whenever any of those change. Drop it with
+`--no-compare-narrative` if you only want the numbers.
+
 ## Roadmap
 
 - [x] v0.1 — Time + tokens + per-session narrative + 4-bucket defaults
 - [x] v0.1.1 — Per-bucket colors, date-range title, ★ Top focus highlight
 - [x] v0.1.2 — vs-previous-window comparison + `ccstory trend` sparklines
 - [x] v0.1.3 — `ccstory init` auto-categorization + quota burn % in trend
-- [x] v0.1.5 — Claude Code plugin wrapper (`/ccstory:recap` in chat) +
-      self-hosted marketplace so this repo is installable without official approval
+- [x] v0.1.5 — _Claude Code plugin wrapper removed in v0.3 — see below; CLI-only now._
 - [x] v0.2.0 — Per-category aggregate narrative wired into the default flow
       (2-3 sentence synthesis per bucket; `--no-aggregate` to skip)
-- [ ] v0.3 — Session-level classification (override folder bucket via
-      `claude -p` content-aware tagging)
-- [ ] v0.4 — Claude Code plugin form (`/ccstory` slash command)
+- [x] v0.3.0 — Instant fallback default + import from `/recap` cache;
+      tz-aware datetime correctness; pytest suite + CI;
+      content-aware classification (`--classify hybrid`); configurable
+      pricing with snapshot disclosure; cross-period narrative synthesis;
+      Obsidian export (`--for=obsidian`); `--no-summary` renamed to
+      `--minimal` (old name deprecated, still works); **dropped the
+      Claude Code plugin wrapper** — `/ccstory:recap` clashed with the
+      native `/recap` and added nothing the CLI didn't already do
+- [ ] v0.4 — More export flavors (Logseq, Notion)
 - [ ] v0.5 — Optional PNG card export
 
 ## License
