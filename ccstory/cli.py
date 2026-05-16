@@ -37,9 +37,13 @@ from rich.table import Table
 
 from . import __version__
 from .categorizer import (
+    add_category_keywords,
+    color_for,
     ensure_default_config,
+    list_user_categories,
     normalize_project_name,
     preview_classification,
+    remove_category_keywords,
     user_rule_match,
 )
 from .report import (
@@ -56,6 +60,9 @@ from .session_summarizer import (
     classify_sessions_by_content,
     get_many,
     import_from_claude_recap,
+    invalidate_comparison_narratives,
+    invalidate_content_buckets,
+    invalidate_period_aggregates,
     missing_ids,
     summarize_session,
     synthesize_comparison,
@@ -323,6 +330,122 @@ def _run_init(argv: list[str], console: Console) -> int:
                     auto_yes=args.yes, console=console)
 
 
+def _run_category(argv: list[str], console: Console) -> int:
+    """`ccstory category {list,set,unset}` — edit user bucket rules.
+
+    `set` / `unset` mutate the `[categories]` block in `~/.ccstory/config.toml`
+    and invalidate any cache that was written against the previous rule shape
+    (per-period aggregates + cross-period comparison narratives). The per-
+    session content-classification cache is NOT cleared — those rows are
+    keyed by session id, not by rule, and reusing them is correct. Use
+    `ccstory <window> --refresh` if you want a full re-classify.
+    """
+    p = argparse.ArgumentParser(
+        prog="ccstory category",
+        description="Edit project-bucket rules in ~/.ccstory/config.toml.",
+        epilog=(
+            "Examples:\n"
+            "  ccstory category set research ai-project-research\n"
+            "  ccstory category set work company-repo internal-tool\n"
+            "  ccstory category unset writing blog\n"
+            "  ccstory category list"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = p.add_subparsers(dest="action", required=True)
+
+    p_set = sub.add_parser("set", help="Add keywords to a bucket")
+    p_set.add_argument("bucket")
+    p_set.add_argument("keywords", nargs="+")
+
+    p_unset = sub.add_parser("unset", help="Remove keywords from a bucket")
+    p_unset.add_argument("bucket")
+    p_unset.add_argument("keywords", nargs="+")
+
+    sub.add_parser("list", help="Show all user-defined bucket rules")
+
+    args = p.parse_args(argv)
+
+    if args.action == "list":
+        cats = list_user_categories()
+        if not cats:
+            console.print(
+                "[dim]No user-defined rules yet. "
+                "Built-in defaults (coding/investment/writing/other) apply.[/dim]"
+            )
+            console.print(
+                "[dim]Add one with: ccstory category set <bucket> <keyword>…[/dim]"
+            )
+            return 0
+        table = Table(
+            title=f"User rules · {CONFIG_PATH}",
+            title_style="bold",
+        )
+        table.add_column("Bucket", style="bold")
+        table.add_column("Keywords", style="dim")
+        for bucket in sorted(cats):
+            color = color_for(bucket)
+            table.add_row(
+                f"[{color}]{bucket}[/{color}]",
+                ", ".join(cats[bucket]),
+            )
+        console.print(table)
+        return 0
+
+    try:
+        if args.action == "set":
+            categories, moved = add_category_keywords(args.bucket, args.keywords)
+            kw_render = ", ".join(f"`{k}`" for k in args.keywords)
+            console.print(
+                f"[green]✓[/green] Added {kw_render} → "
+                f"[{color_for(args.bucket)}]{args.bucket}[/{color_for(args.bucket)}]"
+            )
+            for kw, prev in moved:
+                console.print(
+                    f"  [yellow]moved[/yellow] `{kw}` "
+                    f"from [{color_for(prev)}]{prev}[/{color_for(prev)}]"
+                )
+        else:  # unset
+            categories, missing = remove_category_keywords(
+                args.bucket, args.keywords,
+            )
+            kept = [k for k in args.keywords if k.lower() not in missing]
+            if kept:
+                kw_render = ", ".join(f"`{k}`" for k in kept)
+                console.print(
+                    f"[green]✓[/green] Removed {kw_render} from "
+                    f"[{color_for(args.bucket)}]{args.bucket}[/{color_for(args.bucket)}]"
+                )
+            for kw in missing:
+                console.print(
+                    f"  [yellow]not found:[/yellow] `{kw}` was not in `{args.bucket}`"
+                )
+    except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
+        return 1
+
+    # Rule changes can shift bucket assignments retroactively, so any
+    # cached narrative that was written against the old shape is now stale.
+    # The per-session content classification cache (session_content_buckets)
+    # stays — those rows are keyed by session id and remain correct.
+    agg_n = invalidate_period_aggregates()
+    cmp_n = invalidate_comparison_narratives()
+    if agg_n or cmp_n:
+        bits = []
+        if agg_n:
+            bits.append(f"{agg_n} per-bucket narrative(s)")
+        if cmp_n:
+            bits.append(f"{cmp_n} vs-previous narrative(s)")
+        console.print(
+            f"[dim]Invalidated {' + '.join(bits)} so they regenerate next run.[/dim]"
+        )
+    console.print(
+        f"[dim]To re-classify sessions whose bucket may have changed, run "
+        f"`ccstory week --refresh`.[/dim]"
+    )
+    return 0
+
+
 def _run_trend(argv: list[str], console: Console) -> int:
     if not CLAUDE_PROJECTS.exists():
         sys.exit(f"No Claude Code data at {CLAUDE_PROJECTS}.")
@@ -371,6 +494,9 @@ def main(argv: list[str] | None = None) -> int:
     if raw and raw[0] == "init":
         logging.basicConfig(level=logging.WARNING)
         return _run_init(raw[1:], console)
+    if raw and raw[0] == "category":
+        logging.basicConfig(level=logging.WARNING)
+        return _run_category(raw[1:], console)
 
     parser = argparse.ArgumentParser(
         prog="ccstory",
@@ -383,6 +509,8 @@ def main(argv: list[str] | None = None) -> int:
             "      one claude -p call. Writes ~/.ccstory/config.toml.\n"
             "  ccstory trend [--weeks N | --months N]\n"
             "      Per-bucket sparklines + burn-% over N periods.\n"
+            "  ccstory category {list,set,unset} ...\n"
+            "      Edit project-bucket rules from the CLI.\n"
             "\n"
             "Examples:\n"
             "  ccstory week                  # last 7 days, instant fallback\n"
@@ -390,9 +518,11 @@ def main(argv: list[str] | None = None) -> int:
             "  ccstory week --llm-narrative  # polish per-session via claude -p\n"
             "                                # (slow; shows ETA before batch)\n"
             "  ccstory week --no-aggregate   # skip aggregate synthesis\n"
+            "  ccstory week --refresh        # re-classify cached sessions in window\n"
             "  ccstory 2026-04               # specific month\n"
             "  ccstory trend --months 6      # 6-month sparkline view\n"
-            "  ccstory init -y               # auto-categorize (no prompt)"
+            "  ccstory init -y               # auto-categorize (no prompt)\n"
+            "  ccstory category set research ai-project-research"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -430,6 +560,15 @@ def main(argv: list[str] | None = None) -> int:
                              "`hybrid` (default) keeps the folder bucket when "
                              "a user rule in config.toml matched, otherwise "
                              "falls back to content classification.")
+    parser.add_argument("--refresh", action="store_true",
+                        help="Re-classify cached sessions in this window. "
+                             "Wipes the content-classification cache for the "
+                             "sessions inside [since, until] and lets the "
+                             "next pass redo them. Use after editing "
+                             "[categories] rules.")
+    parser.add_argument("--refresh-all", action="store_true",
+                        help="Wipe the entire content-classification cache, "
+                             "not just this window. Implies --refresh.")
     parser.add_argument("--reports-dir", type=Path, default=REPORTS_DIR,
                         help=f"Markdown report output dir (default: {REPORTS_DIR})")
     parser.add_argument("--version", action="version",
@@ -482,6 +621,30 @@ def main(argv: list[str] | None = None) -> int:
         f"[green]✓[/green] {len(sessions)} sessions · "
         f"{len(rollups)} categories · {usage.assistant_turns:,} turns\n"
     )
+
+    # `--refresh` wipes the content-classification cache so the rules that
+    # just changed actually take effect. Without this, sessions that were
+    # claude-classified before the rule edit keep their old bucket. Done
+    # AFTER session collection so we know exactly which ids to scope to.
+    if args.refresh_all:
+        c_n = invalidate_content_buckets(None)
+        a_n = invalidate_period_aggregates(None)
+        m_n = invalidate_comparison_narratives()
+        console.print(
+            f"[yellow]Refreshed[/yellow] [dim]{c_n} cached bucket(s), "
+            f"{a_n} aggregate(s), {m_n} comparison narrative(s) — "
+            f"global wipe[/dim]\n"
+        )
+    elif args.refresh:
+        sids = [s.session_id for s in sessions]
+        c_n = invalidate_content_buckets(sids)
+        a_n = invalidate_period_aggregates(label)
+        m_n = invalidate_comparison_narratives()
+        console.print(
+            f"[yellow]Refreshed[/yellow] [dim]{c_n} cached bucket(s) in this "
+            f"window, {a_n} aggregate(s) for `{label}`, "
+            f"{m_n} comparison narrative(s)[/dim]\n"
+        )
 
     summaries: dict = {}
     period_aggregates: dict[str, str] = {}
