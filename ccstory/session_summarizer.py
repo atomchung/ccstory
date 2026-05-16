@@ -66,6 +66,15 @@ def _connect() -> sqlite3.Connection:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS session_content_buckets (
+            session_id TEXT PRIMARY KEY,
+            bucket     TEXT NOT NULL,
+            created_at REAL NOT NULL
+        )
+        """
+    )
     conn.commit()
     return conn
 
@@ -427,6 +436,127 @@ def get_period_aggregates(period_key: str) -> dict[str, str]:
         return {r[0]: r[1] for r in rows}
     finally:
         conn.close()
+
+
+_CONTENT_CLASSIFY_PROMPT = """You are categorizing Claude Code sessions by their CONTENT (not just folder name).
+
+For each session below, output ONE JSON object per line, with keys:
+- session_id (the EXACT id string shown)
+- bucket (a category name like coding, investment, writing, research, ops, other)
+
+Pick buckets that reflect what the session was actually about. Use the same bucket name consistently across related sessions. Keep the total bucket vocabulary small (≤ 6).
+
+Sessions:
+{rows}
+
+Output ONLY the JSON lines, no prose, no fences, one object per line."""
+
+
+def _classify_cache_get_many(session_ids: list[str]) -> dict[str, str]:
+    if not session_ids:
+        return {}
+    conn = _connect()
+    try:
+        placeholders = ",".join("?" for _ in session_ids)
+        rows = conn.execute(
+            f"SELECT session_id, bucket FROM session_content_buckets "
+            f"WHERE session_id IN ({placeholders})",
+            session_ids,
+        ).fetchall()
+        return {sid: bucket for sid, bucket in rows}
+    finally:
+        conn.close()
+
+
+def _classify_cache_upsert_many(items: dict[str, str]) -> None:
+    if not items:
+        return
+    conn = _connect()
+    try:
+        now = time.time()
+        conn.executemany(
+            """INSERT OR REPLACE INTO session_content_buckets
+               (session_id, bucket, created_at) VALUES (?, ?, ?)""",
+            [(sid, b, now) for sid, b in items.items()],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _parse_classification_lines(text: str) -> dict[str, str]:
+    """Parse claude's JSON-lines output. Tolerate fences, blank lines."""
+    out: dict[str, str] = {}
+    cleaned = text.strip()
+    for fence in ("```json", "```JSON", "```"):
+        cleaned = cleaned.replace(fence, "")
+    for line in cleaned.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        sid = obj.get("session_id")
+        bucket = obj.get("bucket")
+        if isinstance(sid, str) and isinstance(bucket, str) and bucket:
+            out[sid] = bucket.strip().lower()
+    return out
+
+
+def classify_sessions_by_content(
+    items: list[tuple[str, str, str]],
+    force_refresh: bool = False,
+    timeout: int = 120,
+) -> dict[str, str]:
+    """Batch-classify sessions by content.
+
+    `items` is `[(session_id, project_leaf, summary), ...]`. Returns
+    `{session_id: bucket}` for everything successfully classified (cached
+    or freshly inferred). Sessions absent from the result fell through
+    every path (cache miss + claude unavailable / parse failure).
+
+    Caches each successful classification in `session_content_buckets`
+    so subsequent runs hit zero claude -p calls for already-seen sessions.
+    """
+    if not items:
+        return {}
+
+    sids = [sid for sid, _, _ in items]
+    cached = _classify_cache_get_many(sids) if not force_refresh else {}
+
+    pending = [(sid, leaf, summ) for sid, leaf, summ in items if sid not in cached]
+    if not pending or not claude_bin_available():
+        return cached
+
+    rows = "\n".join(
+        f"[{sid}] folder: {leaf} | summary: {summ[:200]}"
+        for sid, leaf, summ in pending[:80]  # cap prompt size
+    )
+    prompt = _CONTENT_CLASSIFY_PROMPT.format(rows=rows)
+    try:
+        r = subprocess.run(
+            [CLAUDE_BIN, "-p", "--output-format", "text",
+             "--no-session-persistence", prompt],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+        if r.returncode != 0:
+            LOG.warning("content-classify claude -p failed: %s", r.stderr.strip()[:200])
+            return cached
+    except (subprocess.SubprocessError, OSError) as e:
+        LOG.warning("content-classify errored: %s", e)
+        return cached
+
+    parsed = _parse_classification_lines(r.stdout)
+    # Only accept rows that match a session id we actually sent
+    pending_ids = {sid for sid, _, _ in pending}
+    fresh = {sid: b for sid, b in parsed.items() if sid in pending_ids}
+    _classify_cache_upsert_many(fresh)
+
+    combined = dict(cached)
+    combined.update(fresh)
+    return combined
 
 
 def backfill_for_sessions(
