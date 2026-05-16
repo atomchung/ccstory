@@ -18,11 +18,13 @@ Sibling to [ccusage](https://github.com/ryoppippi/ccusage):
 
 ```bash
 pipx install git+https://github.com/atomchung/ccstory.git
-ccstory init       # one-time: auto-categorize from recent sessions
-ccstory week       # the recap
+ccstory init
+ccstory week
 ```
 
-That's it. Full report saves to `~/.ccstory/reports/recap-*.md`.
+That's it. `init` is a one-time auto-categorize step that scans your
+recent sessions; `ccstory week` produces the recap. Full report saves to
+`~/.ccstory/reports/recap-*.md`.
 
 ## Demo
 
@@ -66,40 +68,53 @@ flow after the live debug session on Wednesday.
 
 ### Basic
 
-```bash
-ccstory init                # one-time: auto-categorize recent sessions
-ccstory                     # current month so far (default)
-ccstory week                # past 7 days
-ccstory month               # current month
-ccstory 2026-04             # a specific month
-ccstory trend               # last 8 weeks of sparklines
-```
+| Command | What it does |
+|---|---|
+| `ccstory init` | One-time auto-categorize from recent sessions |
+| `ccstory` | Current month so far (default window) |
+| `ccstory week` | Past 7 days |
+| `ccstory month` | Current month |
+| `ccstory 2026-04` | A specific month |
+| `ccstory trend` | Last 8 weeks of sparklines |
 
 ### Advanced
 
-```bash
-# Window
-ccstory all                          # entire history
-ccstory trend --weeks 12             # custom trend range
-ccstory trend --months 6             # by calendar months
+**Window**
 
-# Narrative depth
-ccstory --minimal                    # numbers only, no per-session lines
-ccstory --llm-narrative              # claude -p per-session prose (slow, opt-in)
-ccstory --no-aggregate               # skip the per-bucket synthesis
+| Command | What it does |
+|---|---|
+| `ccstory all` | Entire history |
+| `ccstory trend --weeks 12` | Custom trend range |
+| `ccstory trend --months 6` | By calendar months |
 
-# Comparison block (vs-previous, auto-attached to week/month)
-ccstory --no-compare                 # skip the entire block
-ccstory --no-compare-narrative       # keep numeric deltas, drop the prose
+**Narrative depth**
 
-# Session classification mode
-ccstory --classify folder            # folder-name rules only
-ccstory --classify content           # claude -p reads each session
-ccstory --classify hybrid            # user rule wins, else content (default)
+| Flag | What it does |
+|---|---|
+| `--minimal` | Numbers only, no per-session lines |
+| `--llm-narrative` | `claude -p` per-session prose (slow, opt-in) |
+| `--no-aggregate` | Skip the per-bucket synthesis |
 
-# Export
-ccstory --for=obsidian               # YAML frontmatter + [[wikilinks]]
-```
+**Comparison block** (vs-previous, auto-attached to week/month)
+
+| Flag | What it does |
+|---|---|
+| `--no-compare` | Skip the entire block |
+| `--no-compare-narrative` | Keep numeric deltas, drop the prose |
+
+**Session classification mode**
+
+| Flag | What it does |
+|---|---|
+| `--classify folder` | Folder-name rules only |
+| `--classify content` | `claude -p` reads each session |
+| `--classify hybrid` | User rule wins, else content (default) |
+
+**Export**
+
+| Flag | What it does |
+|---|---|
+| `--for=obsidian` | YAML frontmatter + `[[wikilinks]]` |
 
 ### Trend output
 
@@ -201,11 +216,12 @@ brand-new model (`[prices.custom]`) with only some keys defaults the rest to
 | Cross-period narrative | — | ✅ |
 | Local-only / no telemetry | ✅ | ✅ |
 
-Pair them:
+Pair them — `ccusage monthly` for the spend, `ccstory month` for the
+breakdown:
 
 ```bash
-ccusage monthly        # how much you spent
-ccstory month          # what you spent it on
+ccusage monthly
+ccstory month
 ```
 
 ## Privacy
