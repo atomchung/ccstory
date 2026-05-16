@@ -10,7 +10,7 @@ The only thing that benefits from caching is per-session LLM narratives
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from .time_tracking import CategoryRollup, SessionStat, rollup_by_category
@@ -70,6 +70,12 @@ class PeriodComparison:
     previous_output_tokens: int
     current_cost_usd: float
     previous_cost_usd: float
+    # Session ids in the previous window — needed for synthesize_comparison
+    # to fetch the prior-period summaries from cache.db.
+    previous_session_ids: list[str] = field(default_factory=list)
+    # 1-2 sentence cross-period narrative synthesized via claude -p (#26).
+    # Optional — None when synthesis is disabled or unavailable.
+    narrative: str | None = None
 
 
 def previous_window(since: datetime, until: datetime) -> tuple[datetime, datetime]:
@@ -119,6 +125,7 @@ def compare_to_previous(
         previous_output_tokens=prev_usage.total_output,
         current_cost_usd=current_usage.total_cost_usd,
         previous_cost_usd=prev_usage.total_cost_usd,
+        previous_session_ids=[s.session_id for s in prev_sessions],
     )
 
 
