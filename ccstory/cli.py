@@ -40,6 +40,7 @@ from .categorizer import (
     ensure_default_config,
     normalize_project_name,
     preview_classification,
+    user_rule_match,
 )
 from .report import (
     print_terminal_card,
@@ -51,6 +52,7 @@ from .session_summarizer import (
     PROJECTS_DIR as SUMMARIZER_PROJECTS_DIR,
     aggregate_for_period,
     claude_bin_available,
+    classify_sessions_by_content,
     get_many,
     import_from_claude_recap,
     missing_ids,
@@ -175,6 +177,55 @@ def _aggregate_with_progress(
                 progress.update(task, description=f"[dim]↳ {r.category}: synthesized[/dim]")
             progress.advance(task)
     return out
+
+
+def _apply_content_classification(
+    sessions: list,
+    summaries: dict,
+    mode: str,
+    console: Console,
+) -> None:
+    """Mutate `sessions[*].category` based on content (#25).
+
+    - mode="content": every session re-bucketed by content
+    - mode="hybrid": only sessions whose folder didn't match a USER rule
+      (i.e. an explicit override in config.toml) get re-bucketed
+    """
+    if mode == "hybrid":
+        eligible = [s for s in sessions if user_rule_match(s.project) is None]
+    else:
+        eligible = list(sessions)
+    if not eligible:
+        return
+
+    items: list[tuple[str, str, str]] = []
+    for s in eligible:
+        summ = summaries.get(s.session_id)
+        if not summ or not summ.summary:
+            continue
+        leaf = normalize_project_name(s.project) or s.project
+        items.append((s.session_id, leaf, summ.summary))
+    if not items:
+        return
+
+    with console.status(
+        f"[dim]Content-classifying {len(items)} session(s) (one batch "
+        f"claude -p call)…[/dim]"
+    ):
+        mapping = classify_sessions_by_content(items)
+    if not mapping:
+        return
+
+    changed = 0
+    for s in eligible:
+        new_bucket = mapping.get(s.session_id)
+        if new_bucket and new_bucket != s.category:
+            s.category = new_bucket
+            changed += 1
+    console.print(
+        f"[green]✓[/green] [dim]content-classified {len(mapping)} session(s), "
+        f"{changed} re-bucketed[/dim]\n"
+    )
 
 
 CLAUDE_P_SEC_PER_SESSION = 40  # rough cold-start average on M1 Pro
@@ -351,6 +402,14 @@ def main(argv: list[str] | None = None) -> int:
                              "(one claude -p call per non-empty bucket)")
     parser.add_argument("--no-compare", action="store_true",
                         help="Skip the vs-previous-window comparison block")
+    parser.add_argument("--classify", choices=["folder", "content", "hybrid"],
+                        default="hybrid",
+                        help="How to bucket sessions. `folder` uses only "
+                             "config + folder-name rules. `content` runs a "
+                             "batch claude -p over each session's narrative. "
+                             "`hybrid` (default) keeps the folder bucket when "
+                             "a user rule in config.toml matched, otherwise "
+                             "falls back to content classification.")
     parser.add_argument("--reports-dir", type=Path, default=REPORTS_DIR,
                         help=f"Markdown report output dir (default: {REPORTS_DIR})")
     parser.add_argument("--version", action="version",
@@ -424,6 +483,16 @@ def main(argv: list[str] | None = None) -> int:
             f"cached={counts['already']}[/dim]\n"
         )
         summaries = get_many([s.session_id for s in sessions])
+
+        # Session-level content classification (#25). Folder-only buckets
+        # mis-attribute monorepo / mixed-purpose sessions; one batch
+        # claude -p call resolves each session by its actual content.
+        if args.classify != "folder" and summaries:
+            _apply_content_classification(
+                sessions, summaries, args.classify, console,
+            )
+            # Re-roll up so per-bucket totals reflect the new categories
+            rollups = rollup_by_category(sessions)
 
         if not args.no_aggregate and summaries:
             period_aggregates = _aggregate_with_progress(
