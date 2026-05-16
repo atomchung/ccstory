@@ -57,11 +57,17 @@ from .session_summarizer import (
     upsert,
 )
 from .time_tracking import CLAUDE_PROJECTS, collect_sessions, rollup_by_category
-from .token_usage import collect_usage
+from .token_usage import (
+    apply_prices,
+    collect_usage,
+    get_snapshot_date,
+    load_prices_config,
+)
 from .trends import collect_trend, compare_to_previous
 
 LOG = logging.getLogger("ccstory.cli")
 REPORTS_DIR = Path.home() / ".ccstory" / "reports"
+CONFIG_PATH = Path.home() / ".ccstory" / "config.toml"
 
 
 def _parse_arg(raw: str | None) -> tuple[datetime, datetime, str]:
@@ -259,6 +265,8 @@ def _run_init(argv: list[str], console: Console) -> int:
 def _run_trend(argv: list[str], console: Console) -> int:
     if not CLAUDE_PROJECTS.exists():
         sys.exit(f"No Claude Code data at {CLAUDE_PROJECTS}.")
+    prices, snapshot = load_prices_config(CONFIG_PATH)
+    apply_prices(prices, snapshot)
     p = argparse.ArgumentParser(
         prog="ccstory trend",
         description="Show per-bucket sparklines over N periods.",
@@ -286,6 +294,7 @@ def _run_trend(argv: list[str], console: Console) -> int:
 
     console.print(render_trend_card(points, period))
     console.print(f"[dim]Full report → {out_path}[/dim]")
+    console.print(f"[dim]Prices as of {get_snapshot_date()}[/dim]")
     return 0
 
 
@@ -355,6 +364,10 @@ def main(argv: list[str] | None = None) -> int:
     if not CLAUDE_PROJECTS.exists():
         sys.exit(f"No Claude Code data at {CLAUDE_PROJECTS}. "
                  "Have you used Claude Code yet?")
+
+    # Load user price overrides (config [prices] table). No-op if absent.
+    prices, snapshot = load_prices_config(CONFIG_PATH)
+    apply_prices(prices, snapshot)
 
     _print_first_run_preview(console)
 
@@ -454,6 +467,7 @@ def main(argv: list[str] | None = None) -> int:
         comparison=comparison,
         console=console,
     )
+    console.print(f"[dim]Prices as of {get_snapshot_date()}[/dim]")
     return 0
 
 
