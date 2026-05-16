@@ -21,7 +21,7 @@ import argparse
 import logging
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from rich.console import Console
@@ -66,8 +66,14 @@ REPORTS_DIR = Path.home() / ".ccstory" / "reports"
 
 
 def _parse_arg(raw: str | None) -> tuple[datetime, datetime, str]:
-    """Translate week|month|all|YYYY-MM → (since, until, label)."""
-    now = datetime.now()
+    """Translate week|month|all|YYYY-MM → (since, until, label).
+
+    Returns tz-aware datetimes in the user's local timezone. Month/week
+    boundaries are local-midnight aligned, so "ccstory week" means the past
+    7 days as the user perceives them — not 7 calendar days in UTC.
+    """
+    now = datetime.now().astimezone()  # tz-aware local
+    local_tz = now.tzinfo
     if raw is None or raw == "month":
         since = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         return since, now, since.strftime("%Y-%m")
@@ -76,12 +82,13 @@ def _parse_arg(raw: str | None) -> tuple[datetime, datetime, str]:
         iso = since.isocalendar()
         return since, now, f"{iso[0]}-W{iso[1]:02d}"
     if raw == "all":
-        return datetime(2000, 1, 1), now, "all"
+        return datetime(2000, 1, 1, tzinfo=local_tz), now, "all"
     m = re.match(r"^(\d{4})-(\d{2})$", raw)
     if m:
         year, month = int(m.group(1)), int(m.group(2))
-        since = datetime(year, month, 1)
-        nxt = datetime(year + (month // 12), (month % 12) + 1, 1)
+        since = datetime(year, month, 1, tzinfo=local_tz)
+        nxt = datetime(year + (month // 12), (month % 12) + 1, 1,
+                       tzinfo=local_tz)
         until = min(now, nxt)
         return since, until, raw
     sys.exit(f"unrecognized window: {raw!r} (use week|month|all|YYYY-MM)")
@@ -385,11 +392,8 @@ def main(argv: list[str] | None = None) -> int:
         if not sessions:
             sys.exit("No engaged sessions in this window.")
         rollups = rollup_by_category(sessions)
-        since_utc = (since.astimezone(timezone.utc) if since.tzinfo
-                     else since.replace(tzinfo=timezone.utc))
-        until_utc = (until.astimezone(timezone.utc) if until.tzinfo
-                     else until.replace(tzinfo=timezone.utc))
-        usage = collect_usage(since_utc, until_utc)
+        # since/until are tz-aware local; collect_usage normalizes to UTC.
+        usage = collect_usage(since, until)
 
     console.print(
         f"[green]✓[/green] {len(sessions)} sessions · "
