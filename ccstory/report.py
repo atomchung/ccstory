@@ -7,6 +7,7 @@ when the CLI finishes.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
 from rich.console import Console, Group
@@ -49,6 +50,32 @@ def _top_session_text(rollup: CategoryRollup, summaries: dict, max_chars: int = 
     return text
 
 
+def _yaml_scalar(value: str) -> str:
+    """Quote a string so it is safe as a YAML scalar.
+
+    Bare strings made only of [A-Za-z0-9_-] pass through unquoted; anything
+    else is emitted JSON-style (double-quoted with backslash escapes), which
+    is also valid YAML.
+    """
+    if value and all(c.isalnum() or c in "-_" for c in value):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _obsidian_wikilink_target(name: str) -> str:
+    """Sanitize a string so it can sit inside `[[...]]` without breaking the link.
+
+    Newlines, `[`, `]`, `|`, `#`, `^` all have meaning in Obsidian wikilink
+    syntax (alias separator, block/heading refs, link terminator). Replace
+    them with `-` to keep the link parseable.
+    """
+    cleaned = name.replace("\r", " ").replace("\n", " ")
+    for ch in ("[", "]", "|", "#", "^"):
+        cleaned = cleaned.replace(ch, "-")
+    cleaned = cleaned.strip()
+    return cleaned or "untitled"
+
+
 def _obsidian_frontmatter(
     since: datetime,
     until: datetime,
@@ -62,15 +89,20 @@ def _obsidian_frontmatter(
     """
     total_min = sum(r.active_min for r in rollups)
     total_h = total_min / 60
-    top_focus = rollups[0].category if rollups else ""
+    # Don't rely on caller-side sort; compute the top by active_min directly.
+    top_focus = (
+        max(rollups, key=lambda r: r.active_min).category if rollups else ""
+    )
     buckets = [r.category for r in rollups]
     lines = ["---"]
     lines.append(f"date_start: {since.date().isoformat()}")
     lines.append(f"date_end: {until.date().isoformat()}")
     lines.append(f"active_hours: {total_h:.1f}")
     if top_focus:
-        lines.append(f"top_focus: {top_focus}")
-    lines.append("buckets: [" + ", ".join(buckets) + "]")
+        lines.append(f"top_focus: {_yaml_scalar(top_focus)}")
+    lines.append(
+        "buckets: [" + ", ".join(_yaml_scalar(b) for b in buckets) + "]"
+    )
     lines.append(f"cost_usd: {usage.total_cost_usd:.2f}")
     lines.append(f"output_tokens: {usage.total_output}")
     lines.append("---")
@@ -164,6 +196,7 @@ def render_report(
             mins = int(s.active_sec // 60)
             if flavor == "obsidian":
                 leaf = normalize_project_name(s.project) or s.project
+                leaf = _obsidian_wikilink_target(leaf)
                 lines.append(
                     f"- **{time_str}** · {mins}m · {s.msg_count} msg · "
                     f"[[{leaf}]] — {text}"

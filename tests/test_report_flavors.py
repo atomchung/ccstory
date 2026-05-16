@@ -184,3 +184,105 @@ class TestObsidianFlavor:
         assert "buckets: [coding, writing]" in md
         # Top focus is the bucket with the most active time
         assert "top_focus: coding" in md
+
+
+class TestObsidianYamlEscaping:
+    def test_bucket_with_special_chars_is_quoted(self):
+        s = _stat("client: acme, inc", "-Users-alice-code-foo", "s1", mins=60)
+        md = render_report(
+            label="2026-05",
+            since=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 31, tzinfo=timezone.utc),
+            sessions=[s],
+            rollups=[_rollup("client: acme, inc", [s])],
+            usage=_usage(),
+            summaries={},
+            flavor="obsidian",
+        )
+        # Bare emit would be: top_focus: client: acme, inc  → broken YAML
+        # We expect JSON-style double quoting.
+        assert 'top_focus: "client: acme, inc"' in md
+        assert 'buckets: ["client: acme, inc"]' in md
+
+    def test_simple_alnum_bucket_not_quoted(self):
+        s = _stat("coding", "-Users-alice-code-foo", "s1", mins=60)
+        md = render_report(
+            label="2026-05",
+            since=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 31, tzinfo=timezone.utc),
+            sessions=[s],
+            rollups=[_rollup("coding", [s])],
+            usage=_usage(),
+            summaries={},
+            flavor="obsidian",
+        )
+        # Plain identifiers stay unquoted to keep diffs clean.
+        assert "top_focus: coding" in md
+        assert "buckets: [coding]" in md
+
+    def test_unsorted_rollups_still_pick_largest(self):
+        # If a caller ever hands in rollups not sorted by active_min,
+        # top_focus must still be the bucket with the most time.
+        small = _stat("small", "-Users-alice-code-foo", "s1", mins=10)
+        big = _stat("big", "-Users-alice-code-bar", "s2", mins=120)
+        md = render_report(
+            label="2026-05",
+            since=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 31, tzinfo=timezone.utc),
+            sessions=[small, big],
+            rollups=[_rollup("small", [small]), _rollup("big", [big])],
+            usage=_usage(),
+            summaries={},
+            flavor="obsidian",
+        )
+        assert "top_focus: big" in md
+
+
+class TestObsidianWikilinkEscaping:
+    def test_wikilink_pipe_is_stripped(self):
+        s = _stat("coding", "weird|name", "s1")
+        md = render_report(
+            label="2026-05",
+            since=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 31, tzinfo=timezone.utc),
+            sessions=[s],
+            rollups=[_rollup("coding", [s])],
+            usage=_usage(),
+            summaries={},
+            flavor="obsidian",
+        )
+        # `|` would otherwise be interpreted as the wikilink alias separator
+        assert "[[weird|name]]" not in md
+        assert "[[weird-name]]" in md
+
+    def test_wikilink_bracket_is_stripped(self):
+        s = _stat("coding", "name]withbracket", "s1")
+        md = render_report(
+            label="2026-05",
+            since=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 31, tzinfo=timezone.utc),
+            sessions=[s],
+            rollups=[_rollup("coding", [s])],
+            usage=_usage(),
+            summaries={},
+            flavor="obsidian",
+        )
+        # `]` would terminate the wikilink prematurely
+        assert "[[name]withbracket]]" not in md
+        assert "[[name-withbracket]]" in md
+
+    def test_wikilink_newline_is_collapsed(self):
+        s = _stat("coding", "name\nwithnewline", "s1")
+        md = render_report(
+            label="2026-05",
+            since=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 31, tzinfo=timezone.utc),
+            sessions=[s],
+            rollups=[_rollup("coding", [s])],
+            usage=_usage(),
+            summaries={},
+            flavor="obsidian",
+        )
+        # Newline in a wikilink breaks Obsidian's parser
+        assert "[[name\nwithnewline]]" not in md
+        assert "[[name withnewline]]" in md
