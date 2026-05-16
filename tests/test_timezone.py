@@ -156,3 +156,26 @@ class TestCollectTrendTzAware:
         assert len(points) == 2
         for p in points:
             assert p.total_h == 0.0
+
+    def test_naive_now_input_does_not_crash(self, tmp_home: Path, jsonl_factory):
+        # Caller passes a naive `now` — implementation must normalize to
+        # tz-aware before windowing, otherwise the s.start (aware) vs
+        # window-start (naive) comparison raises TypeError.
+        jsonl_factory(
+            "-Users-alice-code-x",
+            "sess-tz-mix",
+            [
+                make_user_msg("hi", _ts(2026, 5, 10, 10, 0, 0)),
+                make_assistant_msg("ok", _ts(2026, 5, 10, 10, 1, 0), "msg_1"),
+            ],
+        )
+        naive_now = datetime(2026, 5, 11, 0, 0, 0)
+        points = collect_trend(period="week", count=2, now=naive_now)
+        assert len(points) == 2
+
+    def test_naive_month_now_input_does_not_crash(
+        self, tmp_home: Path, jsonl_factory,
+    ):
+        naive_now = datetime(2026, 5, 11, 0, 0, 0)
+        points = collect_trend(period="month", count=2, now=naive_now)
+        assert len(points) == 2

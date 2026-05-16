@@ -193,6 +193,8 @@ def collect_trend(
     from .time_tracking import collect_sessions
 
     now = now or datetime.now().astimezone()  # tz-aware local
+    if now.tzinfo is None:
+        now = now.astimezone()  # naive caller input → local-tz aware
     if period == "week":
         windows = _week_windows(now, count)
     elif period == "month":
