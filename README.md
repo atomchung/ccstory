@@ -29,7 +29,6 @@ recent sessions; `ccstory week` produces the recap. Full report saves to
 ## Demo
 
 ```
-<img width="442" height="695" alt="image" src="https://github.com/user-attachments/assets/717b909b-973c-4148-9590-7dbcb1816a22" />
 
 ╭──────────────── Claude Code Recap · May 5 – 12, 2026 ────────────────╮
 │                                                                      │
