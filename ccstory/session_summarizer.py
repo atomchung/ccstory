@@ -77,7 +77,23 @@ class SessionSummary:
 
 def _connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        # PRAGMA integrity_check returns "ok" on a healthy db. A corrupt
+        # file errors here instead of much later inside a query, so we
+        # can give the user a clear recovery hint at startup time.
+        conn.execute("PRAGMA schema_version").fetchone()
+    except sqlite3.DatabaseError as e:
+        import sys as _sys
+        print(
+            f"ccstory: error: cache at {DB_PATH} is corrupted ({e}).\n"
+            f"ccstory: to reset, delete the file and re-run:\n"
+            f"    rm {DB_PATH}\n"
+            f"You'll lose cached per-session narratives + bucket assignments; "
+            f"sessions get re-summarized on the next run.",
+            file=_sys.stderr,
+        )
+        raise SystemExit(1) from e
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS session_summaries (

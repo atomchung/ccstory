@@ -742,6 +742,16 @@ def main(argv: list[str] | None = None) -> int:
         console=console,
     )
     console.print(f"[dim]Prices as of {get_snapshot_date()}[/dim]")
+    # Breadcrumb — most users discover wrong buckets in the rendered report
+    # and have no idea what to do about it. Point them at the rule-edit CLI
+    # right here. Hide when --classify=folder since those users opted out of
+    # any reclassification path anyway.
+    if args.classify != "folder":
+        console.print(
+            "[dim]Bucket looks wrong? "
+            "`ccstory category set <bucket> <keyword>` to pin a project, "
+            "then re-run with `--refresh`.[/dim]"
+        )
     return 0
 
 

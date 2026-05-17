@@ -76,6 +76,9 @@ flow after the live debug session on Wednesday.
 | `ccstory month` | Current month |
 | `ccstory 2026-04` | A specific month |
 | `ccstory trend` | Last 8 weeks of sparklines |
+| `ccstory category list` | Show your custom bucket rules |
+| `ccstory category set <bucket> <keyword>…` | Pin a project to a bucket |
+| `ccstory category unset <bucket> <keyword>…` | Remove a keyword from a bucket |
 
 ### Advanced
 
@@ -115,6 +118,13 @@ flow after the live debug session on Wednesday.
 | Flag | What it does |
 |---|---|
 | `--for=obsidian` | YAML frontmatter + `[[wikilinks]]` |
+
+**Refresh (apply rule changes retroactively)**
+
+| Flag | What it does |
+|---|---|
+| `--refresh` | Re-classify cached sessions in this window after a rule edit |
+| `--refresh-all` | Wipe the entire content-classification cache, not just this window |
 
 ### Trend output
 
