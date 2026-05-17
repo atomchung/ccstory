@@ -343,7 +343,6 @@ def summarize_via_claude_p(excerpt: str, timeout: int = 60) -> str | None:
             [
                 CLAUDE_BIN, "-p",
                 "--output-format", "text",
-                "--no-session-persistence",
                 prompt,
             ],
             capture_output=True, text=True, timeout=timeout, check=False,
@@ -486,8 +485,7 @@ def synthesize_overall_for_period(
 
     try:
         r = subprocess.run(
-            [CLAUDE_BIN, "-p", "--output-format", "text",
-             "--no-session-persistence", prompt],
+            [CLAUDE_BIN, "-p", "--output-format", "text", prompt],
             capture_output=True, text=True, timeout=timeout, check=False,
         )
         if r.returncode != 0:
@@ -715,8 +713,7 @@ def synthesize_comparison(
     )
     try:
         r = subprocess.run(
-            [CLAUDE_BIN, "-p", "--output-format", "text",
-             "--no-session-persistence", prompt],
+            [CLAUDE_BIN, "-p", "--output-format", "text", prompt],
             capture_output=True, text=True, timeout=timeout, check=False,
         )
         if r.returncode != 0:
@@ -853,8 +850,7 @@ def classify_sessions_by_content(
         prompt = _CONTENT_CLASSIFY_PROMPT.format(rows=rows)
         try:
             r = subprocess.run(
-                [CLAUDE_BIN, "-p", "--output-format", "text",
-                 "--no-session-persistence", prompt],
+                [CLAUDE_BIN, "-p", "--output-format", "text", prompt],
                 capture_output=True, text=True, timeout=timeout, check=False,
             )
             if r.returncode != 0:

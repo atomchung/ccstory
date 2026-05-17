@@ -98,8 +98,7 @@ def _call_claude_p(prompt: str, timeout: int = 120) -> str | None:
         return None
     try:
         r = subprocess.run(
-            [CLAUDE_BIN, "-p", "--output-format", "text",
-             "--no-session-persistence", prompt],
+            [CLAUDE_BIN, "-p", "--output-format", "text", prompt],
             capture_output=True, text=True, timeout=timeout, check=False,
         )
         if r.returncode != 0:
