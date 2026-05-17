@@ -17,7 +17,7 @@ Sibling to [ccusage](https://github.com/ryoppippi/ccusage):
 ## Quick start
 
 ```bash
-pipx install git+https://github.com/atomchung/ccstory.git
+pipx install ccstory
 ccstory init
 ccstory week
 ```
