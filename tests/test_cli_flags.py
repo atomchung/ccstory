@@ -11,6 +11,8 @@ import argparse
 
 import pytest
 
+from ccstory.cli import resolve_output_format
+
 
 def _build_parser() -> argparse.ArgumentParser:
     """Mirror the parser shape from cli.main() so we can test --minimal /
@@ -78,3 +80,91 @@ class TestNoSummaryDeprecation:
         # When --minimal is already set, the deprecation path is skipped
         assert captured == []
         assert args.minimal is True
+
+
+class TestResolveOutputFormat:
+    """`--format=auto` resolves to markdown or card based on env + tty.
+
+    The rule (locked here so Claude Code chat rendering doesn't silently
+    regress): markdown wins when `CLAUDECODE=1` is set or stdout is not a
+    tty; otherwise card. Explicit `markdown` / `card` always pass through.
+    """
+
+    def test_explicit_markdown_passes_through(self):
+        assert resolve_output_format("markdown", env={}, isatty=True) == "markdown"
+
+    def test_explicit_card_passes_through_even_in_claude_code(self):
+        # User opt-in to card mode (e.g. piping to a screenshot tool inside
+        # Claude Code) must override the auto-detect.
+        assert (
+            resolve_output_format("card", env={"CLAUDECODE": "1"}, isatty=False)
+            == "card"
+        )
+
+    def test_auto_in_claude_code_picks_markdown(self):
+        assert (
+            resolve_output_format("auto", env={"CLAUDECODE": "1"}, isatty=True)
+            == "markdown"
+        )
+
+    def test_auto_in_plain_terminal_picks_card(self):
+        assert resolve_output_format("auto", env={}, isatty=True) == "card"
+
+    def test_auto_when_piped_picks_markdown(self):
+        # Non-tty stdout (pipe / redirect) → user likely wants raw markdown,
+        # not ANSI-escaped Rich panel.
+        assert resolve_output_format("auto", env={}, isatty=False) == "markdown"
+
+    def test_claudecode_other_value_does_not_trigger(self):
+        # Only the canonical "1" enables markdown; spurious values
+        # (e.g. "0", "false") fall back to tty detection.
+        assert (
+            resolve_output_format("auto", env={"CLAUDECODE": "0"}, isatty=True)
+            == "card"
+        )
+
+    def test_claudecode_empty_string_does_not_trigger(self):
+        # Empty env var (e.g. shell unset-but-exported) is falsy; behavior
+        # must match "unset" — see also `CLAUDE_CODE_DISABLE_CRON=` which
+        # is sometimes used to disable a feature without removing the var.
+        assert (
+            resolve_output_format("auto", env={"CLAUDECODE": ""}, isatty=True)
+            == "card"
+        )
+
+    def test_non_auto_string_passes_through_verbatim(self):
+        # Helper does NOT validate `arg`; the CLI parser owns that via
+        # `choices=VALID_OUTPUT_FORMATS`. This lock prevents future
+        # "be helpful and normalize" tweaks that would silently mask
+        # argparse errors.
+        assert resolve_output_format("Markdown", env={}, isatty=True) == "Markdown"
+        assert resolve_output_format("json", env={}, isatty=True) == "json"
+
+
+class TestFormatArgparseValidation:
+    """The parser is the validation boundary — bad --format values must die
+    at argparse time, not silently fall through resolve_output_format.
+    """
+
+    def _build_parser(self) -> argparse.ArgumentParser:
+        from ccstory.cli import VALID_OUTPUT_FORMATS
+
+        p = argparse.ArgumentParser()
+        p.add_argument("--format", dest="output_format",
+                       choices=VALID_OUTPUT_FORMATS, default="auto")
+        return p
+
+    def test_valid_choices(self):
+        for choice in ("auto", "markdown", "card"):
+            args = self._build_parser().parse_args(["--format", choice])
+            assert args.output_format == choice
+
+    def test_invalid_choice_exits(self):
+        with pytest.raises(SystemExit):
+            self._build_parser().parse_args(["--format", "json"])
+
+    def test_case_sensitive(self):
+        # argparse `choices` is case-sensitive; "Markdown" must be rejected
+        # even though it looks plausibly correct.
+        with pytest.raises(SystemExit):
+            self._build_parser().parse_args(["--format", "Markdown"])
