@@ -322,21 +322,57 @@ def _backfill_with_progress(
 
 
 def _run_init(argv: list[str], console: Console) -> int:
-    from .init_categories import run_init
+    from .init_categories import DEEP_DEFAULT_DAYS, DEEP_DEFAULT_MAX, run_init
     p = argparse.ArgumentParser(
         prog="ccstory init",
-        description="Scan recent sessions and auto-suggest category buckets "
-                    "via one claude -p call.",
+        description=(
+            "Set up category classification. Three modes:\n"
+            "  Quick (default)  — LLM looks at folder names (~10s).\n"
+            "  Deep             — LLM classifies recent sessions individually "
+            "(~1 min).\n"
+            "  Skip             — built-in keyword defaults only (no LLM).\n"
+            "\n"
+            "Run `ccstory init` with no flag for an interactive picker, or "
+            "use a mode flag to skip the prompt."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    mode_group = p.add_mutually_exclusive_group()
+    mode_group.add_argument("--quick", action="store_const", const="quick",
+                            dest="mode",
+                            help="LLM proposes folder→bucket rules (~10s)")
+    mode_group.add_argument("--deep", action="store_const", const="deep",
+                            dest="mode",
+                            help="LLM classifies sampled sessions (~1 min)")
+    mode_group.add_argument("--skip", action="store_const", const="skip",
+                            dest="mode",
+                            help="Write template config, no LLM call")
     p.add_argument("--days", type=int, default=30,
-                   help="How many past days to scan (default 30)")
+                   help="Quick mode: how many past days to scan for folder "
+                        "samples (default 30)")
+    p.add_argument("--deep-days", type=int, default=DEEP_DEFAULT_DAYS,
+                   help=f"Deep mode: time range to sample (default "
+                        f"{DEEP_DEFAULT_DAYS})")
+    p.add_argument("--max", dest="deep_max", type=int, default=DEEP_DEFAULT_MAX,
+                   help=f"Deep mode: session cap (default {DEEP_DEFAULT_MAX})")
     p.add_argument("--dry-run", action="store_true",
                    help="Print proposal but don't write config.toml")
-    p.add_argument("-y", "--yes", action="store_true",
-                   help="Skip the confirmation prompt")
     args = p.parse_args(argv)
-    return run_init(days=args.days, dry_run=args.dry_run,
-                    auto_yes=args.yes, console=console)
+
+    # --days/--deep-days/--max only make sense with their respective mode;
+    # error early instead of silently using a default users didn't intend.
+    if args.mode is None and (
+        argv and any(a.startswith(("--deep-days", "--max")) for a in argv)
+    ):
+        p.error("--deep-days / --max require --deep")
+    return run_init(
+        mode=args.mode,
+        days=args.days,
+        deep_days=args.deep_days,
+        deep_max=args.deep_max,
+        dry_run=args.dry_run,
+        console=console,
+    )
 
 
 def _run_category(argv: list[str], console: Console) -> int:

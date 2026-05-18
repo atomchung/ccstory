@@ -347,8 +347,14 @@ def preview_classification(projects: list[str]) -> dict[str, list[tuple[str, str
     return out
 
 
-def ensure_default_config(path: Path = CONFIG_PATH) -> bool:
-    """If no config exists, scaffold a commented template. Returns True if written."""
+def ensure_default_config(path: Path | None = None) -> bool:
+    """If no config exists, scaffold a commented template. Returns True if written.
+
+    ``path`` resolves to module-level ``CONFIG_PATH`` at call time when
+    omitted, so test monkeypatches take effect.
+    """
+    if path is None:
+        path = CONFIG_PATH
     if path.exists():
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
