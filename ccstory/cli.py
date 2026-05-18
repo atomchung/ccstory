@@ -504,16 +504,28 @@ def _run_trend(argv: list[str], console: Console) -> int:
                    help="Number of 7-day windows (default 8)")
     p.add_argument("--months", type=int, default=None,
                    help="Number of calendar months")
+    p.add_argument("--classify", choices=["folder", "content", "hybrid"],
+                   default="hybrid",
+                   help="Bucket resolution mode — must match what `ccstory "
+                        "week` is using to keep vocabulary aligned across "
+                        "trend, week, and vs-previous views.")
     p.add_argument("--reports-dir", type=Path, default=REPORTS_DIR)
     args = p.parse_args(argv)
 
     period = "month" if args.months else "week"
     count = args.months or args.weeks or 8
 
+    # Trend must use the same fallback bucket as the main flow — otherwise a
+    # user who set default_bucket = "other" gets "coding" leaking into trend
+    # for cache-miss sessions. Bug surfaced in codex review of PR-A.
+    fallback_bucket = load_settings(CONFIG_PATH).get("default_bucket", "coding")
     with console.status(
         f"[dim]Computing trend over last {count} {period}s…[/dim]"
     ):
-        points = collect_trend(period=period, count=count)
+        points = collect_trend(
+            period=period, count=count,
+            mode=args.classify, fallback=fallback_bucket,
+        )
     if not any(p.total_h for p in points):
         sys.exit("No engaged sessions across the trend window.")
 
@@ -549,9 +561,10 @@ def main(argv: list[str] | None = None) -> int:
                     "ccusage tells you the bill; ccstory tells the story.",
         epilog=(
             "Subcommands:\n"
-            "  ccstory init [--days N] [--dry-run] [-y]\n"
-            "      Scan recent sessions and propose category buckets via\n"
-            "      one claude -p call. Writes ~/.ccstory/config.toml.\n"
+            "  ccstory init [--quick | --deep | --skip] [--dry-run]\n"
+            "      Set up category classification. Interactive picker by\n"
+            "      default; pass a mode flag to skip the prompt. Writes\n"
+            "      ~/.ccstory/config.toml.\n"
             "  ccstory trend [--weeks N | --months N]\n"
             "      Per-bucket sparklines + burn-% over N periods.\n"
             "  ccstory category {list,set,unset} ...\n"
@@ -566,7 +579,8 @@ def main(argv: list[str] | None = None) -> int:
             "  ccstory week --refresh        # re-classify cached sessions in window\n"
             "  ccstory 2026-04               # specific month\n"
             "  ccstory trend --months 6      # 6-month sparkline view\n"
-            "  ccstory init -y               # auto-categorize (no prompt)\n"
+            "  ccstory init --quick          # folder-name LLM, no prompt\n"
+            "  ccstory init --deep           # session-level LLM, no prompt\n"
             "  ccstory category set research ai-project-research"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,

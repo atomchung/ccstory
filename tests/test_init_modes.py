@@ -163,6 +163,34 @@ class TestRunQuickAndDeepClaudeUnavailable:
         assert rc == 1
 
 
+class TestRunDeepClampsBadInputs:
+    """Codex review caught that raw `days` flowed into datetime arithmetic
+    before `sample_sessions_for_deep` could clamp. Verify both inputs clamp."""
+
+    def test_deep_clamps_days_zero(self, tmp_home: Path):
+        # claude_bin_available=False short-circuits before any sampling, but the
+        # clamp runs before that check — make claude available so the warning
+        # path is reachable.
+        with patch.object(init_categories, "claude_bin_available", return_value=True), \
+             patch.object(init_categories, "collect_sessions", return_value=[]):
+            rc = run_deep_mode(
+                days=0, max_n=200,
+                console=Console(file=open("/dev/null", "w")),
+            )
+        # Returns 0 (no sessions) — the important thing is no crash and no
+        # silent "since = now" sampling. Clamp message would print to console.
+        assert rc == 0
+
+    def test_deep_clamps_max_n_zero(self, tmp_home: Path):
+        with patch.object(init_categories, "claude_bin_available", return_value=True), \
+             patch.object(init_categories, "collect_sessions", return_value=[]):
+            rc = run_deep_mode(
+                days=7, max_n=0,
+                console=Console(file=open("/dev/null", "w")),
+            )
+        assert rc == 0
+
+
 # --- Default arg sanity -----------------------------------------------------
 
 def test_deep_defaults_match_documentation():

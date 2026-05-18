@@ -366,6 +366,23 @@ def run_deep_mode(
         )
         return 1
 
+    # Codex review caught this: raw `days` from CLI flows into both
+    # `timedelta` here and `sample_sessions_for_deep` below. The latter
+    # clamps internally; we have to clamp here too so `--deep-days 0`
+    # doesn't silently sample "from now".
+    if days <= 0:
+        days = DEEP_DEFAULT_DAYS
+        console.print(
+            f"[yellow]![/yellow] --deep-days must be ≥ 1; clamped to "
+            f"{DEEP_DEFAULT_DAYS}."
+        )
+    if max_n <= 0:
+        max_n = DEEP_DEFAULT_MAX
+        console.print(
+            f"[yellow]![/yellow] --max must be ≥ 1; clamped to "
+            f"{DEEP_DEFAULT_MAX}."
+        )
+
     since = datetime.now() - timedelta(days=days)
     console.print(
         f"[bold]Collecting sessions in the last {days} day(s)…[/bold]"
