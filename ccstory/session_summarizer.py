@@ -745,16 +745,55 @@ def synthesize_comparison(
 
 _CONTENT_CLASSIFY_PROMPT = """You are categorizing Claude Code sessions by their CONTENT (not just folder name).
 
+Preferred bucket vocabulary (from this user's config — prefer these names so the report stays aligned with the user's mental model):
+{category_context}
+
+Pick from the preferred vocabulary when a session reasonably fits. Only introduce a NEW bucket name if multiple sessions clearly share a theme that none of the preferred buckets cover. Keep spelling exactly consistent across rows. Keep the total bucket vocabulary small (≤ 6).
+
 For each session below, output ONE JSON object per line, with keys:
 - session_id (the EXACT id string shown)
-- bucket (a category name like coding, investment, writing, research, ops, other)
-
-Pick buckets that reflect what the session was actually about. Use the same bucket name consistently across related sessions. Keep the total bucket vocabulary small (≤ 6).
+- bucket (a category name)
 
 Sessions:
 {rows}
 
 Output ONLY the JSON lines, no prose, no fences, one object per line."""
+
+
+# Default vocabulary handed to the LLM when the user has no `[categories]`.
+# Mirrors the 4 named defaults documented in `init_categories._INIT_PROMPT`
+# so the init path and content path advertise the same source-of-truth.
+_DEFAULT_VOCAB_BLOCK = (
+    "- coding: software projects (apps, CLIs, libraries, infra, dashboards)\n"
+    "- investment: stock / portfolio / trading / equity research\n"
+    "- writing: blogs, newsletters, posts, drafts, essays, docs\n"
+    "- other: scratch, sandbox, experiments, anything that doesn't fit above"
+)
+
+
+def _build_category_context() -> str:
+    """Render the user's `[categories]` (or the default 4-bucket vocab) as a
+    prompt block for `_CONTENT_CLASSIFY_PROMPT`.
+
+    Read at format-time so config edits take effect on the next run without
+    a process restart. Falls back to `_DEFAULT_VOCAB_BLOCK` when the user
+    has no `[categories]` table — same vocabulary `init` advertises, so the
+    two LLM paths never publish parallel bucket names (issue #62).
+    """
+    # Local import to avoid a circular dependency at module load
+    # (`categorizer` doesn't import this module, but keeping the boundary
+    # explicit makes test monkeypatching cleaner).
+    from .categorizer import list_user_categories
+    cats = list_user_categories()
+    if not cats:
+        return _DEFAULT_VOCAB_BLOCK
+    lines = []
+    for bucket in sorted(cats):
+        kws = cats[bucket]
+        if not kws:
+            continue
+        lines.append(f"- {bucket}: project leaves {', '.join(kws)}")
+    return "\n".join(lines) if lines else _DEFAULT_VOCAB_BLOCK
 
 
 def _classify_cache_get_many(session_ids: list[str]) -> dict[str, str]:
@@ -843,6 +882,10 @@ def classify_sessions_by_content(
         return cached
 
     combined = dict(cached)
+    # Resolve user [categories] once for the whole pass — every chunk shares
+    # the same vocab block, and avoiding per-chunk file IO matters when a big
+    # window splits into 3+ batches.
+    category_context = _build_category_context()
 
     for chunk_start in range(0, len(pending), batch_size):
         chunk = pending[chunk_start:chunk_start + batch_size]
@@ -850,7 +893,9 @@ def classify_sessions_by_content(
             f"[{sid}] folder: {leaf} | summary: {summ[:200]}"
             for sid, leaf, summ in chunk
         )
-        prompt = _CONTENT_CLASSIFY_PROMPT.format(rows=rows)
+        prompt = _CONTENT_CLASSIFY_PROMPT.format(
+            rows=rows, category_context=category_context,
+        )
         try:
             r = subprocess.run(
                 [CLAUDE_BIN, "-p", "--output-format", "text",
