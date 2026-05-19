@@ -275,6 +275,23 @@ class TestCategoryContextInPrompt:
         cfg.write_text("[categories]\n", encoding="utf-8")
         assert _build_category_context() == _DEFAULT_VOCAB_BLOCK
 
+    def test_categories_with_only_empty_needles_uses_default_vocab(
+        self, tmp_home: Path,
+    ):
+        # `[categories]` table is non-empty (truthy dict) but every bucket's
+        # needle list is empty — can happen after `ccstory category unset`
+        # removes the last keyword from a bucket if the bucket-drop path
+        # ever regresses. Exercises the second fallback branch in
+        # _build_category_context (lines == [] → _DEFAULT_VOCAB_BLOCK).
+        cfg = tmp_home / ".ccstory" / "config.toml"
+        cfg.write_text(
+            "[categories]\n"
+            '"content" = []\n'
+            '"work"    = []\n',
+            encoding="utf-8",
+        )
+        assert _build_category_context() == _DEFAULT_VOCAB_BLOCK
+
     def test_user_categories_render_as_vocab_block(self, tmp_home: Path):
         cfg = tmp_home / ".ccstory" / "config.toml"
         cfg.write_text(
