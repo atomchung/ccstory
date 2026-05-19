@@ -90,18 +90,25 @@ def _parse_arg(raw: str | None) -> tuple[datetime, datetime, str]:
     Returns tz-aware datetimes in the user's local timezone. Month/week
     boundaries are local-midnight aligned, so "ccstory week" means the past
     7 days as the user perceives them — not 7 calendar days in UTC.
+
+    Label policy: when the window endpoint is ``now`` (relative time), the
+    label embeds both endpoint dates as ``YYYY-MM-DD_YYYY-MM-DD`` so two
+    runs on different days don't collide on the output file. Only a fully
+    past ``YYYY-MM`` keeps the compact symbolic label (#58).
     """
     now = datetime.now().astimezone()  # tz-aware local
     local_tz = now.tzinfo
+    def _range_label(a: datetime, b: datetime) -> str:
+        return f"{a:%Y-%m-%d}_{b:%Y-%m-%d}"
+
     if raw is None or raw == "month":
         since = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        return since, now, since.strftime("%Y-%m")
+        return since, now, _range_label(since, now)
     if raw == "week":
         since = now - timedelta(days=7)
-        iso = since.isocalendar()
-        return since, now, f"{iso[0]}-W{iso[1]:02d}"
+        return since, now, _range_label(since, now)
     if raw == "all":
-        return datetime(2000, 1, 1, tzinfo=local_tz), now, "all"
+        return datetime(2000, 1, 1, tzinfo=local_tz), now, f"all-thru-{now:%Y-%m-%d}"
     m = re.match(r"^(\d{4})-(\d{2})$", raw)
     if m:
         year, month = int(m.group(1)), int(m.group(2))
@@ -109,6 +116,10 @@ def _parse_arg(raw: str | None) -> tuple[datetime, datetime, str]:
         nxt = datetime(year + (month // 12), (month % 12) + 1, 1,
                        tzinfo=local_tz)
         until = min(now, nxt)
+        # In-progress month: endpoint is `now`, so the window is relative —
+        # use a range label. Fully past month: keep the compact `YYYY-MM`.
+        if until < nxt:
+            return since, until, _range_label(since, until)
         return since, until, raw
     sys.exit(f"unrecognized window: {raw!r} (use week|month|all|YYYY-MM)")
 

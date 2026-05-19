@@ -43,7 +43,7 @@ recent sessions; `ccstory week` produces the recap. Full report saves to
 │  writing         █████████░░░░░░░░░░░░░░░░░░░    6.2h    30%         │
 │  research        █████░░░░░░░░░░░░░░░░░░░░░░░    3.5h    17%         │
 │                                                                      │
-│  Full report → ~/.ccstory/reports/recap-2026-W19.md                  │
+│  Full report → ~/.ccstory/reports/recap-2026-05-10_2026-05-17.md     │
 │                                                                      │
 ╰────────────────────────────── ccstory ───────────────────────────────╯
 ```
