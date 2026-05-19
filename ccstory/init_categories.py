@@ -499,15 +499,21 @@ def run_skip_mode(
 # ---------------------------------------------------------------------------
 
 def _prompt_for_mode(console: Console) -> str:
-    """Interactive [Y]Quick / [n]Deep / [s]Skip selector. Returns mode key."""
+    """Interactive [Y]Quick / [n]Deep / [s]Skip selector. Returns mode key.
+
+    Copy wording follows the codex naming-review guidance: name what each
+    mode *does* (the action), not its internal mechanic. Users pick on the
+    speed↔accuracy axis, so the labels surface that trade-off in the time
+    annotation.
+    """
     console.print(
-        "\nHow to set up?\n"
-        "  [bold][Y][/bold] Quick     — LLM looks at folder names "
-        "([dim]~10s[/dim])\n"
-        "  [bold][n][/bold] Deep      — LLM analyses recent sessions "
-        f"([dim]~1 min, last {DEEP_DEFAULT_DAYS}d, cap {DEEP_DEFAULT_MAX}[/dim])\n"
-        "  [bold][s][/bold] Skip      — use built-in defaults only "
-        "([dim]no LLM[/dim])\n"
+        "\nSet up classification:\n"
+        "  [bold][Y][/bold] Quick     — Infer categories from folder names "
+        "+ sample messages [dim](~10s)[/dim]\n"
+        "  [bold][n][/bold] Deep      — Classify recent sessions individually "
+        f"[dim](~1 min, last {DEEP_DEFAULT_DAYS}d, cap {DEEP_DEFAULT_MAX})[/dim]\n"
+        "  [bold][s][/bold] Skip      — Use built-in keyword defaults only "
+        "[dim](no LLM)[/dim]\n"
     )
     choice = Prompt.ask(
         "Choose",
@@ -527,16 +533,27 @@ def run_init(
     dry_run: bool = False,
     console: Console | None = None,
 ) -> int:
-    """Entry point invoked by ``ccstory init``.
+    """Set up classification — entry point invoked by ``ccstory init``.
 
-    ``mode`` selects which sub-mode runs:
-      - ``"quick"`` — Quick mode (folder-name LLM)
-      - ``"deep"``  — Deep mode (session-level LLM)
-      - ``"skip"``  — Skip mode (template config only)
-      - ``None``    — prompt the user interactively
+    Three modes, picked interactively (``mode=None``) or via flag:
 
-    ``days`` controls Quick mode's session-sample lookback (only used to
-    pick which folders have recent activity). ``deep_days`` / ``deep_max``
+    ``"quick"`` — Infer categories from folder names + sample messages.
+        One ``claude -p`` call (~10s). Writes folder→bucket rules to
+        ``~/.ccstory/config.toml``. Best when folder names are descriptive
+        (``stock-dashboard``, ``rednote-analysis``).
+
+    ``"deep"`` — Classify recent sessions individually.
+        Samples up to ``deep_max`` sessions from the last ``deep_days``,
+        one batched ``claude -p`` call (~1 min). Writes per-session cache
+        AND majority-vote folder rules. Best when folder names are
+        brand-name or catch-all (``ccstory``, ``~/scratch``).
+
+    ``"skip"`` — Scaffold template config, no LLM.
+        Built-in DEFAULT_RULES + fallback bucket take over. Equivalent of
+        "don't run init" but materialises the file so it's discoverable.
+
+    ``days`` controls Quick mode's sample-collection lookback (only used to
+    decide which folders have recent activity). ``deep_days`` / ``deep_max``
     control Deep mode's sampling window and session cap.
     """
     console = console or Console()

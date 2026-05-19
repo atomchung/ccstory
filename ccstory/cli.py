@@ -326,27 +326,33 @@ def _run_init(argv: list[str], console: Console) -> int:
     p = argparse.ArgumentParser(
         prog="ccstory init",
         description=(
-            "Set up category classification. Three modes:\n"
-            "  Quick (default)  — LLM looks at folder names (~10s).\n"
-            "  Deep             — LLM classifies recent sessions individually "
-            "(~1 min).\n"
-            "  Skip             — built-in keyword defaults only (no LLM).\n"
-            "\n"
-            "Run `ccstory init` with no flag for an interactive picker, or "
-            "use a mode flag to skip the prompt."
+            "Set up classification. Three modes — picked interactively when no\n"
+            "flag is given, or selected via flag:\n"
+            "  Quick   Infer categories from folder names + sample messages\n"
+            "          (~10s, 1 claude -p call). Best when folder names are\n"
+            "          descriptive.\n"
+            "  Deep    Classify recent sessions individually, write per-session\n"
+            "          cache + majority-vote folder rules (~1 min, last 7d,\n"
+            "          cap 200). Best when folder names are brand-name or\n"
+            "          catch-all.\n"
+            "  Skip    Scaffold template config, no LLM. Built-in keyword\n"
+            "          defaults take over."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     mode_group = p.add_mutually_exclusive_group()
-    mode_group.add_argument("--quick", action="store_const", const="quick",
-                            dest="mode",
-                            help="LLM proposes folder→bucket rules (~10s)")
-    mode_group.add_argument("--deep", action="store_const", const="deep",
-                            dest="mode",
-                            help="LLM classifies sampled sessions (~1 min)")
-    mode_group.add_argument("--skip", action="store_const", const="skip",
-                            dest="mode",
-                            help="Write template config, no LLM call")
+    mode_group.add_argument(
+        "--quick", action="store_const", const="quick", dest="mode",
+        help="Infer categories from folder names + samples (~10s)",
+    )
+    mode_group.add_argument(
+        "--deep", action="store_const", const="deep", dest="mode",
+        help="Classify recent sessions individually (~1 min)",
+    )
+    mode_group.add_argument(
+        "--skip", action="store_const", const="skip", dest="mode",
+        help="Use built-in keyword defaults only (no LLM)",
+    )
     p.add_argument("--days", type=int, default=30,
                    help="Quick mode: how many past days to scan for folder "
                         "samples (default 30)")
