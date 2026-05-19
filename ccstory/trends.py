@@ -13,8 +13,37 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
+from .categorizer import resolve_session_bucket
 from .time_tracking import CategoryRollup, SessionStat, rollup_by_category
 from .token_usage import UsageReport, collect_usage
+
+
+def _resolve_sessions_from_cache(
+    sessions: list[SessionStat],
+    mode: str,
+    fallback: str,
+) -> None:
+    """Mutate `sessions[*].category` + `.category_source` using cache only.
+
+    Used by ``compare_to_previous`` and ``collect_trend``: these paths must not
+    fire fresh LLM calls (would surprise the user with cost). Cache miss →
+    treat as fallback so the resolver result is still complete.
+
+    Reads cache once for all sessions to avoid N SQLite queries.
+    """
+    from .session_summarizer import _classify_cache_get_many
+    if not sessions:
+        return
+    cache_map = _classify_cache_get_many([s.session_id for s in sessions])
+    for s in sessions:
+        bucket, source = resolve_session_bucket(
+            s.project, cache_map.get(s.session_id), mode=mode, fallback=fallback,
+        )
+        if bucket is None:
+            # needs_llm path collapsed to fallback in cache-only mode
+            bucket, source = fallback, "fallback"
+        s.category = bucket
+        s.category_source = source
 
 # 8-step sparkline. Wider range than the common 8 just below makes height
 # differences readable even when values are close.
@@ -91,14 +120,27 @@ def compare_to_previous(
     current_label: str,
     since: datetime,
     until: datetime,
+    mode: str = "hybrid",
+    fallback: str = "coding",
 ) -> PeriodComparison | None:
-    """Build a comparison record against the previous same-length window."""
+    """Build a comparison record against the previous same-length window.
+
+    Bug #61 fix: previous-window sessions go through the same priority chain
+    as current-window sessions (``resolve_session_bucket``), reading the LLM
+    cache that earlier ``ccstory week`` runs populated. Cache miss falls to
+    ``fallback`` rather than firing fresh LLM calls — comparison mode must
+    not surprise the user with token spend.
+
+    ``mode`` and ``fallback`` should mirror the caller's main-flow settings so
+    current and previous windows resolve to the same vocabulary.
+    """
     from .time_tracking import collect_sessions  # local to avoid cycle hassle
 
     prev_since, prev_until = previous_window(since, until)
     prev_sessions = collect_sessions(prev_since, prev_until)
     if not prev_sessions:
         return None
+    _resolve_sessions_from_cache(prev_sessions, mode=mode, fallback=fallback)
     prev_rollups = rollup_by_category(prev_sessions)
     prev_usage = collect_usage(prev_since, prev_until)
 
@@ -191,11 +233,15 @@ def collect_trend(
     period: str = "week",
     count: int = 8,
     now: datetime | None = None,
+    mode: str = "hybrid",
+    fallback: str = "coding",
 ) -> list[PeriodPoint]:
     """Compute per-period rollups for trend analysis.
 
     Efficient: scans jsonl ONCE over the full range, then buckets by period
-    in-memory rather than re-scanning per window.
+    in-memory rather than re-scanning per window. Resolves every session's
+    bucket through the same priority chain as ``ccstory week`` (cache-only;
+    no fresh LLM in trend mode), then groups by window.
     """
     from .time_tracking import collect_sessions
 
@@ -211,6 +257,9 @@ def collect_trend(
 
     earliest = min(s for _, s, _ in windows)
     all_sessions = collect_sessions(earliest, now)
+    # Bulk-resolve every session once via cache lookup. Avoids N×M behaviour
+    # of resolving per-window — single SQL query covers all 8 windows.
+    _resolve_sessions_from_cache(all_sessions, mode=mode, fallback=fallback)
 
     points: list[PeriodPoint] = []
     for label, start, end in windows:

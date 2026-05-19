@@ -127,13 +127,18 @@ def _load_toml(path: Path) -> dict | None:
         return None
 
 
-def load_rules(config_path: Path = CONFIG_PATH) -> list[CategoryRule]:
+def load_rules(config_path: Path | None = None) -> list[CategoryRule]:
     """Load category rules: user override first, then defaults for unmatched.
 
     If user config defines a `[categories]` table, those rules take precedence
     (first-match-wins). Defaults still kick in for projects that none of
     user-defined rules match.
+
+    ``config_path`` defaults to the module-level ``CONFIG_PATH``, resolved at
+    call time so test monkeypatches take effect.
     """
+    if config_path is None:
+        config_path = CONFIG_PATH
     rules: list[CategoryRule] = []
     cfg = _load_toml(config_path)
     if cfg and isinstance(cfg.get("categories"), dict):
@@ -156,8 +161,14 @@ DEFAULT_FALLBACK_BUCKET = "coding"
 DEFAULT_MONTHLY_QUOTA_USD = 3500.0
 
 
-def load_settings(config_path: Path = CONFIG_PATH) -> dict:
-    """Top-level config: default_bucket, monthly_quota_usd, etc."""
+def load_settings(config_path: Path | None = None) -> dict:
+    """Top-level config: default_bucket, monthly_quota_usd, etc.
+
+    ``config_path`` resolves to module-level ``CONFIG_PATH`` at call time when
+    omitted, so test monkeypatches take effect.
+    """
+    if config_path is None:
+        config_path = CONFIG_PATH
     cfg = _load_toml(config_path) or {}
     return {
         "default_bucket": cfg.get("default_bucket", DEFAULT_FALLBACK_BUCKET),
@@ -226,7 +237,7 @@ def classify(
 
 def user_rule_match(
     project_dir: str,
-    config_path: Path = CONFIG_PATH,
+    config_path: Path | None = None,
 ) -> str | None:
     """If the project leaf matches a rule defined in `~/.ccstory/config.toml`,
     return that bucket name. Otherwise None.
@@ -234,7 +245,12 @@ def user_rule_match(
     Used by hybrid session-level classification (#25) to decide whether the
     user has expressed an *explicit* opinion about this project. If yes, the
     folder rule wins; if no, content-derived bucket takes over.
+
+    ``config_path`` resolves to module-level ``CONFIG_PATH`` at call time when
+    omitted, so test monkeypatches take effect.
     """
+    if config_path is None:
+        config_path = CONFIG_PATH
     cfg = _load_toml(config_path) or {}
     cats = cfg.get("categories")
     if not isinstance(cats, dict):
@@ -263,6 +279,63 @@ def user_rule_match(
     return None
 
 
+def resolve_session_bucket(
+    project_dir: str,
+    cached_llm_bucket: str | None,
+    mode: str = "hybrid",
+    fallback: str | None = None,
+    config_path: Path | None = None,
+) -> tuple[str | None, str]:
+    """Resolve a session's bucket using a priority chain.
+
+    Returns ``(bucket, source)`` where source ∈
+    ``{"user_rule", "llm_cache", "needs_llm", "fallback"}``.
+
+    Priority (high → low):
+      1. user_rule    — folder leaf matches ``[categories]`` in config.toml
+      2. llm_cache    — caller-supplied ``cached_llm_bucket`` (from
+                        ``session_content_buckets``)
+      3. fallback     — config ``default_bucket`` or ``DEFAULT_FALLBACK_BUCKET``
+
+    ``mode`` controls which layers participate:
+      - ``"hybrid"``  → 1 → 2 → 3  (default)
+      - ``"content"`` → 2 → 3      (skip folder rule, LLM-first)
+      - ``"folder"``  → 1 → 3      (skip LLM cache, deterministic only)
+
+    When mode permits LLM (``hybrid`` / ``content``) but ``cached_llm_bucket``
+    is ``None``, returns ``(None, "needs_llm")`` so the caller can batch this
+    session into a single ``classify_sessions_by_content`` call. Callers that
+    cannot afford fresh LLM work (e.g. ``compare_to_previous``) should treat
+    ``needs_llm`` as ``fallback`` to keep cost predictable.
+    """
+    if config_path is None:
+        config_path = CONFIG_PATH
+    # Layer 1: user folder rule (skipped in content mode)
+    if mode != "content":
+        folder_bucket = user_rule_match(project_dir, config_path)
+        if folder_bucket:
+            return folder_bucket, "user_rule"
+
+    # Layer 2: LLM cache (skipped in folder mode)
+    if mode != "folder":
+        if cached_llm_bucket:
+            return cached_llm_bucket, "llm_cache"
+        # Mode wants LLM but cache miss — signal caller
+        return None, "needs_llm"
+
+    # Layer 3: fallback (folder mode, or other resolved nothing)
+    return _resolved_fallback(fallback, config_path), "fallback"
+
+
+def _resolved_fallback(explicit: str | None, config_path: Path | None) -> str:
+    """Pick fallback bucket. Explicit override > config default > built-in."""
+    if explicit:
+        return explicit
+    if config_path is None:
+        config_path = CONFIG_PATH
+    return load_settings(config_path).get("default_bucket", DEFAULT_FALLBACK_BUCKET)
+
+
 def preview_classification(projects: list[str]) -> dict[str, list[tuple[str, str]]]:
     """Return {bucket: [(leaf, raw), ...]} for displaying first-run preview."""
     rules = load_rules()
@@ -274,8 +347,14 @@ def preview_classification(projects: list[str]) -> dict[str, list[tuple[str, str
     return out
 
 
-def ensure_default_config(path: Path = CONFIG_PATH) -> bool:
-    """If no config exists, scaffold a commented template. Returns True if written."""
+def ensure_default_config(path: Path | None = None) -> bool:
+    """If no config exists, scaffold a commented template. Returns True if written.
+
+    ``path`` resolves to module-level ``CONFIG_PATH`` at call time when
+    omitted, so test monkeypatches take effect.
+    """
+    if path is None:
+        path = CONFIG_PATH
     if path.exists():
         return False
     path.parent.mkdir(parents=True, exist_ok=True)

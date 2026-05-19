@@ -19,7 +19,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .categorizer import classify
+# Note: classify() is no longer called here. parse_session() leaves
+# SessionStat.category empty; the caller runs categorizer.resolve_session_bucket().
 
 LOG = logging.getLogger("ccstory.time_tracking")
 
@@ -40,6 +41,11 @@ class SessionStat:
     first_user_text: str = ""
     is_scheduled: bool = False
     timestamps: list[float] = field(default_factory=list)
+    # Which resolver layer set `.category`. One of:
+    #   "" (unresolved) | "user_rule" | "llm_cache" | "llm_fresh" | "fallback"
+    # parse_session() leaves this empty; the caller is expected to run
+    # categorizer.resolve_session_bucket() before consuming `.category`.
+    category_source: str = ""
 
     @property
     def active_min(self) -> float:
@@ -140,7 +146,12 @@ def parse_session(jsonl_path: Path) -> SessionStat | None:
 
     return SessionStat(
         project=proj_dir,
-        category=classify(proj_dir),
+        # Left empty on purpose — categorizer.resolve_session_bucket() is the
+        # single point where every classification path (current window, prev
+        # window, trend, refresh) converges. Filling category here would let
+        # callers that forget to run the resolver silently use folder-only
+        # buckets, which is exactly the bug #61 root cause.
+        category="",
         session_id=jsonl_path.stem,
         start=timestamps[0],
         end=timestamps[-1],

@@ -41,10 +41,11 @@ from .categorizer import (
     color_for,
     ensure_default_config,
     list_user_categories,
+    load_settings,
     normalize_project_name,
     preview_classification,
     remove_category_keywords,
-    user_rule_match,
+    resolve_session_bucket,
 )
 from .report import (
     VALID_FLAVORS,
@@ -55,6 +56,7 @@ from .report import (
 )
 from .session_summarizer import (
     PROJECTS_DIR as SUMMARIZER_PROJECTS_DIR,
+    _classify_cache_get_many,
     claude_bin_available,
     classify_sessions_by_content,
     get_many,
@@ -176,53 +178,78 @@ def _synthesize_overall_with_progress(
         )
 
 
-def _apply_content_classification(
+def _resolve_all_sessions(
     sessions: list,
     summaries: dict,
     mode: str,
+    fallback: str,
     console: Console,
 ) -> None:
-    """Mutate `sessions[*].category` based on content (#25).
+    """Resolve every session's bucket via the unified resolver, batching LLM
+    for cache misses. Mutates ``sessions[*].category`` and ``.category_source``.
 
-    - mode="content": every session re-bucketed by content
-    - mode="hybrid": only sessions whose folder didn't match a USER rule
-      (i.e. an explicit override in config.toml) get re-bucketed
+    Two-pass design:
+      Pass 1: cache + folder rule walk-through (single SQL query for cache)
+      Pass 2: one batched ``claude -p`` for sessions marked ``needs_llm``,
+              when summaries exist and mode allows LLM.
+
+    Sessions that still have no resolution (folder mode, or LLM unavailable,
+    or missing summary) collapse to ``fallback`` so ``.category`` is never
+    empty downstream.
     """
-    if mode == "hybrid":
-        eligible = [s for s in sessions if user_rule_match(s.project) is None]
+    if not sessions:
+        return
+
+    # Pass 1: bulk fetch cache, then resolver per session.
+    cache_map = _classify_cache_get_many([s.session_id for s in sessions])
+    needs_llm: list = []
+    for s in sessions:
+        bucket, source = resolve_session_bucket(
+            s.project, cache_map.get(s.session_id), mode=mode, fallback=fallback,
+        )
+        if source == "needs_llm":
+            needs_llm.append(s)
+        else:
+            s.category = bucket
+            s.category_source = source
+
+    # Pass 2: batch LLM for cache misses (only when mode != folder).
+    if needs_llm and mode != "folder":
+        items: list[tuple[str, str, str]] = []
+        for s in needs_llm:
+            summ = summaries.get(s.session_id)
+            if not summ or not summ.summary:
+                continue
+            leaf = normalize_project_name(s.project) or s.project
+            items.append((s.session_id, leaf, summ.summary))
+
+        mapping: dict[str, str] = {}
+        if items:
+            with console.status(
+                f"[dim]Content-classifying {len(items)} session(s) (one batch "
+                f"claude -p call)…[/dim]"
+            ):
+                mapping = classify_sessions_by_content(items)
+
+        for s in needs_llm:
+            new_bucket = mapping.get(s.session_id)
+            if new_bucket:
+                s.category = new_bucket
+                s.category_source = "llm_fresh"
+            else:
+                # No summary, LLM unavailable, or parse failure → fallback.
+                s.category = fallback
+                s.category_source = "fallback"
+        if mapping:
+            console.print(
+                f"[green]✓[/green] [dim]content-classified {len(mapping)} "
+                f"session(s) via claude -p[/dim]\n"
+            )
     else:
-        eligible = list(sessions)
-    if not eligible:
-        return
-
-    items: list[tuple[str, str, str]] = []
-    for s in eligible:
-        summ = summaries.get(s.session_id)
-        if not summ or not summ.summary:
-            continue
-        leaf = normalize_project_name(s.project) or s.project
-        items.append((s.session_id, leaf, summ.summary))
-    if not items:
-        return
-
-    with console.status(
-        f"[dim]Content-classifying {len(items)} session(s) (one batch "
-        f"claude -p call)…[/dim]"
-    ):
-        mapping = classify_sessions_by_content(items)
-    if not mapping:
-        return
-
-    changed = 0
-    for s in eligible:
-        new_bucket = mapping.get(s.session_id)
-        if new_bucket and new_bucket != s.category:
-            s.category = new_bucket
-            changed += 1
-    console.print(
-        f"[green]✓[/green] [dim]content-classified {len(mapping)} session(s), "
-        f"{changed} re-bucketed[/dim]\n"
-    )
+        # Folder mode (or no LLM path) → assign fallback to leftovers.
+        for s in needs_llm:
+            s.category = fallback
+            s.category_source = "fallback"
 
 
 CLAUDE_P_SEC_PER_SESSION = 40  # rough cold-start average on M1 Pro
@@ -295,21 +322,63 @@ def _backfill_with_progress(
 
 
 def _run_init(argv: list[str], console: Console) -> int:
-    from .init_categories import run_init
+    from .init_categories import DEEP_DEFAULT_DAYS, DEEP_DEFAULT_MAX, run_init
     p = argparse.ArgumentParser(
         prog="ccstory init",
-        description="Scan recent sessions and auto-suggest category buckets "
-                    "via one claude -p call.",
+        description=(
+            "Set up classification. Three modes — picked interactively when no\n"
+            "flag is given, or selected via flag:\n"
+            "  Quick   Infer categories from folder names + sample messages\n"
+            "          (~10s, 1 claude -p call). Best when folder names are\n"
+            "          descriptive.\n"
+            "  Deep    Classify recent sessions individually, write per-session\n"
+            "          cache + majority-vote folder rules (~1 min, last 7d,\n"
+            "          cap 200). Best when folder names are brand-name or\n"
+            "          catch-all.\n"
+            "  Skip    Scaffold template config, no LLM. Built-in keyword\n"
+            "          defaults take over."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    mode_group = p.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--quick", action="store_const", const="quick", dest="mode",
+        help="Infer categories from folder names + samples (~10s)",
+    )
+    mode_group.add_argument(
+        "--deep", action="store_const", const="deep", dest="mode",
+        help="Classify recent sessions individually (~1 min)",
+    )
+    mode_group.add_argument(
+        "--skip", action="store_const", const="skip", dest="mode",
+        help="Use built-in keyword defaults only (no LLM)",
     )
     p.add_argument("--days", type=int, default=30,
-                   help="How many past days to scan (default 30)")
+                   help="Quick mode: how many past days to scan for folder "
+                        "samples (default 30)")
+    p.add_argument("--deep-days", type=int, default=DEEP_DEFAULT_DAYS,
+                   help=f"Deep mode: time range to sample (default "
+                        f"{DEEP_DEFAULT_DAYS})")
+    p.add_argument("--max", dest="deep_max", type=int, default=DEEP_DEFAULT_MAX,
+                   help=f"Deep mode: session cap (default {DEEP_DEFAULT_MAX})")
     p.add_argument("--dry-run", action="store_true",
                    help="Print proposal but don't write config.toml")
-    p.add_argument("-y", "--yes", action="store_true",
-                   help="Skip the confirmation prompt")
     args = p.parse_args(argv)
-    return run_init(days=args.days, dry_run=args.dry_run,
-                    auto_yes=args.yes, console=console)
+
+    # --days/--deep-days/--max only make sense with their respective mode;
+    # error early instead of silently using a default users didn't intend.
+    if args.mode is None and (
+        argv and any(a.startswith(("--deep-days", "--max")) for a in argv)
+    ):
+        p.error("--deep-days / --max require --deep")
+    return run_init(
+        mode=args.mode,
+        days=args.days,
+        deep_days=args.deep_days,
+        deep_max=args.deep_max,
+        dry_run=args.dry_run,
+        console=console,
+    )
 
 
 def _run_category(argv: list[str], console: Console) -> int:
@@ -441,16 +510,28 @@ def _run_trend(argv: list[str], console: Console) -> int:
                    help="Number of 7-day windows (default 8)")
     p.add_argument("--months", type=int, default=None,
                    help="Number of calendar months")
+    p.add_argument("--classify", choices=["folder", "content", "hybrid"],
+                   default="hybrid",
+                   help="Bucket resolution mode — must match what `ccstory "
+                        "week` is using to keep vocabulary aligned across "
+                        "trend, week, and vs-previous views.")
     p.add_argument("--reports-dir", type=Path, default=REPORTS_DIR)
     args = p.parse_args(argv)
 
     period = "month" if args.months else "week"
     count = args.months or args.weeks or 8
 
+    # Trend must use the same fallback bucket as the main flow — otherwise a
+    # user who set default_bucket = "other" gets "coding" leaking into trend
+    # for cache-miss sessions. Bug surfaced in codex review of PR-A.
+    fallback_bucket = load_settings(CONFIG_PATH).get("default_bucket", "coding")
     with console.status(
         f"[dim]Computing trend over last {count} {period}s…[/dim]"
     ):
-        points = collect_trend(period=period, count=count)
+        points = collect_trend(
+            period=period, count=count,
+            mode=args.classify, fallback=fallback_bucket,
+        )
     if not any(p.total_h for p in points):
         sys.exit("No engaged sessions across the trend window.")
 
@@ -486,9 +567,10 @@ def main(argv: list[str] | None = None) -> int:
                     "ccusage tells you the bill; ccstory tells the story.",
         epilog=(
             "Subcommands:\n"
-            "  ccstory init [--days N] [--dry-run] [-y]\n"
-            "      Scan recent sessions and propose category buckets via\n"
-            "      one claude -p call. Writes ~/.ccstory/config.toml.\n"
+            "  ccstory init [--quick | --deep | --skip] [--dry-run]\n"
+            "      Set up category classification. Interactive picker by\n"
+            "      default; pass a mode flag to skip the prompt. Writes\n"
+            "      ~/.ccstory/config.toml.\n"
             "  ccstory trend [--weeks N | --months N]\n"
             "      Per-bucket sparklines + burn-% over N periods.\n"
             "  ccstory category {list,set,unset} ...\n"
@@ -503,7 +585,8 @@ def main(argv: list[str] | None = None) -> int:
             "  ccstory week --refresh        # re-classify cached sessions in window\n"
             "  ccstory 2026-04               # specific month\n"
             "  ccstory trend --months 6      # 6-month sparkline view\n"
-            "  ccstory init -y               # auto-categorize (no prompt)\n"
+            "  ccstory init --quick          # folder-name LLM, no prompt\n"
+            "  ccstory init --deep           # session-level LLM, no prompt\n"
             "  ccstory category set research ai-project-research"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -595,13 +678,12 @@ def main(argv: list[str] | None = None) -> int:
         sessions = collect_sessions(since, until)
         if not sessions:
             sys.exit("No engaged sessions in this window.")
-        rollups = rollup_by_category(sessions)
         # since/until are tz-aware local; collect_usage normalizes to UTC.
         usage = collect_usage(since, until)
 
     console.print(
         f"[green]✓[/green] {len(sessions)} sessions · "
-        f"{len(rollups)} categories · {usage.assistant_turns:,} turns\n"
+        f"{usage.assistant_turns:,} turns\n"
     )
 
     # `--refresh` wipes the content-classification cache so the rules that
@@ -653,16 +735,21 @@ def main(argv: list[str] | None = None) -> int:
         )
         summaries = get_many([s.session_id for s in sessions])
 
-        # Session-level content classification (#25). Folder-only buckets
-        # mis-attribute monorepo / mixed-purpose sessions; one batch
-        # claude -p call resolves each session by its actual content.
-        if args.classify != "folder" and summaries:
-            _apply_content_classification(
-                sessions, summaries, args.classify, console,
-            )
-            # Re-roll up so per-bucket totals reflect the new categories
-            rollups = rollup_by_category(sessions)
+    # Resolver pass — single point where every session's bucket gets assigned.
+    # Reads LLM cache once, batches uncached sessions into one claude -p call
+    # when summaries are available. Same priority chain runs in compare_to_
+    # previous() so cross-window comparison stays symmetric (fixes #61).
+    settings = load_settings(CONFIG_PATH)
+    fallback_bucket = settings.get("default_bucket", "coding")
+    _resolve_all_sessions(
+        sessions, summaries, args.classify, fallback_bucket, console,
+    )
+    rollups = rollup_by_category(sessions)
+    console.print(
+        f"[green]✓[/green] [dim]resolved into {len(rollups)} categories[/dim]\n"
+    )
 
+    if not args.minimal:
         if not args.no_aggregate and summaries:
             overall_narrative = _synthesize_overall_with_progress(
                 label, sessions, rollups, summaries, console,
@@ -683,6 +770,8 @@ def main(argv: list[str] | None = None) -> int:
                 current_label=label,
                 since=since,
                 until=until,
+                mode=args.classify,
+                fallback=fallback_bucket,
             )
         if (
             comparison
