@@ -8,8 +8,10 @@ from unittest.mock import patch
 
 from ccstory.categorizer import user_rule_match
 from ccstory.session_summarizer import (
+    _build_category_context,
     _classify_cache_get_many,
     _classify_cache_upsert_many,
+    _DEFAULT_VOCAB_BLOCK,
     _parse_classification_lines,
     classify_sessions_by_content,
 )
@@ -250,6 +252,92 @@ class TestClassifySessionsByContent:
         # First chunk failed → those sessions absent; second chunk succeeded.
         assert len(result) == 80
         assert all(sid.startswith("s") and int(sid[1:]) >= 80 for sid in result)
+
+
+class TestCategoryContextInPrompt:
+    """Issue #62: LLM classifier must see the user's [categories] vocabulary
+    so it doesn't invent parallel bucket names (`writing` next to user's
+    `content`, `ops` next to user's `infra`, etc.)."""
+
+    def test_no_user_categories_uses_default_vocab(self, tmp_home: Path):
+        # No config.toml written — _build_category_context falls back to the
+        # 4-bucket default block (coding/investment/writing/other).
+        ctx = _build_category_context()
+        assert ctx == _DEFAULT_VOCAB_BLOCK
+        assert "coding" in ctx
+        assert "writing" in ctx
+        assert "other" in ctx
+
+    def test_empty_categories_table_uses_default_vocab(self, tmp_home: Path):
+        # Config exists but [categories] is empty (e.g. `ccstory init`
+        # template, Skip mode). Should still fall back to default vocab.
+        cfg = tmp_home / ".ccstory" / "config.toml"
+        cfg.write_text("[categories]\n", encoding="utf-8")
+        assert _build_category_context() == _DEFAULT_VOCAB_BLOCK
+
+    def test_categories_with_only_empty_needles_uses_default_vocab(
+        self, tmp_home: Path,
+    ):
+        # `[categories]` table is non-empty (truthy dict) but every bucket's
+        # needle list is empty — can happen after `ccstory category unset`
+        # removes the last keyword from a bucket if the bucket-drop path
+        # ever regresses. Exercises the second fallback branch in
+        # _build_category_context (lines == [] → _DEFAULT_VOCAB_BLOCK).
+        cfg = tmp_home / ".ccstory" / "config.toml"
+        cfg.write_text(
+            "[categories]\n"
+            '"content" = []\n'
+            '"work"    = []\n',
+            encoding="utf-8",
+        )
+        assert _build_category_context() == _DEFAULT_VOCAB_BLOCK
+
+    def test_user_categories_render_as_vocab_block(self, tmp_home: Path):
+        cfg = tmp_home / ".ccstory" / "config.toml"
+        cfg.write_text(
+            "[categories]\n"
+            '"work"    = ["paperclip", "g2a"]\n'
+            '"content" = ["xhs", "blog"]\n',
+            encoding="utf-8",
+        )
+        ctx = _build_category_context()
+        # Sorted bucket names + their needles render as a list
+        assert "- content: project leaves xhs, blog" in ctx
+        assert "- work: project leaves paperclip, g2a" in ctx
+        # Default vocab should NOT leak in once user has explicit categories
+        assert "coding: software projects" not in ctx
+
+    def test_prompt_carries_user_vocab_into_claude_call(self, tmp_home: Path):
+        """End-to-end: editing config.toml between runs changes the prompt
+        the LLM sees on the next run (no process restart needed)."""
+        cfg = tmp_home / ".ccstory" / "config.toml"
+        cfg.write_text(
+            "[categories]\n"
+            '"content" = ["xhs"]\n',
+            encoding="utf-8",
+        )
+        captured_prompts: list[str] = []
+
+        def fake_run(cmd, *, capture_output, text, timeout, check):
+            captured_prompts.append(cmd[-1])
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0,
+                stdout='{"session_id": "s1", "bucket": "content"}\n',
+                stderr="",
+            )
+
+        with patch("ccstory.session_summarizer.claude_bin_available",
+                   return_value=True), \
+             patch("ccstory.session_summarizer.subprocess.run",
+                   side_effect=fake_run):
+            classify_sessions_by_content([("s1", "newsletter-draft",
+                                           "wrote newsletter")])
+
+        assert len(captured_prompts) == 1
+        assert "- content: project leaves xhs" in captured_prompts[0]
+        # The old hard-coded inline vocab list is gone
+        assert "like coding, investment, writing, research, ops, other" \
+            not in captured_prompts[0]
 
 
 class TestParseClassificationRejectsBlankBucket:
