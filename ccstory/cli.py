@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import re
 import sys
 from datetime import datetime, timedelta
@@ -82,6 +83,32 @@ from .trends import collect_trend, compare_to_previous
 LOG = logging.getLogger("ccstory.cli")
 REPORTS_DIR = Path.home() / ".ccstory" / "reports"
 CONFIG_PATH = Path.home() / ".ccstory" / "config.toml"
+
+VALID_OUTPUT_FORMATS = ("auto", "markdown", "card")
+
+
+def resolve_output_format(arg: str, *, env: dict | None = None, isatty: bool | None = None) -> str:
+    """Resolve --format=auto to a concrete format.
+
+    Claude Code chat renders Markdown but mangles Rich panels (ANSI escapes
+    drop, table alignment breaks). When `CLAUDECODE=1` is in the environment
+    or stdout is not a tty (piped, redirected, headless), prefer Markdown.
+    Otherwise keep the Rich card the terminal user already expects.
+
+    Validation of `arg` is the parser's job (`choices=VALID_OUTPUT_FORMATS`):
+    any non-"auto" string is returned verbatim so the helper stays a pure
+    dispatch decision instead of duplicating argparse error handling.
+    """
+    if arg != "auto":
+        return arg
+    env = os.environ if env is None else env
+    if env.get("CLAUDECODE") == "1":
+        return "markdown"
+    if isatty is None:
+        isatty = sys.stdout.isatty()
+    if not isatty:
+        return "markdown"
+    return "card"
 
 
 def _parse_arg(raw: str | None) -> tuple[datetime, datetime, str]:
@@ -521,7 +548,7 @@ def _run_category(argv: list[str], console: Console) -> int:
     return 0
 
 
-def _run_trend(argv: list[str], console: Console) -> int:
+def _run_trend(argv: list[str]) -> int:
     if not CLAUDE_PROJECTS.exists():
         sys.exit(f"No Claude Code data at {CLAUDE_PROJECTS}.")
     prices, snapshot = load_prices_config(CONFIG_PATH)
@@ -540,7 +567,13 @@ def _run_trend(argv: list[str], console: Console) -> int:
                         "week` is using to keep vocabulary aligned across "
                         "trend, week, and vs-previous views.")
     p.add_argument("--reports-dir", type=Path, default=REPORTS_DIR)
+    p.add_argument("--format", dest="output_format",
+                   choices=VALID_OUTPUT_FORMATS, default="auto",
+                   help="Output style; see `ccstory --help`.")
     args = p.parse_args(argv)
+
+    output_format = resolve_output_format(args.output_format)
+    console = Console(stderr=(output_format == "markdown"))
 
     period = "month" if args.months else "week"
     count = args.months or args.weeks or 8
@@ -561,29 +594,39 @@ def _run_trend(argv: list[str], console: Console) -> int:
 
     args.reports_dir.mkdir(parents=True, exist_ok=True)
     out_path = args.reports_dir / f"trend-{period}-{count}.md"
-    out_path.write_text(render_trend_markdown(points, period), encoding="utf-8")
+    md = render_trend_markdown(points, period)
+    out_path.write_text(md, encoding="utf-8")
 
-    console.print(render_trend_card(points, period))
-    console.print(f"[dim]Full report → {out_path}[/dim]")
-    console.print(f"[dim]Prices as of {get_snapshot_date()}[/dim]")
+    if output_format == "markdown":
+        sys.stdout.write(md)
+        if not md.endswith("\n"):
+            sys.stdout.write("\n")
+        console.print(f"[dim]Full report → {out_path}[/dim]")
+        console.print(f"[dim]Prices as of {get_snapshot_date()}[/dim]")
+    else:
+        console.print(render_trend_card(points, period))
+        console.print(f"[dim]Full report → {out_path}[/dim]")
+        console.print(f"[dim]Prices as of {get_snapshot_date()}[/dim]")
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     raw = list(argv) if argv is not None else sys.argv[1:]
-    console = Console()
 
     # Manual dispatch for subcommands — keeps default `ccstory week`
-    # / `ccstory month` flow simple positional.
+    # / `ccstory month` flow simple positional. `init` / `category` only
+    # emit progress lines, so a stdout Console is fine; `trend` and the
+    # default recap path resolve --format themselves and may switch to
+    # a stderr Console so the markdown report can own stdout.
     if raw and raw[0] == "trend":
         logging.basicConfig(level=logging.WARNING)
-        return _run_trend(raw[1:], console)
+        return _run_trend(raw[1:])
     if raw and raw[0] == "init":
         logging.basicConfig(level=logging.WARNING)
-        return _run_init(raw[1:], console)
+        return _run_init(raw[1:], Console())
     if raw and raw[0] == "category":
         logging.basicConfig(level=logging.WARNING)
-        return _run_category(raw[1:], console)
+        return _run_category(raw[1:], Console())
 
     parser = argparse.ArgumentParser(
         prog="ccstory",
@@ -660,10 +703,23 @@ def main(argv: list[str] | None = None) -> int:
                              "not just this window. Implies --refresh.")
     parser.add_argument("--reports-dir", type=Path, default=REPORTS_DIR,
                         help=f"Markdown report output dir (default: {REPORTS_DIR})")
+    parser.add_argument("--format", dest="output_format",
+                        choices=VALID_OUTPUT_FORMATS, default="auto",
+                        help="Output style. `card` = Rich panel (terminal). "
+                             "`markdown` = full Markdown report to stdout "
+                             "(Claude Code chat / pipe friendly). "
+                             "`auto` (default) = markdown when CLAUDECODE=1 "
+                             "or stdout is non-tty, else card.")
     parser.add_argument("--version", action="version",
                         version=f"ccstory {__version__}")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(raw)
+
+    # Resolve --format before building the console: in markdown mode, all
+    # progress / status output must go to stderr so stdout is a clean
+    # markdown stream the chat (or downstream tools) can render.
+    output_format = resolve_output_format(args.output_format)
+    console = Console(stderr=(output_format == "markdown"))
 
     # Deprecation: --no-summary is the old name for --minimal. The flag's
     # documented behavior ("skip claude -p") never matched the code path
@@ -842,19 +898,28 @@ def main(argv: list[str] | None = None) -> int:
     )
     out_path.write_text(md, encoding="utf-8")
 
-    print_terminal_card(
-        since=since,
-        until=until,
-        sessions=sessions,
-        rollups=rollups,
-        usage=usage,
-        summaries=summaries,
-        overall_narrative=overall_narrative,
-        report_path=str(out_path),
-        comparison=comparison,
-        console=console,
-    )
-    console.print(f"[dim]Prices as of {get_snapshot_date()}[/dim]")
+    if output_format == "markdown":
+        # stdout = clean markdown stream. The Rich console already routes to
+        # stderr in this branch so progress / status lines don't pollute it.
+        sys.stdout.write(md)
+        if not md.endswith("\n"):
+            sys.stdout.write("\n")
+        console.print(f"[dim]Full report → {out_path}[/dim]")
+        console.print(f"[dim]Prices as of {get_snapshot_date()}[/dim]")
+    else:
+        print_terminal_card(
+            since=since,
+            until=until,
+            sessions=sessions,
+            rollups=rollups,
+            usage=usage,
+            summaries=summaries,
+            overall_narrative=overall_narrative,
+            report_path=str(out_path),
+            comparison=comparison,
+            console=console,
+        )
+        console.print(f"[dim]Prices as of {get_snapshot_date()}[/dim]")
     # Breadcrumb — most users discover wrong buckets in the rendered report
     # and have no idea what to do about it. Point them at the rule-edit CLI
     # right here. Hide when --classify=folder since those users opted out of

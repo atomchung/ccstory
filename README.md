@@ -120,6 +120,16 @@ flow after the live debug session on Wednesday.
 |---|---|
 | `--for=obsidian` | YAML frontmatter + `[[wikilinks]]` |
 
+**Output format**
+
+| Flag | What it does |
+|---|---|
+| `--format=card` | Force the Rich terminal card (default in a real tty) |
+| `--format=markdown` | Force the full Markdown report to stdout |
+| `--format=auto` (default) | Markdown when `CLAUDECODE=1` or stdout is not a tty (piped / redirected), else card |
+
+The auto-detect means asking Claude Code "show me my week with ccstory" renders an actual Markdown report in the chat instead of ANSI escape codes. The Markdown body is the same content saved to `~/.ccstory/reports/` (`recap-*.md` for the default window, `trend-*.md` for `ccstory trend`), just printed to stdout so the chat can render it inline. In markdown mode all progress / status lines route to stderr, so stdout is a clean Markdown stream you can pipe.
+
 **Refresh (apply rule changes retroactively)**
 
 | Flag | What it does |
