@@ -26,6 +26,7 @@ DB_PATH = Path.home() / ".ccstory" / "cache.db"
 RECAP_DB_PATH = Path.home() / ".claude" / "session_summaries.db"
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 CLAUDE_MD_PATH = Path.home() / ".claude" / "CLAUDE.md"
+CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 CLAUDE_BIN = "claude"
 
 N_USER_HEAD = 3
@@ -40,30 +41,63 @@ _CLAUDE_MD_MAX_CHARS = 500
 def language_directive(path: Path | None = None) -> str:
     """Build the prompt block that tells `claude -p` what language to use.
 
-    We don't parse CLAUDE.md ourselves — we just paste its first ~500 chars
-    into the prompt and let the model honor whatever language directive
-    the user wrote (or default to English when CLAUDE.md is absent).
+    Resolution chain (high → low priority):
+      1. ``~/.claude/CLAUDE.md`` — pasted verbatim so any custom directives
+         the user wrote there stick (not just language).
+      2. ``~/.claude/settings.json`` ``"language"`` field — set by Claude
+         Code's ``/config`` UI. This is the path most users take when
+         they want a non-English UX; they rarely also maintain a global
+         CLAUDE.md. Without this fallback, those users get English
+         narratives even though Claude Code itself responds in their
+         language (issue #55).
+      3. Hardcoded ``Respond in English.``
 
     Cached because every prompt assembly calls it; flushed only on
-    process restart, which matches CLAUDE.md's edit cadence.
+    process restart, which matches the edit cadence of both files.
     """
     target = path or CLAUDE_MD_PATH
     try:
         text = target.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeDecodeError):
         text = ""
-    if not text:
-        return "Respond in English."
-    excerpt = text[:_CLAUDE_MD_MAX_CHARS]
-    return (
-        "The user's ~/.claude/CLAUDE.md begins below between the markers. "
-        "If it specifies a response language, respect it; otherwise default "
-        "to English. Keep the same length / format limits regardless of "
-        "language.\n"
-        "--- CLAUDE.md ---\n"
-        f"{excerpt}\n"
-        "--- end ---"
-    )
+    if text:
+        excerpt = text[:_CLAUDE_MD_MAX_CHARS]
+        return (
+            "The user's ~/.claude/CLAUDE.md begins below between the markers. "
+            "If it specifies a response language, respect it; otherwise default "
+            "to English. Keep the same length / format limits regardless of "
+            "language.\n"
+            "--- CLAUDE.md ---\n"
+            f"{excerpt}\n"
+            "--- end ---"
+        )
+    settings_lang = _read_settings_language()
+    if settings_lang:
+        return (
+            f"Respond in {settings_lang}. "
+            "Keep the same length / format limits regardless of language."
+        )
+    return "Respond in English."
+
+
+def _read_settings_language(path: Path | None = None) -> str | None:
+    """Return the top-level ``language`` field from ``~/.claude/settings.json``.
+
+    Returns ``None`` when the file is missing, malformed JSON, or the
+    field is absent / empty / non-string. Errors are swallowed silently
+    because this is a soft fallback — a broken settings file should
+    degrade to English, not crash ccstory.
+    """
+    target = path or CLAUDE_SETTINGS_PATH
+    try:
+        text = target.read_text(encoding="utf-8")
+        data = json.loads(text)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    lang = data.get("language") if isinstance(data, dict) else None
+    if isinstance(lang, str) and lang.strip():
+        return lang.strip()
+    return None
 
 
 @dataclass

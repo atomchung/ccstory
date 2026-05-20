@@ -207,6 +207,59 @@ class TestLanguageDirective:
         body = directive.split("--- CLAUDE.md ---\n", 1)[1].split("\n--- end ---", 1)[0]
         assert len(body) <= ss._CLAUDE_MD_MAX_CHARS
 
+    def test_settings_json_language_used_when_no_claude_md(
+        self, tmp_home: Path,
+    ):
+        """Issue #55: users who set language via Claude Code's /config UI
+        (which writes settings.json `language`) should get that language
+        respected even without a global CLAUDE.md."""
+        settings = tmp_home / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text(
+            '{"language": "Traditional Chinese", "theme": "dark"}',
+            encoding="utf-8",
+        )
+        ss.language_directive.cache_clear()
+        directive = language_directive()
+        assert directive == (
+            "Respond in Traditional Chinese. "
+            "Keep the same length / format limits regardless of language."
+        )
+
+    def test_claude_md_wins_over_settings_json(self, tmp_home: Path):
+        """When both exist, CLAUDE.md is canonical (it may contain more
+        than just a language hint, so don't downgrade to a single line)."""
+        md_path = tmp_home / ".claude" / "CLAUDE.md"
+        md_path.parent.mkdir(parents=True, exist_ok=True)
+        md_path.write_text("Respond in Japanese.\n", encoding="utf-8")
+        settings = tmp_home / ".claude" / "settings.json"
+        settings.write_text('{"language": "Spanish"}', encoding="utf-8")
+        ss.language_directive.cache_clear()
+        directive = language_directive()
+        assert "--- CLAUDE.md ---" in directive
+        assert "Japanese" in directive
+        assert "Spanish" not in directive
+
+    def test_malformed_settings_json_falls_back_to_english(
+        self, tmp_home: Path,
+    ):
+        # Broken JSON should degrade silently to English — not crash.
+        settings = tmp_home / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text("{not valid json", encoding="utf-8")
+        ss.language_directive.cache_clear()
+        assert language_directive() == "Respond in English."
+
+    def test_settings_json_without_language_field_falls_back(
+        self, tmp_home: Path,
+    ):
+        # settings.json exists but no `language` key → English.
+        settings = tmp_home / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text('{"theme": "dark"}', encoding="utf-8")
+        ss.language_directive.cache_clear()
+        assert language_directive() == "Respond in English."
+
 
 class TestSynthesizeOverallForPeriod:
     def test_empty_input_returns_none(self, tmp_home: Path):
