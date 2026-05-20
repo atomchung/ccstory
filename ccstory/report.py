@@ -412,7 +412,10 @@ def render_comparison_block(cmp: PeriodComparison) -> list:
     parts.append(Text(f"vs previous window  ({cmp.previous_label})",
                       style="bold underline"))
     if cmp.narrative:
-        parts.append(Text(cmp.narrative, style="italic"))
+        # Match "What you did" body style (dim italic) so the two narrative
+        # blocks read as one visual family — previously this one was just
+        # `italic` (no dim) and shouted louder than the overall recap.
+        parts.append(Text(cmp.narrative, style="dim italic"))
     table = Table.grid(padding=(0, 1))
     table.add_column(width=14)
     table.add_column(justify="right", width=8, style="bright_white")

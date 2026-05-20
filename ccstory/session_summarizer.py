@@ -17,6 +17,7 @@ import shutil
 import sqlite3
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -26,6 +27,7 @@ DB_PATH = Path.home() / ".ccstory" / "cache.db"
 RECAP_DB_PATH = Path.home() / ".claude" / "session_summaries.db"
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 CLAUDE_MD_PATH = Path.home() / ".claude" / "CLAUDE.md"
+CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 CLAUDE_BIN = "claude"
 
 N_USER_HEAD = 3
@@ -40,30 +42,63 @@ _CLAUDE_MD_MAX_CHARS = 500
 def language_directive(path: Path | None = None) -> str:
     """Build the prompt block that tells `claude -p` what language to use.
 
-    We don't parse CLAUDE.md ourselves — we just paste its first ~500 chars
-    into the prompt and let the model honor whatever language directive
-    the user wrote (or default to English when CLAUDE.md is absent).
+    Resolution chain (high → low priority):
+      1. ``~/.claude/CLAUDE.md`` — pasted verbatim so any custom directives
+         the user wrote there stick (not just language).
+      2. ``~/.claude/settings.json`` ``"language"`` field — set by Claude
+         Code's ``/config`` UI. This is the path most users take when
+         they want a non-English UX; they rarely also maintain a global
+         CLAUDE.md. Without this fallback, those users get English
+         narratives even though Claude Code itself responds in their
+         language (issue #55).
+      3. Hardcoded ``Respond in English.``
 
     Cached because every prompt assembly calls it; flushed only on
-    process restart, which matches CLAUDE.md's edit cadence.
+    process restart, which matches the edit cadence of both files.
     """
     target = path or CLAUDE_MD_PATH
     try:
         text = target.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeDecodeError):
         text = ""
-    if not text:
-        return "Respond in English."
-    excerpt = text[:_CLAUDE_MD_MAX_CHARS]
-    return (
-        "The user's ~/.claude/CLAUDE.md begins below between the markers. "
-        "If it specifies a response language, respect it; otherwise default "
-        "to English. Keep the same length / format limits regardless of "
-        "language.\n"
-        "--- CLAUDE.md ---\n"
-        f"{excerpt}\n"
-        "--- end ---"
-    )
+    if text:
+        excerpt = text[:_CLAUDE_MD_MAX_CHARS]
+        return (
+            "The user's ~/.claude/CLAUDE.md begins below between the markers. "
+            "If it specifies a response language, respect it; otherwise default "
+            "to English. Keep the same length / format limits regardless of "
+            "language.\n"
+            "--- CLAUDE.md ---\n"
+            f"{excerpt}\n"
+            "--- end ---"
+        )
+    settings_lang = _read_settings_language()
+    if settings_lang:
+        return (
+            f"Respond in {settings_lang}. "
+            "Keep the same length / format limits regardless of language."
+        )
+    return "Respond in English."
+
+
+def _read_settings_language(path: Path | None = None) -> str | None:
+    """Return the top-level ``language`` field from ``~/.claude/settings.json``.
+
+    Returns ``None`` when the file is missing, malformed JSON, or the
+    field is absent / empty / non-string. Errors are swallowed silently
+    because this is a soft fallback — a broken settings file should
+    degrade to English, not crash ccstory.
+    """
+    target = path or CLAUDE_SETTINGS_PATH
+    try:
+        text = target.read_text(encoding="utf-8")
+        data = json.loads(text)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    lang = data.get("language") if isinstance(data, dict) else None
+    if isinstance(lang, str) and lang.strip():
+        return lang.strip()
+    return None
 
 
 @dataclass
@@ -856,6 +891,7 @@ def classify_sessions_by_content(
     force_refresh: bool = False,
     timeout: int = 120,
     batch_size: int = 80,
+    on_chunk_complete: Callable[[int, int], None] | None = None,
 ) -> dict[str, str]:
     """Batch-classify sessions by content.
 
@@ -870,6 +906,12 @@ def classify_sessions_by_content(
     Sends pending sessions to `claude -p` in chunks of `batch_size` so a
     period with more than `batch_size` uncached sessions does not silently
     leave the tail folder-classified.
+
+    ``on_chunk_complete`` (optional) is called after each LLM chunk
+    finishes (success or failure) as ``cb(chunks_done, total_chunks)``.
+    Callers wire this into a ``console.status`` so the user sees
+    something like ``Running batch LLM… (2/3)`` for 200-session windows
+    instead of an opaque spinner (issue #75).
     """
     if not items:
         return {}
@@ -882,12 +924,15 @@ def classify_sessions_by_content(
         return cached
 
     combined = dict(cached)
+    total_chunks = (len(pending) + batch_size - 1) // batch_size
     # Resolve user [categories] once for the whole pass — every chunk shares
     # the same vocab block, and avoiding per-chunk file IO matters when a big
     # window splits into 3+ batches.
     category_context = _build_category_context()
 
-    for chunk_start in range(0, len(pending), batch_size):
+    for chunk_idx, chunk_start in enumerate(
+        range(0, len(pending), batch_size), start=1,
+    ):
         chunk = pending[chunk_start:chunk_start + batch_size]
         rows = "\n".join(
             f"[{sid}] folder: {leaf} | summary: {summ[:200]}"
@@ -896,31 +941,35 @@ def classify_sessions_by_content(
         prompt = _CONTENT_CLASSIFY_PROMPT.format(
             rows=rows, category_context=category_context,
         )
+        fresh: dict[str, str] = {}
         try:
             r = subprocess.run(
                 [CLAUDE_BIN, "-p", "--output-format", "text",
                  "--no-session-persistence", prompt],
                 capture_output=True, text=True, timeout=timeout, check=False,
             )
-            if r.returncode != 0:
+            if r.returncode == 0:
+                parsed = _parse_classification_lines(r.stdout)
+                # Only accept rows whose session id is in THIS chunk — guards
+                # against the model hallucinating ids or returning rows we
+                # never asked about.
+                chunk_ids = {sid for sid, _, _ in chunk}
+                fresh = {sid: b for sid, b in parsed.items() if sid in chunk_ids}
+            else:
                 LOG.warning(
                     "content-classify claude -p failed (chunk %d-%d): %s",
                     chunk_start, chunk_start + len(chunk),
                     r.stderr.strip()[:200],
                 )
-                continue
         except (subprocess.SubprocessError, OSError) as e:
             LOG.warning("content-classify errored: %s", e)
-            continue
 
-        parsed = _parse_classification_lines(r.stdout)
-        # Only accept rows whose session id is in THIS chunk — guards
-        # against the model hallucinating ids or returning rows we never
-        # asked about.
-        chunk_ids = {sid for sid, _, _ in chunk}
-        fresh = {sid: b for sid, b in parsed.items() if sid in chunk_ids}
+        # Upsert + accumulate (no-op on empty fresh); always fire the
+        # progress callback so a failed chunk still advances the counter.
         _classify_cache_upsert_many(fresh)
         combined.update(fresh)
+        if on_chunk_complete is not None:
+            on_chunk_complete(chunk_idx, total_chunks)
 
     return combined
 

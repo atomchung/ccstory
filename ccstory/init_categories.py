@@ -414,13 +414,20 @@ def run_deep_mode(
         return 0
 
     eta = max(1, len(items) // 80 + 1)  # ~80 sessions/batch, ~1 min/batch
+    total_chunks = (len(items) + 79) // 80
     console.print(
         f"[dim]Asking claude -p to classify {len(items)} session(s) "
         f"(~{eta} min)…[/dim]"
     )
-    with console.status("[dim]Running batch LLM…[/dim]"):
+    with console.status(
+        f"[dim]Running batch LLM… (0/{total_chunks})[/dim]"
+    ) as status:
+        def _tick(done: int, total: int) -> None:
+            status.update(f"[dim]Running batch LLM… ({done}/{total})[/dim]")
         # force_refresh=True: deep mode wants fresh judgments even if cache exists
-        mapping = classify_sessions_by_content(items, force_refresh=True)
+        mapping = classify_sessions_by_content(
+            items, force_refresh=True, on_chunk_complete=_tick,
+        )
     if not mapping:
         console.print("[red]✗[/red] claude -p classification failed or returned nothing.")
         return 1
@@ -499,30 +506,33 @@ def run_skip_mode(
 # ---------------------------------------------------------------------------
 
 def _prompt_for_mode(console: Console) -> str:
-    """Interactive [Y]Quick / [n]Deep / [s]Skip selector. Returns mode key.
+    """Interactive [Q]uick / [D]eep / [S]kip selector. Returns mode key.
 
-    Copy wording follows the codex naming-review guidance: name what each
-    mode *does* (the action), not its internal mechanic. Users pick on the
-    speed↔accuracy axis, so the labels surface that trade-off in the time
-    annotation.
+    Letters match each mode's first character so the picker doesn't trigger
+    a yes/no instinct (Q is not Y). Default stays Quick — fastest path
+    home, safe for the first-time user pressing Enter.
     """
     console.print(
-        "\nSet up classification:\n"
-        "  [bold][Y][/bold] Quick     — Infer categories from folder names "
-        "+ sample messages [dim](~10s)[/dim]\n"
-        "  [bold][n][/bold] Deep      — Classify recent sessions individually "
-        f"[dim](~1 min, last {DEEP_DEFAULT_DAYS}d, cap {DEEP_DEFAULT_MAX})[/dim]\n"
-        "  [bold][s][/bold] Skip      — Use built-in keyword defaults only "
+        "\nSet up classification — all three modes write [bold]folder-level "
+        "rules[/bold] to ~/.ccstory/config.toml. The difference is how "
+        "thoroughly the LLM looks before assigning each folder.\n"
+        "  [bold][Q][/bold] Quick     — Read folder names + a few first "
+        "messages [dim](~10s)[/dim]\n"
+        "  [bold][D][/bold] Deep      — Read each session's content "
+        "[dim](~1 min, last "
+        f"{DEEP_DEFAULT_DAYS}d, cap {DEEP_DEFAULT_MAX}; better for "
+        "catch-all repos like ccstory / scratch)[/dim]\n"
+        "  [bold][S][/bold] Skip      — Built-in keyword defaults only "
         "[dim](no LLM)[/dim]\n"
     )
     choice = Prompt.ask(
         "Choose",
-        choices=["y", "Y", "n", "N", "s", "S"],
-        default="Y",
+        choices=["q", "Q", "d", "D", "s", "S"],
+        default="Q",
         show_choices=False,
         console=console,
     ).lower()
-    return {"y": "quick", "n": "deep", "s": "skip"}[choice]
+    return {"q": "quick", "d": "deep", "s": "skip"}[choice]
 
 
 def run_init(
