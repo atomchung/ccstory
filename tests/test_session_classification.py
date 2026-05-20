@@ -231,6 +231,67 @@ class TestClassifySessionsByContent:
         assert len(result) == 200
         assert all(b == "coding" for b in result.values())
 
+    def test_on_chunk_complete_fires_per_chunk(self, tmp_home: Path):
+        """Issue #75: progress callback lets callers update a console.status
+        with `chunks_done/total_chunks` so 200-session windows don't look
+        frozen at the same opaque spinner for 3 minutes."""
+        items = [(f"s{i:03d}", "myapp", "did stuff") for i in range(200)]
+
+        def mock_run(cmd, *, capture_output, text, timeout, check):
+            prompt = cmd[-1]
+            sids = [
+                line.split("]")[0].lstrip("[")
+                for line in prompt.splitlines()
+                if line.startswith("[s")
+            ]
+            stdout = "".join(
+                f'{{"session_id": "{sid}", "bucket": "coding"}}\n' for sid in sids
+            )
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout=stdout, stderr="",
+            )
+
+        ticks: list[tuple[int, int]] = []
+
+        def _tick(done: int, total: int) -> None:
+            ticks.append((done, total))
+
+        with patch("ccstory.session_summarizer.claude_bin_available",
+                   return_value=True), \
+             patch("ccstory.session_summarizer.subprocess.run",
+                   side_effect=mock_run):
+            classify_sessions_by_content(
+                items, batch_size=80, on_chunk_complete=_tick,
+            )
+
+        # 200 items / 80 batch = 3 chunks (80 + 80 + 40)
+        assert ticks == [(1, 3), (2, 3), (3, 3)]
+
+    def test_on_chunk_complete_fires_even_on_failed_chunk(self, tmp_home: Path):
+        """Counter should advance whether the chunk succeeded or failed —
+        otherwise a transient claude -p failure looks like a hang."""
+        items = [(f"s{i:03d}", "myapp", "did stuff") for i in range(160)]
+        results_seq = [
+            subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="boom"),
+            subprocess.CompletedProcess(
+                args=[], returncode=0,
+                stdout="".join(
+                    f'{{"session_id": "s{i:03d}", "bucket": "coding"}}\n'
+                    for i in range(80, 160)
+                ),
+                stderr="",
+            ),
+        ]
+        ticks: list[tuple[int, int]] = []
+        with patch("ccstory.session_summarizer.claude_bin_available",
+                   return_value=True), \
+             patch("ccstory.session_summarizer.subprocess.run",
+                   side_effect=results_seq):
+            classify_sessions_by_content(
+                items, batch_size=80, on_chunk_complete=lambda d, t: ticks.append((d, t)),
+            )
+        assert ticks == [(1, 2), (2, 2)]
+
     def test_one_failed_chunk_does_not_kill_remaining(self, tmp_home: Path):
         items = [(f"s{i:03d}", "myapp", "did stuff") for i in range(160)]
         results_seq = [

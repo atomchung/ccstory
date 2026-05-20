@@ -236,11 +236,24 @@ def _resolve_all_sessions(
 
         mapping: dict[str, str] = {}
         if items:
+            total_chunks = (len(items) + 79) // 80
+            chunk_suffix = (
+                f" (1 batch)" if total_chunks == 1
+                else f" (0/{total_chunks} batches)"
+            )
             with console.status(
-                f"[dim]Content-classifying {len(items)} session(s) (one batch "
-                f"claude -p call)…[/dim]"
-            ):
-                mapping = classify_sessions_by_content(items)
+                f"[dim]Content-classifying {len(items)} session(s)"
+                f"{chunk_suffix}…[/dim]"
+            ) as status:
+                def _tick(done: int, total: int) -> None:
+                    if total > 1:
+                        status.update(
+                            f"[dim]Content-classifying {len(items)} session(s)"
+                            f" ({done}/{total} batches)…[/dim]"
+                        )
+                mapping = classify_sessions_by_content(
+                    items, on_chunk_complete=_tick,
+                )
 
         for s in needs_llm:
             new_bucket = mapping.get(s.session_id)

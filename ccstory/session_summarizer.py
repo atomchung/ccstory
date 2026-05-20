@@ -17,6 +17,7 @@ import shutil
 import sqlite3
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -890,6 +891,7 @@ def classify_sessions_by_content(
     force_refresh: bool = False,
     timeout: int = 120,
     batch_size: int = 80,
+    on_chunk_complete: Callable[[int, int], None] | None = None,
 ) -> dict[str, str]:
     """Batch-classify sessions by content.
 
@@ -904,6 +906,12 @@ def classify_sessions_by_content(
     Sends pending sessions to `claude -p` in chunks of `batch_size` so a
     period with more than `batch_size` uncached sessions does not silently
     leave the tail folder-classified.
+
+    ``on_chunk_complete`` (optional) is called after each LLM chunk
+    finishes (success or failure) as ``cb(chunks_done, total_chunks)``.
+    Callers wire this into a ``console.status`` so the user sees
+    something like ``Running batch LLM… (2/3)`` for 200-session windows
+    instead of an opaque spinner (issue #75).
     """
     if not items:
         return {}
@@ -916,12 +924,15 @@ def classify_sessions_by_content(
         return cached
 
     combined = dict(cached)
+    total_chunks = (len(pending) + batch_size - 1) // batch_size
     # Resolve user [categories] once for the whole pass — every chunk shares
     # the same vocab block, and avoiding per-chunk file IO matters when a big
     # window splits into 3+ batches.
     category_context = _build_category_context()
 
-    for chunk_start in range(0, len(pending), batch_size):
+    for chunk_idx, chunk_start in enumerate(
+        range(0, len(pending), batch_size), start=1,
+    ):
         chunk = pending[chunk_start:chunk_start + batch_size]
         rows = "\n".join(
             f"[{sid}] folder: {leaf} | summary: {summ[:200]}"
@@ -930,31 +941,35 @@ def classify_sessions_by_content(
         prompt = _CONTENT_CLASSIFY_PROMPT.format(
             rows=rows, category_context=category_context,
         )
+        fresh: dict[str, str] = {}
         try:
             r = subprocess.run(
                 [CLAUDE_BIN, "-p", "--output-format", "text",
                  "--no-session-persistence", prompt],
                 capture_output=True, text=True, timeout=timeout, check=False,
             )
-            if r.returncode != 0:
+            if r.returncode == 0:
+                parsed = _parse_classification_lines(r.stdout)
+                # Only accept rows whose session id is in THIS chunk — guards
+                # against the model hallucinating ids or returning rows we
+                # never asked about.
+                chunk_ids = {sid for sid, _, _ in chunk}
+                fresh = {sid: b for sid, b in parsed.items() if sid in chunk_ids}
+            else:
                 LOG.warning(
                     "content-classify claude -p failed (chunk %d-%d): %s",
                     chunk_start, chunk_start + len(chunk),
                     r.stderr.strip()[:200],
                 )
-                continue
         except (subprocess.SubprocessError, OSError) as e:
             LOG.warning("content-classify errored: %s", e)
-            continue
 
-        parsed = _parse_classification_lines(r.stdout)
-        # Only accept rows whose session id is in THIS chunk — guards
-        # against the model hallucinating ids or returning rows we never
-        # asked about.
-        chunk_ids = {sid for sid, _, _ in chunk}
-        fresh = {sid: b for sid, b in parsed.items() if sid in chunk_ids}
+        # Upsert + accumulate (no-op on empty fresh); always fire the
+        # progress callback so a failed chunk still advances the counter.
         _classify_cache_upsert_many(fresh)
         combined.update(fresh)
+        if on_chunk_complete is not None:
+            on_chunk_complete(chunk_idx, total_chunks)
 
     return combined
 

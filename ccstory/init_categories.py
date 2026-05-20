@@ -414,13 +414,20 @@ def run_deep_mode(
         return 0
 
     eta = max(1, len(items) // 80 + 1)  # ~80 sessions/batch, ~1 min/batch
+    total_chunks = (len(items) + 79) // 80
     console.print(
         f"[dim]Asking claude -p to classify {len(items)} session(s) "
         f"(~{eta} min)…[/dim]"
     )
-    with console.status("[dim]Running batch LLM…[/dim]"):
+    with console.status(
+        f"[dim]Running batch LLM… (0/{total_chunks})[/dim]"
+    ) as status:
+        def _tick(done: int, total: int) -> None:
+            status.update(f"[dim]Running batch LLM… ({done}/{total})[/dim]")
         # force_refresh=True: deep mode wants fresh judgments even if cache exists
-        mapping = classify_sessions_by_content(items, force_refresh=True)
+        mapping = classify_sessions_by_content(
+            items, force_refresh=True, on_chunk_complete=_tick,
+        )
     if not mapping:
         console.print("[red]✗[/red] claude -p classification failed or returned nothing.")
         return 1
