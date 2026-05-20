@@ -499,34 +499,33 @@ def run_skip_mode(
 # ---------------------------------------------------------------------------
 
 def _prompt_for_mode(console: Console) -> str:
-    """Interactive [Y]Quick / [n]Deep / [s]Skip selector. Returns mode key.
+    """Interactive [Q]uick / [D]eep / [S]kip selector. Returns mode key.
 
-    Copy wording follows the codex naming-review guidance: name what each
-    mode *does* (the action), not its internal mechanic. Users pick on the
-    speed↔accuracy axis, so the labels surface that trade-off in the time
-    annotation.
+    Letters match each mode's first character so the picker doesn't trigger
+    a yes/no instinct (Q is not Y). Default stays Quick — fastest path
+    home, safe for the first-time user pressing Enter.
     """
     console.print(
         "\nSet up classification — all three modes write [bold]folder-level "
         "rules[/bold] to ~/.ccstory/config.toml. The difference is how "
         "thoroughly the LLM looks before assigning each folder.\n"
-        "  [bold][Y][/bold] Quick     — Read folder names + a few first "
+        "  [bold][Q][/bold] Quick     — Read folder names + a few first "
         "messages [dim](~10s)[/dim]\n"
-        "  [bold][n][/bold] Deep      — Read each session's content "
+        "  [bold][D][/bold] Deep      — Read each session's content "
         "[dim](~1 min, last "
         f"{DEEP_DEFAULT_DAYS}d, cap {DEEP_DEFAULT_MAX}; better for "
         "catch-all repos like ccstory / scratch)[/dim]\n"
-        "  [bold][s][/bold] Skip      — Built-in keyword defaults only "
+        "  [bold][S][/bold] Skip      — Built-in keyword defaults only "
         "[dim](no LLM)[/dim]\n"
     )
     choice = Prompt.ask(
         "Choose",
-        choices=["y", "Y", "n", "N", "s", "S"],
-        default="Y",
+        choices=["q", "Q", "d", "D", "s", "S"],
+        default="Q",
         show_choices=False,
         console=console,
     ).lower()
-    return {"y": "quick", "n": "deep", "s": "skip"}[choice]
+    return {"q": "quick", "d": "deep", "s": "skip"}[choice]
 
 
 def run_init(

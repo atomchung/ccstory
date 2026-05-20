@@ -197,3 +197,31 @@ def test_deep_defaults_match_documentation():
     """Public constants should not silently drift from PR-B's stated defaults."""
     assert DEEP_DEFAULT_DAYS == 7
     assert DEEP_DEFAULT_MAX == 200
+
+
+# --- Mode picker letter mapping --------------------------------------------
+
+class TestPromptForMode:
+    """Issue #74: picker uses Q/D/S (action initials) instead of Y/N/S
+    which triggered a yes/no instinct."""
+
+    def _silent(self) -> Console:
+        return Console(file=open("/dev/null", "w"))
+
+    def test_q_maps_to_quick(self):
+        with patch.object(init_categories.Prompt, "ask", return_value="Q"):
+            assert init_categories._prompt_for_mode(self._silent()) == "quick"
+
+    def test_d_maps_to_deep(self):
+        with patch.object(init_categories.Prompt, "ask", return_value="D"):
+            assert init_categories._prompt_for_mode(self._silent()) == "deep"
+
+    def test_s_maps_to_skip(self):
+        with patch.object(init_categories.Prompt, "ask", return_value="S"):
+            assert init_categories._prompt_for_mode(self._silent()) == "skip"
+
+    def test_lowercase_accepted(self):
+        # Rich's Prompt.ask is case-insensitive via choices; verify mapping
+        # tolerates lowercase return values too.
+        with patch.object(init_categories.Prompt, "ask", return_value="q"):
+            assert init_categories._prompt_for_mode(self._silent()) == "quick"
