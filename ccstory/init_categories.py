@@ -507,12 +507,16 @@ def _prompt_for_mode(console: Console) -> str:
     annotation.
     """
     console.print(
-        "\nSet up classification:\n"
-        "  [bold][Y][/bold] Quick     — Infer categories from folder names "
-        "+ sample messages [dim](~10s)[/dim]\n"
-        "  [bold][n][/bold] Deep      — Classify recent sessions individually "
-        f"[dim](~1 min, last {DEEP_DEFAULT_DAYS}d, cap {DEEP_DEFAULT_MAX})[/dim]\n"
-        "  [bold][s][/bold] Skip      — Use built-in keyword defaults only "
+        "\nSet up classification — all three modes write [bold]folder-level "
+        "rules[/bold] to ~/.ccstory/config.toml. The difference is how "
+        "thoroughly the LLM looks before assigning each folder.\n"
+        "  [bold][Y][/bold] Quick     — Read folder names + a few first "
+        "messages [dim](~10s)[/dim]\n"
+        "  [bold][n][/bold] Deep      — Read each session's content "
+        "[dim](~1 min, last "
+        f"{DEEP_DEFAULT_DAYS}d, cap {DEEP_DEFAULT_MAX}; better for "
+        "catch-all repos like ccstory / scratch)[/dim]\n"
+        "  [bold][s][/bold] Skip      — Built-in keyword defaults only "
         "[dim](no LLM)[/dim]\n"
     )
     choice = Prompt.ask(
