@@ -162,7 +162,7 @@ DEFAULT_MONTHLY_QUOTA_USD = 3500.0
 
 
 def load_settings(config_path: Path | None = None) -> dict:
-    """Top-level config: default_bucket, monthly_quota_usd, etc.
+    """Top-level config: default_bucket, monthly_quota_usd, language, etc.
 
     ``config_path`` resolves to module-level ``CONFIG_PATH`` at call time when
     omitted, so test monkeypatches take effect.
@@ -170,10 +170,14 @@ def load_settings(config_path: Path | None = None) -> dict:
     if config_path is None:
         config_path = CONFIG_PATH
     cfg = _load_toml(config_path) or {}
+    lang = cfg.get("language")
+    if not isinstance(lang, str) or not lang.strip():
+        lang = None
     return {
         "default_bucket": cfg.get("default_bucket", DEFAULT_FALLBACK_BUCKET),
         "monthly_quota_usd": float(cfg.get("monthly_quota_usd",
                                            DEFAULT_MONTHLY_QUOTA_USD)),
+        "language": lang.strip() if lang else None,
     }
 
 
@@ -377,6 +381,13 @@ default_bucket = "coding"
 # Set to 0 to hide the burn-% row entirely.
 monthly_quota_usd = 3500
 
+# Narrative response language for `claude -p` outputs. Free-form — the value
+# is dropped straight into the prompt as `Respond in <language>.`
+# Examples: "Traditional Chinese", "日本語", "Spanish".
+# Precedence (high → low): --lang flag · $CCSTORY_LANG · this field ·
+# ~/.claude/CLAUDE.md · ~/.claude/settings.json language · system locale · English.
+# language = "Traditional Chinese"
+
 # Example custom buckets:
 #
 # [categories]
@@ -397,6 +408,7 @@ def _render_config(
     categories: dict[str, list[str]],
     default_bucket: str,
     monthly_quota_usd: float,
+    language: str | None = None,
 ) -> str:
     """Re-render config.toml from scratch from in-memory state.
 
@@ -416,6 +428,11 @@ def _render_config(
         "# Set to 0 to hide the burn-% row entirely.",
         f"monthly_quota_usd = {monthly_quota_usd:g}",
         "",
+        "# Narrative response language. Free-form — passed straight to claude -p.",
+        "# Examples: \"Traditional Chinese\", \"日本語\", \"Spanish\". Comment out",
+        "# or leave empty to inherit from $CCSTORY_LANG / CLAUDE.md / system locale.",
+        f'language = {_json.dumps(language)}' if language else '# language = ""',
+        "",
     ]
     if categories:
         lines.append("[categories]")
@@ -431,8 +448,11 @@ def _render_config(
     return "\n".join(lines)
 
 
-def _load_state(path: Path) -> tuple[dict[str, list[str]], str, float]:
-    """Read existing config (or defaults) into (categories, default_bucket, quota)."""
+def _load_state(
+    path: Path,
+) -> tuple[dict[str, list[str]], str, float, str | None]:
+    """Read existing config (or defaults) into
+    ``(categories, default_bucket, quota, language)``."""
     cfg = _load_toml(path) or {}
     raw_cats = cfg.get("categories") if isinstance(cfg.get("categories"), dict) else {}
     categories: dict[str, list[str]] = {}
@@ -444,7 +464,12 @@ def _load_state(path: Path) -> tuple[dict[str, list[str]], str, float]:
         quota = float(cfg.get("monthly_quota_usd", DEFAULT_MONTHLY_QUOTA_USD))
     except (TypeError, ValueError):
         quota = DEFAULT_MONTHLY_QUOTA_USD
-    return categories, default_bucket, quota
+    lang = cfg.get("language")
+    if not isinstance(lang, str) or not lang.strip():
+        lang = None
+    else:
+        lang = lang.strip()
+    return categories, default_bucket, quota, lang
 
 
 def add_category_keywords(
@@ -471,7 +496,7 @@ def add_category_keywords(
     if not cleaned:
         raise ValueError("at least one non-empty keyword required")
 
-    categories, default_bucket, quota = _load_state(path)
+    categories, default_bucket, quota, language = _load_state(path)
     moved: list[tuple[str, str]] = []
     for kw in cleaned:
         for b, kws in list(categories.items()):
@@ -486,7 +511,7 @@ def add_category_keywords(
             target.append(kw)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        _render_config(categories, default_bucket, quota),
+        _render_config(categories, default_bucket, quota, language),
         encoding="utf-8",
     )
     return categories, moved
@@ -508,7 +533,7 @@ def remove_category_keywords(
     if not cleaned:
         raise ValueError("at least one non-empty keyword required")
 
-    categories, default_bucket, quota = _load_state(path)
+    categories, default_bucket, quota, language = _load_state(path)
     missing: list[str] = []
     target = categories.get(bucket, [])
     for kw in cleaned:
@@ -520,7 +545,7 @@ def remove_category_keywords(
         del categories[bucket]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        _render_config(categories, default_bucket, quota),
+        _render_config(categories, default_bucket, quota, language),
         encoding="utf-8",
     )
     return categories, missing
@@ -532,7 +557,7 @@ def list_user_categories(
     """Return the current user `[categories]` mapping (empty if none)."""
     if path is None:
         path = CONFIG_PATH
-    categories, _, _ = _load_state(path)
+    categories, _, _, _ = _load_state(path)
     return categories
 
 

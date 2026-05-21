@@ -124,6 +124,22 @@ class TestRoundTripWithLoadRules:
         assert 'default_bucket = "coding"' in txt
         assert "monthly_quota_usd = 3500" in txt
 
+    def test_language_preserved_across_writes(self, tmp_home: Path):
+        # Hand-set `language = "..."` must survive subsequent
+        # `category set/unset` rewrites — losing it would silently
+        # demote the user's chosen narrative language back to English.
+        categorizer.CONFIG_PATH.write_text(
+            'default_bucket = "coding"\n'
+            "monthly_quota_usd = 3500\n"
+            'language = "Traditional Chinese"\n'
+            "[categories]\n"
+            '"writing" = ["blog"]\n',
+            encoding="utf-8",
+        )
+        add_category_keywords("writing", ["newsletter"])
+        txt = categorizer.CONFIG_PATH.read_text()
+        assert 'language = "Traditional Chinese"' in txt
+
 
 def _seed_caches(period_keys: list[str]) -> None:
     """Drop a row into each cache table so we can verify invalidation."""

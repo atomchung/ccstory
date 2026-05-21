@@ -204,6 +204,35 @@ Queryable in Obsidian's Dataview / Bases (`WHERE top_focus = "coding"`).
 Bucket names with special characters are JSON-quoted so the frontmatter stays
 valid even for `client: acme, inc`.
 
+## Narrative language
+
+ccstory delegates narrative writing to your local `claude -p`. By default
+it inherits whatever language Claude Code itself responds in; override it
+per run, per shell, or persist a per-tool choice.
+
+Precedence (high → low):
+
+| Source | Notes |
+|---|---|
+| `--lang "Traditional Chinese"` | One-off, this invocation only |
+| `CCSTORY_LANG=日本語` env var | Shell-scoped |
+| `language = "Spanish"` in `~/.ccstory/config.toml` | Persistent, ccstory-only |
+| `~/.claude/CLAUDE.md` | Pasted verbatim, so it can carry richer directives |
+| `~/.claude/settings.json` `language` | Set by Claude Code's `/config` UI |
+| System locale (`$LANG`) | Auto-detected — `zh_TW` → Traditional Chinese, etc. |
+| English | Final fallback |
+
+```bash
+ccstory week --lang "Traditional Chinese"   # one-off
+export CCSTORY_LANG="日本語"                  # shell-scoped
+# or in ~/.ccstory/config.toml:
+# language = "Spanish"
+```
+
+The value is dropped straight into the prompt as `Respond in <value>.`,
+so any name Claude can parse (`"Traditional Chinese"`, `"日本語"`,
+`"pt-BR"`) works.
+
 ## Custom pricing
 
 Default API list prices snapshot to `2026-01`. The report footer always
