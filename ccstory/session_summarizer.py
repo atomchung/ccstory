@@ -241,7 +241,11 @@ def import_from_claude_recap() -> int:
     conn = _connect()
     try:
         try:
-            conn.execute(f"ATTACH DATABASE '{RECAP_DB_PATH}' AS recap")
+            # ATTACH doesn't support parameter binding for filenames, so
+            # double single quotes per SQLite's literal-escape rule. Without
+            # this, $HOME containing a "'" throws OperationalError.
+            attach_path = str(RECAP_DB_PATH).replace("'", "''")
+            conn.execute(f"ATTACH DATABASE '{attach_path}' AS recap")
         except sqlite3.OperationalError as e:
             LOG.warning("attach recap DB failed: %s", e)
             return 0

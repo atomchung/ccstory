@@ -161,3 +161,30 @@ class TestColors:
     def test_unknown_bucket_returns_stable_palette_color(self):
         # Same input must produce same output across calls (deterministic)
         assert color_for("custom_bucket") == color_for("custom_bucket")
+
+    def test_unknown_bucket_color_stable_across_processes(self):
+        # Issue #82-Bug8: built-in hash() is PYTHONHASHSEED-salted, so
+        # subprocess invocations would shuffle the palette. crc32 must not.
+        import subprocess
+        import sys
+
+        script = (
+            "from ccstory.categorizer import color_for; "
+            "print(color_for('client: acme'))"
+        )
+        runs = {
+            subprocess.run(
+                [sys.executable, "-c", script], capture_output=True, text=True, check=True
+            ).stdout.strip()
+            for _ in range(3)
+        }
+        assert len(runs) == 1
+
+    def test_uses_base_ansi_palette_for_unknown_buckets(self):
+        # Issue #14: bright_*/256-color shades ignore the user's terminal
+        # theme. Verify the fallback palette is constrained to base ANSI.
+        base_ansi = {"cyan", "green", "magenta", "yellow", "blue", "red",
+                     "dim", "bold"}
+        for bucket in ("client-a", "client-b", "client-c", "client-d",
+                       "client-e", "client-f", "client-g"):
+            assert color_for(bucket) in base_ansi

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from ccstory.report import VALID_FLAVORS, render_report
+from ccstory.report import VALID_FLAVORS, _md_cell, render_report
 from ccstory.session_summarizer import SessionSummary
 from ccstory.time_tracking import CategoryRollup, SessionStat
 from ccstory.token_usage import ModelUsage, UsageReport
@@ -335,3 +335,36 @@ class TestObsidianWikilinkEscaping:
         # Newline in a wikilink breaks Obsidian's parser
         assert "[[name\nwithnewline]]" not in md
         assert "[[name withnewline]]" in md
+
+
+class TestMarkdownTableEscaping:
+    """Issue #82-Bug7: bucket names containing `|` or `\\n` must not break
+    the time-distribution table."""
+
+    def test_md_cell_escapes_pipe(self):
+        assert _md_cell("client | finance") == "client \\| finance"
+
+    def test_md_cell_collapses_newlines(self):
+        assert "\n" not in _md_cell("line1\nline2")
+        assert "\r" not in _md_cell("line1\rline2")
+
+    def test_bucket_with_pipe_does_not_break_table(self):
+        s = _stat("client | finance", "-Users-alice-code-foo", "s1", mins=60)
+        md = render_report(
+            label="2026-05",
+            since=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 31, tzinfo=timezone.utc),
+            sessions=[s],
+            rollups=[_rollup("client | finance", [s])],
+            usage=_usage(),
+            summaries={},
+        )
+        # Locate the time-distribution row. The cell must contain an escaped
+        # pipe, not a raw one (which would split the row into two extra cells).
+        row = next(
+            line for line in md.splitlines()
+            if line.startswith("| ") and "finance" in line and "1h 00m" in line
+        )
+        assert "client \\| finance" in row
+        # Sanity: exactly the 5 documented columns survive (6 dividers)
+        assert row.count("|") - row.count("\\|") == 6
