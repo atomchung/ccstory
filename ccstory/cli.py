@@ -8,7 +8,9 @@
 
 Flags:
     --llm-narrative    Polish per-session narratives via `claude -p`
-                       (slow, opt-in; shows ETA before batch)
+                       (slow, opt-in; shows ETA before batch). Re-run on a
+                       past window to upgrade cached fallbacks / stale auto
+                       summaries; add --refresh to force-regenerate all.
     --minimal          Skip per-session narrative entirely (fastest)
                        (deprecated alias: --no-summary)
     --no-aggregate     Skip per-category aggregate narrative
@@ -58,6 +60,7 @@ from .report import (
 from .session_summarizer import (
     PROJECTS_DIR as SUMMARIZER_PROJECTS_DIR,
     _classify_cache_get_many,
+    _needs_llm,
     claude_bin_available,
     classify_sessions_by_content,
     get_many,
@@ -65,7 +68,6 @@ from .session_summarizer import (
     invalidate_comparison_narratives,
     invalidate_content_buckets,
     invalidate_period_aggregates,
-    missing_ids,
     summarize_session,
     synthesize_comparison,
     synthesize_overall_for_period,
@@ -310,25 +312,38 @@ def _backfill_with_progress(
     sessions,
     console: Console,
     use_llm: bool = False,
+    force: bool = False,
 ) -> dict[str, int]:
-    """Resolve narratives for sessions not yet in DB.
+    """Resolve narratives for sessions in this window.
 
-    Default path is the instant first-user-msg fallback. Pass `use_llm=True`
-    to opt into `claude -p` polish per session (slow); the user gets an ETA
-    warning before the batch starts.
+    Default path is the instant first-user-msg fallback for never-seen
+    sessions. Pass `use_llm=True` to opt into `claude -p`: it upgrades
+    `fallback` rows to `auto` and regenerates stale `auto` rows (older
+    prompt_version) — or, with `force=True`, every in-window `auto`. The
+    user gets an ETA warning, split into new vs regenerated, before the
+    batch starts.
     """
     by_id = {s.session_id: s for s in sessions if getattr(s, "session_id", None)}
-    miss = missing_ids(list(by_id.keys()))
+    ids = list(by_id.keys())
+    existing = get_many(ids)
+    if use_llm:
+        todo = [sid for sid in ids if _needs_llm(existing.get(sid), force)]
+    else:
+        todo = [sid for sid in ids if existing.get(sid) is None]
+    regen = sum(1 for sid in todo if existing.get(sid) is not None)
     counts = {"summarized": 0, "fallback": 0, "skipped": 0,
-              "already": len(by_id) - len(miss)}
-    if not miss:
+              "regenerated": regen, "already": len(ids) - len(todo)}
+    if not todo:
         return counts
 
     if use_llm:
-        eta_min = max(1, (len(miss) * CLAUDE_P_SEC_PER_SESSION + 59) // 60)
+        eta_min = max(1, (len(todo) * CLAUDE_P_SEC_PER_SESSION + 59) // 60)
+        breakdown = f"{len(todo) - regen} new"
+        if regen:
+            breakdown += f" + {regen} regenerated"
         console.print(
-            f"[yellow]![/yellow] Found {len(miss)} un-summarized "
-            f"session(s). [bold]`claude -p` ETA ~{eta_min} min[/bold] "
+            f"[yellow]![/yellow] {len(todo)} session(s) to summarize "
+            f"({breakdown}). [bold]`claude -p` ETA ~{eta_min} min[/bold] "
             f"(~{CLAUDE_P_SEC_PER_SESSION}s/session cold start). "
             f"Press Ctrl+C to abort, or rerun without --llm-narrative "
             f"for an instant first-user-msg fallback.\n"
@@ -346,8 +361,8 @@ def _backfill_with_progress(
         console=console,
         transient=False,
     ) as progress:
-        task = progress.add_task(progress_desc, total=len(miss))
-        for sid in miss:
+        task = progress.add_task(progress_desc, total=len(todo))
+        for sid in todo:
             sess = by_id[sid]
             jsonl_path = SUMMARIZER_PROJECTS_DIR / sess.project / f"{sid}.jsonl"
             if not jsonl_path.exists():
@@ -355,11 +370,16 @@ def _backfill_with_progress(
                 if matches:
                     jsonl_path = matches[0]
                 else:
-                    upsert(sid, "(jsonl not found)", "skipped", project=sess.project)
+                    # Don't clobber a cached summary when the jsonl has since
+                    # gone missing; only record a skip for never-seen ids.
+                    if existing.get(sid) is None:
+                        upsert(sid, "(jsonl not found)", "skipped",
+                               project=sess.project)
                     counts["skipped"] += 1
                     progress.advance(task)
                     continue
-            result = summarize_session(sid, jsonl_path, use_llm=use_llm)
+            result = summarize_session(sid, jsonl_path, use_llm=use_llm,
+                                       force=force)
             if result and result.source == "auto":
                 counts["summarized"] += 1
                 latest = result.summary
@@ -669,7 +689,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="Polish per-session narratives via `claude -p` "
                              "(slow ~40s/session cold start; shows ETA "
                              "before batch). Default is an instant "
-                             "first-user-msg fallback.")
+                             "first-user-msg fallback. Re-run on a past "
+                             "window to upgrade those fallbacks to polished "
+                             "summaries; already-polished sessions are reused "
+                             "unless their prompt version is stale. Add "
+                             "--refresh to force-regenerate them all.")
     parser.add_argument("--no-aggregate", action="store_true",
                         help="Skip the 3-sentence overall narrative "
                              "(one claude -p call across all buckets)")
@@ -693,11 +717,12 @@ def main(argv: list[str] | None = None) -> int:
                              "a user rule in config.toml matched, otherwise "
                              "falls back to content classification.")
     parser.add_argument("--refresh", action="store_true",
-                        help="Re-classify cached sessions in this window. "
-                             "Wipes the content-classification cache for the "
-                             "sessions inside [since, until] and lets the "
-                             "next pass redo them. Use after editing "
-                             "[categories] rules.")
+                        help="Re-do this window's cached work. Wipes the "
+                             "content-classification cache for the sessions "
+                             "inside [since, until] (use after editing "
+                             "[categories] rules); with --llm-narrative, also "
+                             "force-regenerates every per-session summary in "
+                             "the window via `claude -p`.")
     parser.add_argument("--refresh-all", action="store_true",
                         help="Wipe the entire content-classification cache, "
                              "not just this window. Implies --refresh.")
@@ -807,12 +832,22 @@ def main(argv: list[str] | None = None) -> int:
             )
         counts = _backfill_with_progress(
             sessions, console, use_llm=args.llm_narrative,
+            force=(args.refresh or args.refresh_all),
         )
+        regen = counts.get("regenerated", 0)
+        regen_note = f" · regenerated={regen}" if regen else ""
         console.print(
             f"[green]✓[/green] [dim]summarized={counts['summarized']} · "
-            f"fallback={counts['fallback']} · skipped={counts['skipped']} · "
-            f"cached={counts['already']}[/dim]\n"
+            f"fallback={counts['fallback']} · skipped={counts['skipped']}"
+            f"{regen_note} · cached={counts['already']}[/dim]\n"
         )
+        # Regenerating per-session summaries changes the inputs to the
+        # "What you did" overall synthesis without changing the session-id
+        # set its cache is keyed on, so invalidate it for this label (unless
+        # --refresh already wiped it above) to avoid a stale aggregate.
+        if regen and not (args.refresh or args.refresh_all):
+            invalidate_period_aggregates(label)
+            invalidate_comparison_narratives()
         summaries = get_many([s.session_id for s in sessions])
 
     # Resolver pass — single point where every session's bucket gets assigned.

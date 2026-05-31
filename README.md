@@ -52,6 +52,14 @@ The markdown report adds a **2–3 sentence synthesis per bucket** plus
 per-session one-liners. Run with `--llm-narrative` to upgrade per-session
 lines from the instant first-user-msg fallback to claude-polished prose:
 
+> **Re-running upgrades retroactively.** If you viewed a window in the
+> default (instant) mode first, re-running it with `--llm-narrative` upgrades
+> those cached fallbacks to polished summaries — so `ccstory month
+> --llm-narrative` polishes weeks you already skimmed. Already-polished
+> sessions are reused (no re-burn) unless their prompt version is stale;
+> add `--refresh` to force every in-window summary to regenerate (e.g. after
+> a `claude` model upgrade you want reflected).
+
 ```
 ### coding
 
@@ -134,7 +142,7 @@ The auto-detect means asking Claude Code "show me my week with ccstory" renders 
 
 | Flag | What it does |
 |---|---|
-| `--refresh` | Re-classify cached sessions in this window after a rule edit |
+| `--refresh` | Re-do this window's cached work: re-classify after a rule edit, and (with `--llm-narrative`) force-regenerate every per-session summary |
 | `--refresh-all` | Wipe the entire content-classification cache, not just this window |
 
 ### Trend output
