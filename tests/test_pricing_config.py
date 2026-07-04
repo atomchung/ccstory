@@ -37,7 +37,7 @@ class TestDefaults:
         assert get_snapshot_date() == PRICES_SNAPSHOT_DATE
 
     def test_default_opus_price_unchanged(self):
-        assert _price_for("claude-opus-4-7")["inp"] == 15.0
+        assert _price_for("claude-opus-4-7")["inp"] == 5.0
 
 
 class TestLoadPricesConfig:

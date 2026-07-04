@@ -23,8 +23,8 @@ class TestPriceFor:
     def test_opus_price(self):
         p = _price_for("claude-opus-4-7")
         assert p is not None
-        assert p["inp"] == 15.00
-        assert p["out"] == 75.00
+        assert p["inp"] == 5.00
+        assert p["out"] == 25.00
 
     def test_sonnet_price(self):
         p = _price_for("claude-sonnet-4-6")
@@ -34,7 +34,7 @@ class TestPriceFor:
     def test_haiku_price(self):
         p = _price_for("claude-haiku-4-5-20251001")
         assert p is not None
-        assert p["inp"] == 0.80
+        assert p["inp"] == 1.00
 
     def test_unknown_model_returns_none(self):
         assert _price_for("gpt-4") is None
@@ -53,29 +53,29 @@ class TestModelUsage:
         assert mu.total_tokens == 650
 
     def test_cost_calculation_opus(self):
-        # 1M input * $15 + 1M output * $75 = $90
+        # 1M input * $5 + 1M output * $25 = $30
         mu = ModelUsage(
             model="claude-opus-4-7",
             input_tokens=1_000_000,
             output_tokens=1_000_000,
         )
-        assert mu.cost_usd == 90.0
+        assert mu.cost_usd == 30.0
 
     def test_cost_calculation_with_cache(self):
-        # cache_read is much cheaper: 1M cache_read * $1.50 = $1.50
+        # cache_read is much cheaper: 1M cache_read * $0.50 = $0.50
         mu = ModelUsage(
             model="claude-opus-4-7",
             cache_read=1_000_000,
         )
-        assert mu.cost_usd == 1.50
+        assert mu.cost_usd == 0.50
 
     def test_uncached_cost_treats_cache_as_fresh_input(self):
-        # cache_read counted at input rate: 1M * $15 = $15
+        # cache_read counted at input rate: 1M * $5 = $5
         mu = ModelUsage(
             model="claude-opus-4-7",
             cache_read=1_000_000,
         )
-        assert mu.cost_uncached_usd == 15.0
+        assert mu.cost_uncached_usd == 5.0
 
     def test_unknown_model_zero_cost(self):
         mu = ModelUsage(model="gpt-4", input_tokens=1_000_000)

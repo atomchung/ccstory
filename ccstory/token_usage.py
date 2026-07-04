@@ -26,12 +26,17 @@ PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
 # Anthropic API list prices, USD per 1M tokens.
 # inp = fresh input, out = output, cw = cache creation (write), cr = cache read.
-PRICES_SNAPSHOT_DATE = "2026-01"
+# NOTE 2026-07-05: opus was priced at the pre-4.6 $15/$75 tier — Opus 4.6+ is
+# $5/$25, so historical cost_usd for this window was ~2-3x overstated (same
+# bug found in personal_os/core/token_usage.py, which this file forked from).
+PRICES_SNAPSHOT_DATE = "2026-07"
 
 DEFAULT_PRICES: dict[str, dict[str, float]] = {
-    "opus":   dict(inp=15.00, out=75.00, cw=18.75, cr=1.50),
+    "fable":  dict(inp=10.00, out=50.00, cw=12.50, cr=1.00),
+    "mythos": dict(inp=10.00, out=50.00, cw=12.50, cr=1.00),
+    "opus":   dict(inp=5.00,  out=25.00, cw=6.25,  cr=0.50),
     "sonnet": dict(inp=3.00,  out=15.00, cw=3.75,  cr=0.30),
-    "haiku":  dict(inp=0.80,  out=4.00,  cw=1.00,  cr=0.08),
+    "haiku":  dict(inp=1.00,  out=5.00,  cw=1.25,  cr=0.10),
 }
 
 # Mutable active price table — `apply_prices()` swaps it. Defaults to
