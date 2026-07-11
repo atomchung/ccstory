@@ -206,19 +206,19 @@ valid even for `client: acme, inc`.
 
 ## Custom pricing
 
-Default API list prices snapshot to `2026-01`. The report footer always
+Default API list prices snapshot to `2026-07`. The report footer always
 shows the snapshot date so a stale price table can't silently distort cost
 over time. Override per-model in `~/.ccstory/config.toml`:
 
 ```toml
 [prices]
-snapshot_date = "2026-04"
+snapshot_date = "2026-08"
 
 [prices.opus]
-input       = 15.0
-output      = 75.0
-cache_write = 18.75
-cache_read  = 1.5
+input       = 6.0
+output      = 30.0
+cache_write = 7.5
+cache_read  = 0.6
 ```
 
 Partial overrides are fine — unspecified keys keep their default. Defining a
@@ -284,7 +284,7 @@ No telemetry, no network calls, no upload buttons. Verify in
   which inflates with turn count and system prompt size and isn't a stable
   signal of work done. Output tokens stay comparable month over month.
 - **Pricing**: prices are list prices snapshotted by date (default
-  `2026-01`); the snapshot date renders in every report footer so stale
+  `2026-07`); the snapshot date renders in every report footer so stale
   numbers can't sneak past unnoticed.
 
 ## Roadmap
