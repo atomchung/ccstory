@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import subprocess
 import time
@@ -125,6 +126,35 @@ def _call_claude_p(prompt: str, timeout: int = 120) -> str | None:
         return None
 
 
+# Salvage path: matches `"bucket" = ["a", "b"]` lines even when surrounding
+# TOML is broken (claude prepended prose, mismatched closing brace, etc.).
+_BUCKET_LINE_RE = re.compile(
+    r'^\s*"?(?P<bucket>[A-Za-z0-9_\- ]+?)"?\s*=\s*\[(?P<items>[^\]]*)\]\s*$'
+)
+_QUOTED_ITEM_RE = re.compile(r'"([^"]*)"')
+
+
+def _salvage_toml_categories(text: str) -> dict[str, list[str]] | None:
+    """Best-effort line-by-line salvage when `tomllib` rejects the response.
+
+    Symmetric with the content path's tolerance for partial JSON (one bad
+    record drops just that record). Returns None if nothing recoverable.
+    """
+    out: dict[str, list[str]] = {}
+    for line in text.splitlines():
+        m = _BUCKET_LINE_RE.match(line)
+        if not m:
+            continue
+        items = [s.strip() for s in _QUOTED_ITEM_RE.findall(m.group("items"))]
+        items = [s for s in items if s]
+        if not items:
+            continue
+        bucket = m.group("bucket").strip().lower()
+        if bucket:
+            out[bucket] = items
+    return out or None
+
+
 def _parse_toml_categories(text: str) -> dict[str, list[str]] | None:
     """Extract `[categories]` table from claude's response. Tolerate fences."""
     cleaned = text.strip()
@@ -141,15 +171,24 @@ def _parse_toml_categories(text: str) -> dict[str, list[str]] | None:
             return None
     try:
         data = tomllib.loads(cleaned)
-    except Exception:
-        return None
+    except Exception as e:
+        LOG.warning("tomllib rejected init response, attempting salvage: %s", e)
+        return _salvage_toml_categories(cleaned)
     cats = data.get("categories")
     if not isinstance(cats, dict):
-        return None
+        # Sometimes claude omits the `[categories]` header even though the
+        # rest of the response is valid TOML bucket lines.
+        return _salvage_toml_categories(cleaned)
     out: dict[str, list[str]] = {}
     for k, v in cats.items():
         if isinstance(v, list) and all(isinstance(x, str) for x in v):
-            out[str(k)] = v
+            # Lowercase bucket keys symmetric with `_parse_classification_lines`
+            # in session_summarizer.py — otherwise "Coding" and "coding" land
+            # in config.toml as two buckets that fragment the same report.
+            bucket = str(k).strip().lower()
+            items = [str(x).strip() for x in v if str(x).strip()]
+            if bucket and items:
+                out[bucket] = items
     return out or None
 
 

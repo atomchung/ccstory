@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import re
 import sys
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -178,18 +179,19 @@ def load_settings(config_path: Path | None = None) -> dict:
 
 
 # Rich color names for each default bucket. Used by report.py for bar chart,
-# highlight line, and per-category headings. Picked for screenshot legibility
-# across light + dark terminal themes. Falls back to "white" for any
-# user-defined bucket not in this map.
+# highlight line, and per-category headings. Base ANSI names (not `bright_*`
+# or fixed 256-color shades) so the palette tracks the user's terminal theme
+# — `cyan` resolves through the user's color 6, while `bright_cyan` would
+# pin color 14 which most custom themes leave at a neon default.
 BUCKET_COLORS: dict[str, str] = {
-    "coding":       "bright_cyan",
-    "investment":   "bright_green",
-    "writing":      "bright_magenta",
-    "research":     "bright_yellow",
-    "data":         "bright_blue",
-    "ops":          "orange3",
-    "other":        "grey62",
-    "uncategorized": "grey50",
+    "coding":        "cyan",
+    "investment":    "green",
+    "writing":       "magenta",
+    "research":      "yellow",
+    "data":          "blue",
+    "ops":           "red",
+    "other":         "dim",
+    "uncategorized": "dim",
 }
 
 
@@ -197,10 +199,10 @@ def color_for(bucket: str) -> str:
     """Rich color name for a bucket. Unknown buckets cycle through a stable palette."""
     if bucket in BUCKET_COLORS:
         return BUCKET_COLORS[bucket]
-    # Deterministic fallback for user-defined buckets
-    palette = ["bright_red", "bright_blue", "gold3", "spring_green3", "deep_pink3",
-               "turquoise2", "salmon1", "medium_purple"]
-    return palette[hash(bucket) % len(palette)]
+    # crc32 is stable across processes; Python's built-in hash() is salted by
+    # PYTHONHASHSEED so the same bucket would pick a new color every run.
+    palette = ["cyan", "green", "magenta", "yellow", "blue", "red"]
+    return palette[zlib.crc32(bucket.encode("utf-8")) % len(palette)]
 
 
 def classify(

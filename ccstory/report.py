@@ -63,6 +63,22 @@ _YAML_IMPLICIT_NON_STRING = frozenset({
 })
 
 
+def _md_cell(value: str) -> str:
+    """Escape characters that break a GFM table cell.
+
+    Pipes terminate cells; literal newlines split rows. Bucket names and
+    LLM-produced narratives can contain either, so any user-controlled
+    string heading into a table cell goes through here.
+    """
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace("|", "\\|")
+        .replace("\r", " ")
+        .replace("\n", " ")
+    )
+
+
 def _yaml_scalar(value: str) -> str:
     """Quote a string so it is safe as a YAML scalar.
 
@@ -195,7 +211,7 @@ def render_report(
         pct = (r.active_min / total_min * 100) if total_min else 0
         h_m = f"{int(r.active_min // 60)}h {int(r.active_min % 60):02d}m"
         lines.append(
-            f"| {r.category} | {h_m} | {pct:.0f}% | {r.sessions} | {r.messages:,} |"
+            f"| {_md_cell(r.category)} | {h_m} | {pct:.0f}% | {r.sessions} | {r.messages:,} |"
         )
     lines.append("")
 
@@ -255,7 +271,7 @@ def render_report(
         usage.by_model.items(), key=lambda x: -x[1].total_tokens
     ):
         lines.append(
-            f"| {model} | {mu.turns} | {fmt_tokens(mu.output_tokens)} | "
+            f"| {_md_cell(model)} | {mu.turns} | {fmt_tokens(mu.output_tokens)} | "
             f"${mu.cost_usd:,.2f} |"
         )
     lines.append("")
@@ -280,7 +296,7 @@ def _colored_bar(pct: float, color: str, width: int = 28) -> Text:
     filled = int(round(pct * width))
     bar = Text()
     bar.append("█" * filled, style=color)
-    bar.append("░" * (width - filled), style="grey39")
+    bar.append("░" * (width - filled), style="dim")
     return bar
 
 
@@ -307,7 +323,7 @@ def render_terminal_card(
         top_color = color_for(top_r.category)
         top_pct = (top_r.active_min / total_min * 100) if total_min else 0
         headline = Text()
-        headline.append("★ Top focus  ", style="bold bright_white")
+        headline.append("★ Top focus  ", style="bold")
         headline.append(top_r.category, style=f"bold {top_color}")
         headline.append(f"  {top_r.active_min/60:.1f}h", style="bold")
         headline.append(f"  ({top_pct:.0f}% of active time)", style="dim")
@@ -325,9 +341,9 @@ def render_terminal_card(
     for _ in range(6):
         metrics.add_column()
     metrics.add_row(
-        Text("Active",   style="dim"),  Text(f"{total_h:.1f}h", style="bold bright_white"),
-        Text("Sessions", style="dim"),  Text(f"{len(sessions)}", style="bold bright_white"),
-        Text("Output",   style="dim"),  Text(fmt_tokens(usage.total_output), style="bold bright_white"),
+        Text("Active",   style="dim"),  Text(f"{total_h:.1f}h", style="bold"),
+        Text("Sessions", style="dim"),  Text(f"{len(sessions)}", style="bold"),
+        Text("Output",   style="dim"),  Text(fmt_tokens(usage.total_output), style="bold"),
     )
     cache_color = "green" if usage.cache_hit_ratio >= 0.9 else "yellow"
     metrics.add_row(
@@ -349,7 +365,7 @@ def render_terminal_card(
             bars.add_row(
                 Text(r.category, style=f"bold {color}"),
                 _colored_bar(pct, color),
-                Text(f"{r.active_min/60:.1f}h", style="bright_white"),
+                Text(f"{r.active_min/60:.1f}h", style="bold"),
                 Text(f"{pct*100:.0f}%", style="dim"),
             )
 
@@ -378,7 +394,7 @@ def render_terminal_card(
     title_range = _format_date_range(since, until)
     return Panel(
         Group(*parts),
-        title=f"[bold bright_white]Claude Code Recap[/bold bright_white] [dim]·[/dim] [cyan]{title_range}[/cyan]",
+        title=f"[bold]Claude Code Recap[/bold] [dim]·[/dim] [cyan]{title_range}[/cyan]",
         subtitle="[dim]ccstory[/dim]",
         border_style="cyan",
         padding=(1, 2),
@@ -398,7 +414,7 @@ def _delta_text(current: float, previous: float, unit: str = "h", fmt: str = ".1
     """Compact ▲/▼ delta string with green/red coloring."""
     diff = current - previous
     if previous == 0:
-        return Text("new", style="bright_green")
+        return Text("new", style="green")
     pct = (diff / previous * 100) if previous else 0
     arrow = "▲" if diff > 0 else ("▼" if diff < 0 else "·")
     color = "green" if diff > 0 else ("red" if diff < 0 else "dim")
@@ -418,13 +434,13 @@ def render_comparison_block(cmp: PeriodComparison) -> list:
         parts.append(Text(cmp.narrative, style="dim italic"))
     table = Table.grid(padding=(0, 1))
     table.add_column(width=14)
-    table.add_column(justify="right", width=8, style="bright_white")
+    table.add_column(justify="right", width=8, style="bold")
     table.add_column(justify="right", width=8, style="dim")
     table.add_column(width=12)
     # Totals row first
     table.add_row(
         Text("total", style="bold"),
-        Text(f"{cmp.current_total_h:.1f}h", style="bold bright_white"),
+        Text(f"{cmp.current_total_h:.1f}h", style="bold"),
         Text(f"{cmp.previous_total_h:.1f}h", style="dim"),
         _delta_text(cmp.current_total_h, cmp.previous_total_h),
     )
@@ -484,7 +500,7 @@ def render_comparison_markdown(cmp: PeriodComparison) -> str:
     )
     for d in cmp.deltas:
         lines.append(
-            f"| `{d.category}` | {d.current_min/60:.1f}h | "
+            f"| `{_md_cell(d.category)}` | {d.current_min/60:.1f}h | "
             f"{d.previous_min/60:.1f}h | {fmt_pct(d.current_min, d.previous_min)} |"
         )
     lines.append("")
@@ -519,8 +535,8 @@ def render_trend_card(points: list[PeriodPoint], period: str) -> Panel:
 
     table.add_row(
         Text("total", style="bold underline"),
-        Text(sparkline(total_series), style="bold bright_white"),
-        Text(f"{total_series[-1]:.1f}h", style="bold bright_white"),
+        Text(sparkline(total_series), style="bold"),
+        Text(f"{total_series[-1]:.1f}h", style="bold"),
         Text(f"avg {sum(total_series)/len(total_series):.1f}h", style="dim"),
         _delta_text(total_series[-1], total_series[-2] if len(total_series) > 1 else 0),
     )
@@ -530,7 +546,7 @@ def render_trend_card(points: list[PeriodPoint], period: str) -> Panel:
         table.add_row(
             Text(cat, style=color),
             Text(sparkline(series), style=color),
-            Text(f"{series[-1]:.1f}h", style="bright_white"),
+            Text(f"{series[-1]:.1f}h", style="bold"),
             Text(f"avg {sum(series)/len(series):.1f}h", style="dim"),
             _delta_text(series[-1], prev),
         )
@@ -549,14 +565,14 @@ def render_trend_card(points: list[PeriodPoint], period: str) -> Panel:
     extra.add_row(
         Text("output", style="bold"),
         Text(sparkline(output_series), style="cyan"),
-        Text(f"{output_series[-1]:.1f}M", style="bright_white"),
+        Text(f"{output_series[-1]:.1f}M", style="bold"),
         Text(f"avg {sum(output_series)/len(output_series):.1f}M", style="dim"),
         _delta_text(output_series[-1], output_series[-2] if len(output_series) > 1 else 0, unit="M"),
     )
     extra.add_row(
         Text("cost", style="bold"),
         Text(sparkline(cost_series), style="green"),
-        Text(f"${cost_series[-1]:,.0f}", style="bright_white"),
+        Text(f"${cost_series[-1]:,.0f}", style="bold"),
         Text(f"avg ${sum(cost_series)/len(cost_series):,.0f}", style="dim"),
         _delta_text(cost_series[-1], cost_series[-2] if len(cost_series) > 1 else 0, unit="$"),
     )
@@ -586,7 +602,7 @@ def render_trend_card(points: list[PeriodPoint], period: str) -> Panel:
     )
     return Panel(
         body,
-        title=f"[bold bright_white]Claude Code Trend[/bold bright_white] "
+        title=f"[bold]Claude Code Trend[/bold] "
               f"[dim]·[/dim] [cyan]last {len(points)} {period}s[/cyan]",
         subtitle="[dim]ccstory trend[/dim]",
         border_style="cyan",
@@ -618,7 +634,7 @@ def render_trend_markdown(points: list[PeriodPoint], period: str) -> str:
     for cat, series in cat_series.items():
         prev = series[-2] if len(series) > 1 else 0
         lines.append(
-            f"| `{cat}` | `{sparkline(series)}` | "
+            f"| `{_md_cell(cat)}` | `{sparkline(series)}` | "
             f"{series[-1]:.1f}h | {sum(series)/len(series):.1f}h | "
             f"{pct(series[-1], prev)} |"
         )
@@ -629,7 +645,7 @@ def render_trend_markdown(points: list[PeriodPoint], period: str) -> str:
     lines.append("|---|---:|---:|---:|")
     for p in points:
         lines.append(
-            f"| `{p.label}` | {p.total_h:.1f} | "
+            f"| `{_md_cell(p.label)}` | {p.total_h:.1f} | "
             f"{p.output_tokens/1_000_000:.2f} | ${p.cost_usd:,.0f} |"
         )
     lines.append("")

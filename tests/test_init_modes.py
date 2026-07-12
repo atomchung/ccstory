@@ -13,6 +13,8 @@ from ccstory.init_categories import (
     DEEP_DEFAULT_DAYS,
     DEEP_DEFAULT_MAX,
     _aggregate_folder_rules,
+    _parse_toml_categories,
+    _salvage_toml_categories,
     run_deep_mode,
     run_quick_mode,
     run_skip_mode,
@@ -225,3 +227,64 @@ class TestPromptForMode:
         # tolerates lowercase return values too.
         with patch.object(init_categories.Prompt, "ask", return_value="q"):
             assert init_categories._prompt_for_mode(self._silent()) == "quick"
+
+
+# --- _parse_toml_categories (issue #64) ------------------------------------
+
+class TestParseTomlCategories:
+    """Issue #64 — init path must normalize case symmetric with the content
+    path, and tolerate partial TOML the same way the content path tolerates
+    one bad JSON line."""
+
+    def test_lowercases_bucket_keys(self):
+        # Claude returning "Coding" used to land alongside the default
+        # "coding" rule, fragmenting the same bucket in the same report.
+        out = _parse_toml_categories(
+            '[categories]\n"Coding" = ["proj-a"]\n"Writing" = ["proj-b"]\n'
+        )
+        assert out == {"coding": ["proj-a"], "writing": ["proj-b"]}
+
+    def test_strips_item_whitespace(self):
+        out = _parse_toml_categories(
+            '[categories]\n"coding" = ["  proj-a  ", "proj-b"]\n'
+        )
+        assert out == {"coding": ["proj-a", "proj-b"]}
+
+    def test_salvages_when_tomllib_rejects(self):
+        # Trailing prose after the table is the most common LLM failure
+        # mode — tomllib refuses, salvage scrapes the bucket lines.
+        text = (
+            '[categories]\n'
+            '"coding" = ["proj-a", "proj-b"]\n'
+            '"writing" = ["proj-c"]\n'
+            'Hope this helps!\n'  # prose tail breaks tomllib
+        )
+        out = _parse_toml_categories(text)
+        assert out is not None
+        assert "coding" in out and "writing" in out
+
+    def test_salvages_when_categories_header_missing(self):
+        # Sometimes claude drops the `[categories]` header. tomllib parses
+        # top-level keys fine but `data.get("categories")` returns None;
+        # salvage still recovers the buckets.
+        text = '"coding" = ["proj-a"]\n"writing" = ["proj-b"]\n'
+        out = _parse_toml_categories(text)
+        assert out == {"coding": ["proj-a"], "writing": ["proj-b"]}
+
+
+class TestSalvageTomlCategories:
+    def test_one_bad_line_does_not_kill_batch(self):
+        # Symmetric with json.JSONDecodeError handling in
+        # _parse_classification_lines: one bad row → that row drops, rest stays.
+        text = (
+            '[categories]\n'
+            '"coding" = ["proj-a"]\n'
+            'this line is garbage\n'
+            '"writing" = ["proj-b"]\n'
+        )
+        out = _salvage_toml_categories(text)
+        assert out == {"coding": ["proj-a"], "writing": ["proj-b"]}
+
+    def test_returns_none_when_nothing_recoverable(self):
+        assert _salvage_toml_categories("no buckets here at all\n") is None
+        assert _salvage_toml_categories("") is None
