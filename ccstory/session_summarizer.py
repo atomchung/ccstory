@@ -665,6 +665,100 @@ def synthesize_overall_for_period(
     return narrative
 
 
+_CATEGORY_PROMPT = """{language_directive}
+
+Below are one-line summaries of every Claude Code session in the "{category}" category for one time window ({count} sessions).
+
+Write 2-3 short lines (max 60 words total) synthesizing what the user did in THIS category over the period — the main thread first, then secondary work or an outcome worth flagging.
+
+Style:
+- Prose only — no bullets, no headers, no lists.
+- Concrete nouns (tickers, file names, tools) beat generic verbs.
+- Synthesize; do NOT enumerate every session.
+
+Sessions:
+{bullets}
+
+Output the 2-3 lines only — no quotes, no prefix, no fences."""
+
+
+def synthesize_category_for_period(
+    period_key: str,
+    category: str,
+    session_ids: list[str],
+    summaries: list[str],
+    force_refresh: bool = False,
+    timeout: int = 90,
+) -> str | None:
+    """Synthesize a 2-3 line narrative for ONE category in a period (#57).
+
+    Cache key: (period_key, category) in the same period_aggregates table
+    the overall narrative uses — OVERALL_KEY ("__overall__") is reserved,
+    so a user bucket by that name is skipped rather than colliding.
+    Invalidates when the category's session-id set differs (sessions
+    unchanged → no recompute; same dedup contract as the overall row).
+    Returns None on LLM failure or empty input — never blocks the report.
+    """
+    if not session_ids or not summaries or category == OVERALL_KEY:
+        return None
+    ids_sorted = sorted(session_ids)
+
+    conn = _connect()
+    try:
+        cur = conn.execute(
+            "SELECT summary, session_ids FROM period_aggregates "
+            "WHERE period_key = ? AND category = ?",
+            (period_key, category),
+        ).fetchone()
+        cached_ids = cur[1].split(",") if cur else []
+        if cur and not force_refresh and cached_ids == ids_sorted:
+            return cur[0]
+    finally:
+        conn.close()
+
+    if not claude_bin_available():
+        return None
+
+    bullets = "\n".join(f"- {s}" for s in summaries)[:6000]
+    prompt = _CATEGORY_PROMPT.format(
+        language_directive=language_directive(),
+        category=category,
+        count=len(summaries),
+        bullets=bullets,
+    )
+
+    try:
+        r = subprocess.run(
+            [CLAUDE_BIN, "-p", "--output-format", "text",
+             "--no-session-persistence", prompt],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+        if r.returncode != 0:
+            LOG.warning("category %r claude -p failed: %s",
+                        category, r.stderr.strip()[:200])
+            return None
+        narrative = r.stdout.strip().strip('"').strip("'")
+        if len(narrative) < 10:
+            return None
+    except (subprocess.SubprocessError, OSError) as e:
+        LOG.warning("category %r errored: %s", category, e)
+        return None
+
+    conn = _connect()
+    try:
+        conn.execute(
+            """INSERT OR REPLACE INTO period_aggregates
+               (period_key, category, summary, session_ids, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (period_key, category, narrative,
+             ",".join(ids_sorted), time.time()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return narrative
+
+
 def get_overall_narrative(period_key: str) -> str | None:
     """Return cached overall narrative for a period, if any."""
     conn = _connect()

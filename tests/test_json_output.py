@@ -72,7 +72,7 @@ class TestReportJson:
         assert p["totals"]["sessions"] == 1
         assert p["buckets"] == [{
             "name": "coding", "active_hours": 1.0, "share": 1.0,
-            "sessions": 1, "messages": 10,
+            "sessions": 1, "messages": 10, "narrative": None,
         }]
 
     def test_session_summary_precedence(self):
