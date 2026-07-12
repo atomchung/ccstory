@@ -37,6 +37,7 @@ from rich.progress import (
 from rich.table import Table
 
 from . import __version__
+from .artifacts import collect_artifacts
 from .categorizer import (
     add_category_keywords,
     color_for,
@@ -702,6 +703,12 @@ def main(argv: list[str] | None = None) -> int:
                              "(one claude -p call across all buckets)")
     parser.add_argument("--no-compare", action="store_true",
                         help="Skip the vs-previous-window comparison block")
+    parser.add_argument("--no-artifacts", action="store_true",
+                        help="Skip the What-shipped section (git commits / "
+                             "merged PRs / releases / stars / PyPI downloads "
+                             "for repos worked on this window). Also "
+                             "disable persistently via config.toml "
+                             "[artifacts] enabled = false.")
     parser.add_argument("--for", dest="flavor", choices=VALID_FLAVORS,
                         default="plain",
                         help="Markdown variant for the saved report. "
@@ -921,6 +928,13 @@ def main(argv: list[str] | None = None) -> int:
                     ],
                 )
 
+    artifacts = None
+    if not args.no_artifacts:
+        # Local git is fast; gh / pypistats are network-bound but individually
+        # capped by timeouts, and every miss degrades to "column unavailable".
+        with console.status("[dim]Collecting shipped artifacts (git / gh / PyPI)…[/dim]"):
+            artifacts = collect_artifacts(sessions, since, until, settings)
+
     args.reports_dir.mkdir(parents=True, exist_ok=True)
     out_path = args.reports_dir / f"recap-{label}.md"
     md = render_report(
@@ -934,6 +948,7 @@ def main(argv: list[str] | None = None) -> int:
         overall_narrative=overall_narrative,
         comparison=comparison,
         flavor=args.flavor,
+        artifacts=artifacts,
     )
     out_path.write_text(md, encoding="utf-8")
 
@@ -956,6 +971,7 @@ def main(argv: list[str] | None = None) -> int:
             overall_narrative=overall_narrative,
             report_path=str(out_path),
             comparison=comparison,
+            artifacts=artifacts,
             console=console,
         )
         console.print(f"[dim]Prices as of {get_snapshot_date()}[/dim]")

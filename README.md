@@ -183,6 +183,39 @@ Folder rules can be overridden per-session by content (`--classify content` /
 were actually about. Results cache in `~/.ccstory/cache.db` so reruns are
 free.
 
+## What shipped
+
+Time tells half the story; the other half is what the time produced. Each
+report includes a **What shipped** section — per-repo output metrics for the
+repos you actually worked in during the window:
+
+```markdown
+| Repo     | Commits | PRs merged | Releases | Stars   |
+|----------|--------:|-----------:|----------|--------:|
+| ccstory  | 5       | 3          | v0.4.2   | 42 (+6) |
+| myapp    | 21      | 1          | –        | 12      |
+
+- PyPI **ccstory**: 107 downloads (last week)
+```
+
+- **Repos are inferred from session working directories** — no config needed.
+  Worktrees collapse into their main repository.
+- **Commits** come from local git (works offline, counts all branches).
+  **PRs merged / releases / stars** need the `gh` CLI; without it those
+  columns degrade to `–`. **PyPI downloads** come from pypistats.org for
+  packages auto-detected in active repos' `pyproject.toml`.
+- **Stars delta** compares against the last snapshot taken before the window,
+  so it becomes meaningful from your second run onward.
+
+Skip per run with `--no-artifacts`, or persistently via config:
+
+```toml
+[artifacts]
+enabled = true
+exclude = ["playground"]   # substring match on repo path
+pypi = ["my-package"]      # extra packages beyond auto-detection
+```
+
 ## Obsidian export
 
 `ccstory --for=obsidian` swaps the plain markdown for a PKM-vault-ready
@@ -321,7 +354,8 @@ No telemetry, no network calls, no upload buttons. Verify in
 - [ ] More export flavors (Logseq, Notion)
 - [ ] Optional PNG card export
 - [ ] `ccstory year` — annual recap (Spotify-Wrapped style)
-- [ ] Git commit / PR correlation per session
+- [x] Git commit / PR correlation — period-level **What shipped** section
+      (per-session attribution still open, #11)
 
 See the [issue tracker](https://github.com/atomchung/ccstory/issues) for the
 full backlog.

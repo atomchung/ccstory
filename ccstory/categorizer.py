@@ -174,11 +174,21 @@ def load_settings(config_path: Path | None = None) -> dict:
     lang = cfg.get("language")
     if not isinstance(lang, str) or not lang.strip():
         lang = None
+    arts = cfg.get("artifacts")
+    if not isinstance(arts, dict):
+        arts = {}
     return {
         "default_bucket": cfg.get("default_bucket", DEFAULT_FALLBACK_BUCKET),
         "monthly_quota_usd": float(cfg.get("monthly_quota_usd",
                                            DEFAULT_MONTHLY_QUOTA_USD)),
         "language": lang.strip() if lang else None,
+        "artifacts": {
+            "enabled": bool(arts.get("enabled", True)),
+            "exclude": [str(x) for x in arts.get("exclude", [])
+                        if isinstance(x, str) and x.strip()],
+            "pypi": [str(x) for x in arts.get("pypi", [])
+                     if isinstance(x, str) and x.strip()],
+        },
     }
 
 

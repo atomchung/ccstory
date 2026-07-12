@@ -15,6 +15,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from .artifacts import ArtifactsReport
 from .categorizer import color_for, load_settings, normalize_project_name
 from .session_summarizer import SessionSummary
 from .time_tracking import CategoryRollup, SessionStat
@@ -149,6 +150,47 @@ def _obsidian_frontmatter(
     return lines
 
 
+def _stars_cell(stars: int | None, delta: int | None) -> str:
+    if stars is None:
+        return "–"
+    if delta is None or delta == 0:
+        return f"{stars:,}"
+    sign = "+" if delta > 0 else ""
+    return f"{stars:,} ({sign}{delta})"
+
+
+def render_artifacts_markdown(arts: ArtifactsReport) -> str:
+    """"What shipped" section: per-repo output metrics + PyPI downloads."""
+    lines: list[str] = []
+    lines.append("## What shipped")
+    lines.append("")
+    if arts.repos:
+        lines.append("| Repo | Commits | PRs merged | Releases | Stars |")
+        lines.append("|---|---:|---:|---|---:|")
+        for r in arts.repos:
+            prs = str(r.prs_merged) if r.prs_merged is not None else "–"
+            rels = _md_cell(", ".join(r.releases)) if r.releases else "–"
+            lines.append(
+                f"| {_md_cell(r.name)} | {r.commits} | {prs} | {rels} | "
+                f"{_stars_cell(r.stars, r.stars_delta)} |"
+            )
+        lines.append("")
+    for p in arts.pypi:
+        window_label = p.window.replace("_", " ")
+        lines.append(
+            f"- PyPI **{_md_cell(p.package)}**: {p.downloads:,} downloads ({window_label})"
+        )
+    if arts.pypi:
+        lines.append("")
+    lines.append(
+        "> Commits count all branches (unmerged work is still output). "
+        "Stars delta is vs the last snapshot before this window; "
+        "PyPI numbers are pypistats.org rolling buckets, not this exact window."
+    )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def render_report(
     label: str,
     since: datetime,
@@ -160,6 +202,7 @@ def render_report(
     overall_narrative: str | None = None,
     comparison: PeriodComparison | None = None,
     flavor: str = "plain",
+    artifacts: ArtifactsReport | None = None,
 ) -> str:
     """Produce the full markdown report.
 
@@ -224,6 +267,10 @@ def render_report(
         lines.append("")
         lines.append(overall_narrative)
         lines.append("")
+
+    # Shipped-output metrics — the "what did the time produce" half (#90)
+    if artifacts:
+        lines.append(render_artifacts_markdown(artifacts))
 
     # Per-category session breakdown
     lines.append("## Sessions, by category")
@@ -310,6 +357,7 @@ def render_terminal_card(
     overall_narrative: str | None = None,
     report_path: str | None = None,
     comparison: PeriodComparison | None = None,
+    artifacts: ArtifactsReport | None = None,
 ) -> Panel:
     """Rich Panel summarizing the recap. Designed for screenshot sharing."""
     summaries = summaries or {}
@@ -380,6 +428,20 @@ def render_terminal_card(
         parts.append(Text(""))
         parts.append(Text("What you did", style="bold underline"))
         parts.append(Text(overall_narrative, style="dim"))
+
+    if artifacts and artifacts.repos:
+        parts.append(Text(""))
+        shipped = Text()
+        shipped.append("Shipped  ", style="bold")
+        bits = [f"{artifacts.total_commits} commits"]
+        if artifacts.total_prs:
+            bits.append(f"{artifacts.total_prs} PRs merged")
+        if artifacts.total_releases:
+            bits.append(f"{artifacts.total_releases} release"
+                        + ("s" if artifacts.total_releases > 1 else ""))
+        shipped.append(" · ".join(bits), style="bold green")
+        shipped.append(f"  across {len(artifacts.repos)} repos", style="dim")
+        parts.append(shipped)
 
     if comparison:
         parts.extend(render_comparison_block(comparison))
