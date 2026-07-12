@@ -40,6 +40,9 @@ class SessionStat:
     user_msg_count: int = 0
     first_user_text: str = ""
     is_scheduled: bool = False
+    # Working directory recorded in the transcript. Drives artifact/repo
+    # attribution (artifacts.py); empty for pre-cwd-era transcripts.
+    cwd: str = ""
     timestamps: list[float] = field(default_factory=list)
     # Which resolver layer set `.category`. One of:
     #   "" (unresolved) | "user_rule" | "llm_cache" | "llm_fresh" | "fallback"
@@ -93,6 +96,7 @@ def parse_session(jsonl_path: Path) -> SessionStat | None:
     first_user_text = ""
     is_scheduled = False
     first_raw_user_seen = False
+    cwd = ""
 
     try:
         with jsonl_path.open("r", encoding="utf-8") as f:
@@ -107,6 +111,8 @@ def parse_session(jsonl_path: Path) -> SessionStat | None:
                 role = d.get("type")
                 if role not in ("user", "assistant"):
                     continue
+                if not cwd and isinstance(d.get("cwd"), str):
+                    cwd = d["cwd"]
                 msg_count += 1
                 ts = _parse_ts(d.get("timestamp"))
                 if ts:
@@ -160,6 +166,7 @@ def parse_session(jsonl_path: Path) -> SessionStat | None:
         user_msg_count=user_msg_count,
         first_user_text=first_user_text,
         is_scheduled=is_scheduled,
+        cwd=cwd,
         timestamps=[t.timestamp() for t in timestamps],
     )
 

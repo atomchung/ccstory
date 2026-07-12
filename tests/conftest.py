@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from ccstory import categorizer, session_summarizer, time_tracking, token_usage
+from ccstory import artifacts, categorizer, session_summarizer, time_tracking, token_usage
 
 
 @pytest.fixture
@@ -57,6 +57,7 @@ def tmp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # language_directive() is @lru_cache'd; flush so per-test CLAUDE.md edits take effect.
     session_summarizer.language_directive.cache_clear()
     monkeypatch.setattr(categorizer, "CONFIG_PATH", ccstory_dir / "config.toml")
+    monkeypatch.setattr(artifacts, "DB_PATH", ccstory_dir / "cache.db")
     return home
 
 
