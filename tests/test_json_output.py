@@ -79,6 +79,7 @@ class TestReportJson:
         # Cached summary wins; first_user_text is the fallback.
         no_cache = _build()
         assert no_cache["sessions"][0]["summary"] == "fix the login bug"
+        assert no_cache["sessions"][0]["summary_source"] == "first_message"
         cached = _build(summaries={
             "s1": SessionSummary(
                 session_id="s1", summary="Fixed the login flow end to end.",
@@ -86,6 +87,7 @@ class TestReportJson:
             ),
         })
         assert cached["sessions"][0]["summary"] == "Fixed the login flow end to end."
+        assert cached["sessions"][0]["summary_source"] == "auto"
 
     def test_comparison_block(self):
         cmp = PeriodComparison(
