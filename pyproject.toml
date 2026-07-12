@@ -10,7 +10,20 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "atomchung" }]
-keywords = ["claude", "claude-code", "usage", "tracking", "cli"]
+keywords = [
+    "claude",
+    "claude-code",
+    "ccusage",
+    "usage",
+    "tracking",
+    "cli",
+    "recap",
+    "narrative",
+    "weekly-report",
+    "analytics",
+    "productivity",
+    "developer-tools",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
