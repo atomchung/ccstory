@@ -416,6 +416,14 @@ def build_report_json(
                 "active_min": s.active_min,
                 "messages": s.msg_count,
                 "summary": _session_summary_text(s, summaries),
+                # Provenance so consumers can filter real LLM summaries
+                # ("auto") from first-message fallbacks — seeding a downstream
+                # cache with fallback text would poison it.
+                "summary_source": (
+                    summaries[s.session_id].source
+                    if summaries and s.session_id in summaries
+                    else "first_message"
+                ),
             }
             for s in sorted(sessions, key=lambda x: x.start)
         ],

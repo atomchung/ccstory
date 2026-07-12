@@ -983,6 +983,10 @@ def main(argv: list[str] | None = None) -> int:
             comparison=comparison,
             artifacts=artifacts,
         )
+        # Injected here, not in build_report_json — the path is a CLI-run
+        # concern (label + --reports-dir), and downstream consumers need it
+        # since stdout no longer carries the "Full report →" breadcrumb.
+        payload["report_path"] = str(out_path)
         sys.stdout.write(_json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
         console.print(f"[dim]Full report → {out_path}[/dim]")
         console.print(f"[dim]Prices as of {get_snapshot_date()}[/dim]")
