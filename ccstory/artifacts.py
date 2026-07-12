@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .time_tracking import SessionStat
+from .time_tracking import SessionStat, _parse_ts
 
 LOG = logging.getLogger("ccstory.artifacts")
 
@@ -53,7 +53,7 @@ _GITHUB_REMOTE_RE = re.compile(
 class RepoArtifacts:
     root: Path
     name: str
-    github: str | None = None  # "owner/repo" when origin points at GitHub
+    github: str | None = None  # "owner/repo"; only filled when gh is usable
     commits: int = 0
     commit_subjects: list[str] = field(default_factory=list)
     prs_merged: int | None = None  # None = gh unavailable / lookup failed
@@ -201,7 +201,7 @@ def count_merged_prs(slug: str, since: datetime, until: datetime) -> int | None:
         LOG.warning("%s: merged-PR list hit the %d cap; count may be low", slug, _GH_PR_LIMIT)
     count = 0
     for pr in prs:
-        merged = _parse_iso(pr.get("mergedAt"))
+        merged = _parse_ts(pr.get("mergedAt"))
         if merged and since <= merged < until:
             count += 1
     return count
@@ -222,7 +222,7 @@ def list_releases(slug: str, since: datetime, until: datetime) -> list[str] | No
     for rel in releases:
         if rel.get("draft"):
             continue
-        published = _parse_iso(rel.get("publishedAt") or rel.get("published_at"))
+        published = _parse_ts(rel.get("publishedAt") or rel.get("published_at"))
         if published and since <= published < until:
             tags.append(rel.get("tagName") or rel.get("tag_name") or "?")
     return tags
@@ -239,16 +239,6 @@ def get_stars(slug: str) -> int | None:
         return int(out)
     except ValueError:
         return None
-
-
-def _parse_iso(raw: str | None) -> datetime | None:
-    if not raw:
-        return None
-    try:
-        ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
 
 
 # --- stars snapshot (delta needs a pre-window baseline) ---------------------
@@ -270,7 +260,17 @@ def _metrics_connect() -> sqlite3.Connection:
     return conn
 
 
-def stars_delta_and_record(slug: str, stars: int, since: datetime) -> int | None:
+def _open_metrics_db() -> sqlite3.Connection | None:
+    try:
+        return _metrics_connect()
+    except sqlite3.Error as e:
+        LOG.debug("repo_metrics DB unavailable: %s", e)
+        return None
+
+
+def stars_delta_and_record(
+    slug: str, stars: int, since: datetime, conn: sqlite3.Connection
+) -> int | None:
     """Delta vs the newest snapshot taken before the window; records today's.
 
     First run for a repo has no baseline → returns None and the report shows
@@ -279,20 +279,16 @@ def stars_delta_and_record(slug: str, stars: int, since: datetime) -> int | None
     """
     today = datetime.now(timezone.utc).date().isoformat()
     try:
-        conn = _metrics_connect()
-        try:
-            row = conn.execute(
-                "SELECT stars FROM repo_metrics WHERE repo = ? AND captured_at < ? "
-                "ORDER BY captured_at DESC LIMIT 1",
-                (slug, since.date().isoformat()),
-            ).fetchone()
-            conn.execute(
-                "INSERT OR REPLACE INTO repo_metrics (repo, captured_at, stars) VALUES (?, ?, ?)",
-                (slug, today, stars),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        row = conn.execute(
+            "SELECT stars FROM repo_metrics WHERE repo = ? AND captured_at < ? "
+            "ORDER BY captured_at DESC LIMIT 1",
+            (slug, since.date().isoformat()),
+        ).fetchone()
+        conn.execute(
+            "INSERT OR REPLACE INTO repo_metrics (repo, captured_at, stars) VALUES (?, ?, ?)",
+            (slug, today, stars),
+        )
+        conn.commit()
     except sqlite3.Error as e:
         LOG.debug("repo_metrics snapshot failed for %s: %s", slug, e)
         return None
@@ -366,6 +362,10 @@ def collect_artifacts(
 
     gh_ok = _gh_available()
     repos: list[RepoArtifacts] = []
+    metrics_conn: sqlite3.Connection | None = None
+    # dict-as-ordered-set: explicit config packages render first, then
+    # auto-detected ones in discovery order — a plain set would make the
+    # PyPI lines' order unstable across runs.
     pypi_candidates: dict[str, None] = dict.fromkeys(explicit_pypi)
 
     for root in discover_repos(sessions, exclude):
@@ -373,21 +373,29 @@ def collect_artifacts(
         art = RepoArtifacts(
             root=root, name=root.name, commits=commits, commit_subjects=subjects,
         )
-        slug = github_slug(root)
-        if slug and gh_ok:
+        # Slug lookup is a subprocess; skip it when gh can't use the result
+        # anyway (.github has no other consumer).
+        slug = github_slug(root) if gh_ok else None
+        if slug:
             art.github = slug
             art.prs_merged = count_merged_prs(slug, since, until)
             art.releases = list_releases(slug, since, until) or []
             art.stars = get_stars(slug)
             if art.stars is not None:
-                art.stars_delta = stars_delta_and_record(slug, art.stars, since)
-        elif slug:
-            art.github = slug
+                if metrics_conn is None:
+                    metrics_conn = _open_metrics_db()
+                if metrics_conn is not None:
+                    art.stars_delta = stars_delta_and_record(
+                        slug, art.stars, since, metrics_conn,
+                    )
         if commits or art.prs_merged or art.releases:
             repos.append(art)
             pkg = detect_pypi_package(root)
             if pkg:
                 pypi_candidates.setdefault(pkg)
+
+    if metrics_conn is not None:
+        metrics_conn.close()
 
     # week-ish windows read pypistats' last_week bucket; anything longer,
     # last_month. The buckets never align exactly with the report window —

@@ -186,28 +186,35 @@ class TestStarsSnapshot:
         monkeypatch.setattr(artifacts, "DB_PATH", tmp_path / "cache.db")
 
     def test_first_run_records_but_no_delta(self):
-        assert stars_delta_and_record("a/b", 40, SINCE) is None
+        conn = artifacts._metrics_connect()
+        try:
+            assert stars_delta_and_record("a/b", 40, SINCE, conn) is None
+        finally:
+            conn.close()
 
     def test_delta_vs_pre_window_baseline(self):
-        import sqlite3
         conn = artifacts._metrics_connect()
-        conn.execute(
-            "INSERT INTO repo_metrics (repo, captured_at, stars) VALUES (?, ?, ?)",
-            ("a/b", "2026-06-28", 35),
-        )
-        conn.commit()
-        conn.close()
-        assert stars_delta_and_record("a/b", 41, SINCE) == 6
+        try:
+            conn.execute(
+                "INSERT INTO repo_metrics (repo, captured_at, stars) VALUES (?, ?, ?)",
+                ("a/b", "2026-06-28", 35),
+            )
+            conn.commit()
+            assert stars_delta_and_record("a/b", 41, SINCE, conn) == 6
+        finally:
+            conn.close()
 
     def test_in_window_snapshot_not_baseline(self):
         conn = artifacts._metrics_connect()
-        conn.execute(
-            "INSERT INTO repo_metrics (repo, captured_at, stars) VALUES (?, ?, ?)",
-            ("a/b", "2026-07-03", 39),
-        )
-        conn.commit()
-        conn.close()
-        assert stars_delta_and_record("a/b", 41, SINCE) is None
+        try:
+            conn.execute(
+                "INSERT INTO repo_metrics (repo, captured_at, stars) VALUES (?, ?, ?)",
+                ("a/b", "2026-07-03", 39),
+            )
+            conn.commit()
+            assert stars_delta_and_record("a/b", 41, SINCE, conn) is None
+        finally:
+            conn.close()
 
 
 class TestPyPI:
