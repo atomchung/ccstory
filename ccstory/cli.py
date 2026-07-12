@@ -56,6 +56,7 @@ from .report import (
     render_trend_markdown,
 )
 from .session_summarizer import (
+    CCSTORY_LANG_ENV,
     PROJECTS_DIR as SUMMARIZER_PROJECTS_DIR,
     _classify_cache_get_many,
     claude_bin_available,
@@ -65,6 +66,7 @@ from .session_summarizer import (
     invalidate_comparison_narratives,
     invalidate_content_buckets,
     invalidate_period_aggregates,
+    language_directive,
     missing_ids,
     summarize_session,
     synthesize_comparison,
@@ -85,6 +87,25 @@ REPORTS_DIR = Path.home() / ".ccstory" / "reports"
 CONFIG_PATH = Path.home() / ".ccstory" / "config.toml"
 
 VALID_OUTPUT_FORMATS = ("auto", "markdown", "card")
+
+
+def apply_lang_override(lang: str | None) -> None:
+    """Promote ``--lang`` into the env so every prompt-assembly call sees it.
+
+    ``language_directive()`` reads ``$CCSTORY_LANG`` at the top of its
+    resolution chain. Setting it here (instead of threading the value
+    through every callsite) keeps the CLI surface tiny and matches the
+    Unix convention that the flag is shorthand for the env var.
+    Also flushes the directive's ``lru_cache`` so a re-invocation in
+    the same Python process picks up the new value.
+    """
+    if not lang:
+        return
+    cleaned = lang.strip()
+    if not cleaned:
+        return
+    os.environ[CCSTORY_LANG_ENV] = cleaned
+    language_directive.cache_clear()
 
 
 def resolve_output_format(arg: str, *, env: dict | None = None, isatty: bool | None = None) -> str:
@@ -570,8 +591,14 @@ def _run_trend(argv: list[str]) -> int:
     p.add_argument("--format", dest="output_format",
                    choices=VALID_OUTPUT_FORMATS, default="auto",
                    help="Output style; see `ccstory --help`.")
+    p.add_argument("--lang", dest="lang", default=None,
+                   help="Narrative response language for this run "
+                        "(e.g. \"Traditional Chinese\"). Overrides "
+                        "$CCSTORY_LANG, config.toml, CLAUDE.md, "
+                        "settings.json, and system locale.")
     args = p.parse_args(argv)
 
+    apply_lang_override(args.lang)
     output_format = resolve_output_format(args.output_format)
     console = Console(stderr=(output_format == "markdown"))
 
@@ -710,10 +737,22 @@ def main(argv: list[str] | None = None) -> int:
                              "(Claude Code chat / pipe friendly). "
                              "`auto` (default) = markdown when CLAUDECODE=1 "
                              "or stdout is non-tty, else card.")
+    parser.add_argument("--lang", dest="lang", default=None,
+                        help="Narrative response language for this run "
+                             "(e.g. \"Traditional Chinese\", \"日本語\"). "
+                             "Overrides $CCSTORY_LANG, ~/.ccstory/config.toml "
+                             "`language`, ~/.claude/CLAUDE.md, "
+                             "~/.claude/settings.json `language`, and system "
+                             "locale. Persist the choice by setting "
+                             "`language = \"...\"` in ~/.ccstory/config.toml.")
     parser.add_argument("--version", action="version",
                         version=f"ccstory {__version__}")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(raw)
+
+    # --lang promotes into $CCSTORY_LANG before any prompt assembly runs,
+    # so every claude -p call this invocation makes sees the override.
+    apply_lang_override(args.lang)
 
     # Resolve --format before building the console: in markdown mode, all
     # progress / status output must go to stderr so stdout is a clean

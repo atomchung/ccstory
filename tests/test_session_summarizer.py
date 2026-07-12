@@ -260,6 +260,134 @@ class TestLanguageDirective:
         ss.language_directive.cache_clear()
         assert language_directive() == "Respond in English."
 
+    def test_ccstory_lang_env_wins_over_claude_md(
+        self, tmp_home: Path, monkeypatch,
+    ):
+        # CLAUDE.md says Japanese, but $CCSTORY_LANG is the user's explicit
+        # override and must take precedence.
+        md_path = tmp_home / ".claude" / "CLAUDE.md"
+        md_path.parent.mkdir(parents=True, exist_ok=True)
+        md_path.write_text("Respond in Japanese.\n", encoding="utf-8")
+        monkeypatch.setenv(ss.CCSTORY_LANG_ENV, "Traditional Chinese")
+        ss.language_directive.cache_clear()
+        directive = language_directive()
+        assert directive == (
+            "Respond in Traditional Chinese. "
+            "Keep the same length / format limits regardless of language."
+        )
+        assert "--- CLAUDE.md ---" not in directive
+
+    def test_ccstory_config_language_used_when_no_env(
+        self, tmp_home: Path,
+    ):
+        # ccstory's own config.toml `language` field wins over CLAUDE.md /
+        # settings.json but loses to $CCSTORY_LANG.
+        cfg = tmp_home / ".ccstory" / "config.toml"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text('language = "Korean"\n', encoding="utf-8")
+        ss.language_directive.cache_clear()
+        directive = language_directive()
+        assert directive == (
+            "Respond in Korean. "
+            "Keep the same length / format limits regardless of language."
+        )
+
+    def test_ccstory_config_language_loses_to_env(
+        self, tmp_home: Path, monkeypatch,
+    ):
+        cfg = tmp_home / ".ccstory" / "config.toml"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text('language = "Korean"\n', encoding="utf-8")
+        monkeypatch.setenv(ss.CCSTORY_LANG_ENV, "Spanish")
+        ss.language_directive.cache_clear()
+        directive = language_directive()
+        assert "Spanish" in directive
+        assert "Korean" not in directive
+
+    def test_ccstory_config_wins_over_claude_md(self, tmp_home: Path):
+        # Tool-specific config beats Claude Code's global CLAUDE.md, by
+        # design: if a user bothered to write `language = X` in ccstory's
+        # own config they want THIS tool to use X regardless of what
+        # CLAUDE.md says about global response language.
+        cfg = tmp_home / ".ccstory" / "config.toml"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text('language = "Korean"\n', encoding="utf-8")
+        md_path = tmp_home / ".claude" / "CLAUDE.md"
+        md_path.parent.mkdir(parents=True, exist_ok=True)
+        md_path.write_text("Respond in Japanese.\n", encoding="utf-8")
+        ss.language_directive.cache_clear()
+        directive = language_directive()
+        assert "Korean" in directive
+        assert "Japanese" not in directive
+        # No CLAUDE.md block emitted — single-line directive wins.
+        assert "--- CLAUDE.md ---" not in directive
+
+    def test_system_locale_used_when_nothing_else_set(
+        self, tmp_home: Path, monkeypatch,
+    ):
+        # No env, no config, no CLAUDE.md, no settings.json — but locale
+        # detection returns a non-English language. That should drive the
+        # directive instead of the English final fallback.
+        monkeypatch.setattr(ss, "_detect_system_locale", lambda: "Traditional Chinese")
+        ss.language_directive.cache_clear()
+        directive = language_directive()
+        assert directive == (
+            "Respond in Traditional Chinese. "
+            "Keep the same length / format limits regardless of language."
+        )
+
+    def test_blank_env_var_falls_through(self, tmp_home: Path, monkeypatch):
+        # Empty / whitespace env var must not poison the chain.
+        monkeypatch.setenv(ss.CCSTORY_LANG_ENV, "   ")
+        ss.language_directive.cache_clear()
+        assert language_directive() == "Respond in English."
+
+    def test_malformed_ccstory_config_falls_through(self, tmp_home: Path):
+        cfg = tmp_home / ".ccstory" / "config.toml"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text("this is = not [ valid toml", encoding="utf-8")
+        ss.language_directive.cache_clear()
+        assert language_directive() == "Respond in English."
+
+
+class TestDetectSystemLocale:
+    """Locale-tag → friendly-language-name mapping. Returns None for English
+    locales so the directive lands on the hardcoded English fallback (i.e.
+    English users see no behavior change from the new locale layer)."""
+
+    def test_english_returns_none(self, monkeypatch):
+        import locale
+        monkeypatch.setattr(locale, "getlocale", lambda: ("en_US", "UTF-8"))
+        monkeypatch.delenv("LC_ALL", raising=False)
+        monkeypatch.delenv("LANG", raising=False)
+        assert ss._detect_system_locale() is None
+
+    def test_c_posix_returns_none(self, monkeypatch):
+        import locale
+        monkeypatch.setattr(locale, "getlocale", lambda: (None, None))
+        monkeypatch.setenv("LANG", "C.UTF-8")
+        monkeypatch.delenv("LC_ALL", raising=False)
+        assert ss._detect_system_locale() is None
+
+    def test_zh_tw_maps_to_traditional_chinese(self, monkeypatch):
+        import locale
+        monkeypatch.setattr(locale, "getlocale", lambda: ("zh_TW", "UTF-8"))
+        assert ss._detect_system_locale() == "Traditional Chinese"
+
+    def test_unknown_locale_passes_through_raw(self, monkeypatch):
+        import locale
+        monkeypatch.setattr(locale, "getlocale", lambda: ("xx_YY", "UTF-8"))
+        # No mapping entry → return the base tag verbatim so claude -p still
+        # has *something* to work with rather than silently dropping to English.
+        assert ss._detect_system_locale() == "xx_YY"
+
+    def test_env_fallback_when_getlocale_returns_none(self, monkeypatch):
+        import locale
+        monkeypatch.setattr(locale, "getlocale", lambda: (None, None))
+        monkeypatch.delenv("LC_ALL", raising=False)
+        monkeypatch.setenv("LANG", "ja_JP.UTF-8")
+        assert ss._detect_system_locale() == "Japanese"
+
 
 class TestSynthesizeOverallForPeriod:
     def test_empty_input_returns_none(self, tmp_home: Path):

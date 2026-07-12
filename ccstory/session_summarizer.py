@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -28,6 +29,8 @@ RECAP_DB_PATH = Path.home() / ".claude" / "session_summaries.db"
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 CLAUDE_MD_PATH = Path.home() / ".claude" / "CLAUDE.md"
 CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
+CCSTORY_CONFIG_PATH = Path.home() / ".ccstory" / "config.toml"
+CCSTORY_LANG_ENV = "CCSTORY_LANG"
 CLAUDE_BIN = "claude"
 
 N_USER_HEAD = 3
@@ -38,24 +41,48 @@ N_ASSISTANT_TAIL = 1
 _CLAUDE_MD_MAX_CHARS = 500
 
 
+def _build_language_line(language: str) -> str:
+    """Render the single-line `Respond in <X>.` directive used for explicit
+    language picks (CLI flag, env, ccstory config, settings.json, locale)."""
+    return (
+        f"Respond in {language}. "
+        "Keep the same length / format limits regardless of language."
+    )
+
+
 @lru_cache(maxsize=1)
 def language_directive(path: Path | None = None) -> str:
     """Build the prompt block that tells `claude -p` what language to use.
 
     Resolution chain (high → low priority):
-      1. ``~/.claude/CLAUDE.md`` — pasted verbatim so any custom directives
-         the user wrote there stick (not just language).
-      2. ``~/.claude/settings.json`` ``"language"`` field — set by Claude
-         Code's ``/config`` UI. This is the path most users take when
-         they want a non-English UX; they rarely also maintain a global
-         CLAUDE.md. Without this fallback, those users get English
-         narratives even though Claude Code itself responds in their
-         language (issue #55).
-      3. Hardcoded ``Respond in English.``
+      1. ``$CCSTORY_LANG`` env var — shell-scoped or set by ``--lang``.
+      2. ``~/.ccstory/config.toml`` ``language`` field — ccstory's own
+         persistent override (top-level, written by hand or by
+         ``ccstory category set`` rewrites that preserve it).
+      3. ``~/.claude/CLAUDE.md`` — pasted verbatim so any custom
+         directives the user wrote there stick (not just language).
+      4. ``~/.claude/settings.json`` ``"language"`` field — set by
+         Claude Code's ``/config`` UI (issue #55).
+      5. System locale (``$LANG`` / ``locale.getlocale()``) — only
+         when it resolves to a non-English language; English locales
+         fall through to step 6.
+      6. Hardcoded ``Respond in English.``
+
+    Steps 1, 2, 4, 5 render the short single-line directive. Step 3
+    pastes the markdown verbatim because CLAUDE.md can carry richer
+    directives than just a language hint.
 
     Cached because every prompt assembly calls it; flushed only on
-    process restart, which matches the edit cadence of both files.
+    process restart, which matches the edit cadence of the inputs.
     """
+    env_lang = os.environ.get(CCSTORY_LANG_ENV, "").strip()
+    if env_lang:
+        return _build_language_line(env_lang)
+
+    ccstory_lang = _read_ccstory_language()
+    if ccstory_lang:
+        return _build_language_line(ccstory_lang)
+
     target = path or CLAUDE_MD_PATH
     try:
         text = target.read_text(encoding="utf-8").strip()
@@ -74,10 +101,10 @@ def language_directive(path: Path | None = None) -> str:
         )
     settings_lang = _read_settings_language()
     if settings_lang:
-        return (
-            f"Respond in {settings_lang}. "
-            "Keep the same length / format limits regardless of language."
-        )
+        return _build_language_line(settings_lang)
+    locale_lang = _detect_system_locale()
+    if locale_lang:
+        return _build_language_line(locale_lang)
     return "Respond in English."
 
 
@@ -99,6 +126,90 @@ def _read_settings_language(path: Path | None = None) -> str | None:
     if isinstance(lang, str) and lang.strip():
         return lang.strip()
     return None
+
+
+def _read_ccstory_language(path: Path | None = None) -> str | None:
+    """Return the top-level ``language`` field from ``~/.ccstory/config.toml``.
+
+    Mirrors ``_read_settings_language`` but reads ccstory's own config so
+    users who don't touch Claude Code's settings.json (or override its
+    value just for ccstory output) have a place to set it. Errors degrade
+    silently to ``None`` so a malformed config falls through to lower
+    layers rather than crashing.
+    """
+    target = path or CCSTORY_CONFIG_PATH
+    if not target.exists():
+        return None
+    try:
+        import tomllib  # py 3.11+
+    except ImportError:
+        try:
+            import tomli as tomllib  # type: ignore
+        except ImportError:
+            return None
+    try:
+        with target.open("rb") as f:
+            data = tomllib.load(f)
+    except (OSError, ValueError):
+        return None
+    lang = data.get("language") if isinstance(data, dict) else None
+    if isinstance(lang, str) and lang.strip():
+        return lang.strip()
+    return None
+
+
+_LOCALE_NAMES: dict[str, str] = {
+    "zh_TW": "Traditional Chinese",
+    "zh_HK": "Traditional Chinese",
+    "zh_CN": "Simplified Chinese",
+    "zh_SG": "Simplified Chinese",
+    "zh": "Chinese",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "it": "Italian",
+    "pt_BR": "Brazilian Portuguese",
+    "pt": "Portuguese",
+    "ru": "Russian",
+    "ar": "Arabic",
+    "hi": "Hindi",
+    "th": "Thai",
+    "vi": "Vietnamese",
+    "id": "Indonesian",
+    "nl": "Dutch",
+    "pl": "Polish",
+    "tr": "Turkish",
+}
+
+
+def _detect_system_locale() -> str | None:
+    """Return a human-readable language name inferred from the OS locale.
+
+    Resolution order: ``locale.getlocale()`` then ``$LC_ALL`` / ``$LANG``.
+    Returns ``None`` for unset / ``C`` / ``POSIX`` / English locales —
+    the caller falls back to the hardcoded English directive in those
+    cases, matching pre-locale-fallback behavior so existing English
+    users see no change.
+    """
+    lang_tag = ""
+    try:
+        import locale as _locale
+        lang_tag = _locale.getlocale()[0] or ""
+    except (ValueError, ImportError):
+        lang_tag = ""
+    if not lang_tag:
+        lang_tag = os.environ.get("LC_ALL") or os.environ.get("LANG") or ""
+    if not lang_tag:
+        return None
+    base = lang_tag.split(".", 1)[0].split("@", 1)[0]
+    if base in ("", "C", "POSIX"):
+        return None
+    primary = base.split("_", 1)[0].lower()
+    if primary == "en":
+        return None
+    return _LOCALE_NAMES.get(base) or _LOCALE_NAMES.get(primary) or base
 
 
 @dataclass

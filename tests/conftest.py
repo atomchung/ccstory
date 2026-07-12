@@ -44,6 +44,16 @@ def tmp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "CLAUDE_SETTINGS_PATH",
         home / ".claude" / "settings.json",
     )
+    monkeypatch.setattr(
+        session_summarizer,
+        "CCSTORY_CONFIG_PATH",
+        ccstory_dir / "config.toml",
+    )
+    # Stub locale detection + scrub the env var so language_directive() lands
+    # on the English fallback by default. Tests that exercise the new lang
+    # layers re-monkeypatch these explicitly.
+    monkeypatch.setattr(session_summarizer, "_detect_system_locale", lambda: None)
+    monkeypatch.delenv(session_summarizer.CCSTORY_LANG_ENV, raising=False)
     # language_directive() is @lru_cache'd; flush so per-test CLAUDE.md edits take effect.
     session_summarizer.language_directive.cache_clear()
     monkeypatch.setattr(categorizer, "CONFIG_PATH", ccstory_dir / "config.toml")

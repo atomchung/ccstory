@@ -8,10 +8,12 @@ better tested via integration once #25 etc. settle.
 from __future__ import annotations
 
 import argparse
+import os
 
 import pytest
 
-from ccstory.cli import resolve_output_format
+from ccstory import session_summarizer as ss
+from ccstory.cli import apply_lang_override, resolve_output_format
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -139,6 +141,40 @@ class TestResolveOutputFormat:
         # argparse errors.
         assert resolve_output_format("Markdown", env={}, isatty=True) == "Markdown"
         assert resolve_output_format("json", env={}, isatty=True) == "json"
+
+
+class TestApplyLangOverride:
+    """`--lang foo` is shorthand for `CCSTORY_LANG=foo`. The CLI promotes
+    it into the environment so every prompt-assembly call this run makes
+    sees the value through the same chain as the env var itself.
+    """
+
+    def test_sets_env_and_clears_cache(self, monkeypatch):
+        monkeypatch.delenv(ss.CCSTORY_LANG_ENV, raising=False)
+        # Prime the lru_cache with the English fallback path.
+        monkeypatch.setattr(ss, "_detect_system_locale", lambda: None)
+        ss.language_directive.cache_clear()
+        assert ss.language_directive() == "Respond in English."
+
+        apply_lang_override("Traditional Chinese")
+        assert os.environ[ss.CCSTORY_LANG_ENV] == "Traditional Chinese"
+        # Cache must have been flushed so the next call sees the override.
+        assert "Traditional Chinese" in ss.language_directive()
+
+    def test_none_is_noop(self, monkeypatch):
+        monkeypatch.delenv(ss.CCSTORY_LANG_ENV, raising=False)
+        apply_lang_override(None)
+        assert ss.CCSTORY_LANG_ENV not in os.environ
+
+    def test_blank_is_noop(self, monkeypatch):
+        monkeypatch.delenv(ss.CCSTORY_LANG_ENV, raising=False)
+        apply_lang_override("   ")
+        assert ss.CCSTORY_LANG_ENV not in os.environ
+
+    def test_strips_whitespace(self, monkeypatch):
+        monkeypatch.delenv(ss.CCSTORY_LANG_ENV, raising=False)
+        apply_lang_override("  Japanese  ")
+        assert os.environ[ss.CCSTORY_LANG_ENV] == "Japanese"
 
 
 class TestFormatArgparseValidation:
