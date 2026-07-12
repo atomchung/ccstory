@@ -18,6 +18,7 @@ Flags:
 from __future__ import annotations
 
 import argparse
+import json as _json
 import logging
 import os
 import re
@@ -51,6 +52,8 @@ from .categorizer import (
 )
 from .report import (
     VALID_FLAVORS,
+    build_report_json,
+    build_trend_json,
     print_terminal_card,
     render_report,
     render_trend_card,
@@ -87,7 +90,7 @@ LOG = logging.getLogger("ccstory.cli")
 REPORTS_DIR = Path.home() / ".ccstory" / "reports"
 CONFIG_PATH = Path.home() / ".ccstory" / "config.toml"
 
-VALID_OUTPUT_FORMATS = ("auto", "markdown", "card")
+VALID_OUTPUT_FORMATS = ("auto", "markdown", "card", "json")
 
 
 def apply_lang_override(lang: str | None) -> None:
@@ -592,6 +595,8 @@ def _run_trend(argv: list[str]) -> int:
     p.add_argument("--format", dest="output_format",
                    choices=VALID_OUTPUT_FORMATS, default="auto",
                    help="Output style; see `ccstory --help`.")
+    p.add_argument("--json", dest="output_format", action="store_const",
+                   const="json", help="Shorthand for --format=json.")
     p.add_argument("--lang", dest="lang", default=None,
                    help="Narrative response language for this run "
                         "(e.g. \"Traditional Chinese\"). Overrides "
@@ -601,7 +606,7 @@ def _run_trend(argv: list[str]) -> int:
 
     apply_lang_override(args.lang)
     output_format = resolve_output_format(args.output_format)
-    console = Console(stderr=(output_format == "markdown"))
+    console = Console(stderr=(output_format in ("markdown", "json")))
 
     period = "month" if args.months else "week"
     count = args.months or args.weeks or 8
@@ -625,7 +630,12 @@ def _run_trend(argv: list[str]) -> int:
     md = render_trend_markdown(points, period)
     out_path.write_text(md, encoding="utf-8")
 
-    if output_format == "markdown":
+    if output_format == "json":
+        payload = build_trend_json(points, period)
+        sys.stdout.write(_json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        console.print(f"[dim]Full report → {out_path}[/dim]")
+        console.print(f"[dim]Prices as of {get_snapshot_date()}[/dim]")
+    elif output_format == "markdown":
         sys.stdout.write(md)
         if not md.endswith("\n"):
             sys.stdout.write("\n")
@@ -742,8 +752,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="Output style. `card` = Rich panel (terminal). "
                              "`markdown` = full Markdown report to stdout "
                              "(Claude Code chat / pipe friendly). "
+                             "`json` = machine-readable report to stdout. "
                              "`auto` (default) = markdown when CLAUDECODE=1 "
                              "or stdout is non-tty, else card.")
+    parser.add_argument("--json", dest="output_format", action="store_const",
+                        const="json",
+                        help="Shorthand for --format=json (ccusage-style). "
+                             "stdout = one JSON object; progress on stderr.")
     parser.add_argument("--lang", dest="lang", default=None,
                         help="Narrative response language for this run "
                              "(e.g. \"Traditional Chinese\", \"日本語\"). "
@@ -761,11 +776,11 @@ def main(argv: list[str] | None = None) -> int:
     # so every claude -p call this invocation makes sees the override.
     apply_lang_override(args.lang)
 
-    # Resolve --format before building the console: in markdown mode, all
-    # progress / status output must go to stderr so stdout is a clean
-    # markdown stream the chat (or downstream tools) can render.
+    # Resolve --format before building the console: in markdown/json mode,
+    # all progress / status output must go to stderr so stdout is a clean
+    # stream the chat (or downstream tools) can consume.
     output_format = resolve_output_format(args.output_format)
-    console = Console(stderr=(output_format == "markdown"))
+    console = Console(stderr=(output_format in ("markdown", "json")))
 
     # Deprecation: --no-summary is the old name for --minimal. The flag's
     # documented behavior ("skip claude -p") never matched the code path
@@ -952,7 +967,26 @@ def main(argv: list[str] | None = None) -> int:
     )
     out_path.write_text(md, encoding="utf-8")
 
-    if output_format == "markdown":
+    if output_format == "json":
+        # stdout = one JSON object (#83). The markdown report file is still
+        # written above — the report stays the source of truth; JSON is a
+        # view for downstream tooling.
+        payload = build_report_json(
+            label=label,
+            since=since,
+            until=until,
+            sessions=sessions,
+            rollups=rollups,
+            usage=usage,
+            summaries=summaries,
+            overall_narrative=overall_narrative,
+            comparison=comparison,
+            artifacts=artifacts,
+        )
+        sys.stdout.write(_json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        console.print(f"[dim]Full report → {out_path}[/dim]")
+        console.print(f"[dim]Prices as of {get_snapshot_date()}[/dim]")
+    elif output_format == "markdown":
         # stdout = clean markdown stream. The Rich console already routes to
         # stderr in this branch so progress / status lines don't pollute it.
         sys.stdout.write(md)

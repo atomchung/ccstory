@@ -191,13 +191,13 @@ class TestFormatArgparseValidation:
         return p
 
     def test_valid_choices(self):
-        for choice in ("auto", "markdown", "card"):
+        for choice in ("auto", "markdown", "card", "json"):
             args = self._build_parser().parse_args(["--format", choice])
             assert args.output_format == choice
 
     def test_invalid_choice_exits(self):
         with pytest.raises(SystemExit):
-            self._build_parser().parse_args(["--format", "json"])
+            self._build_parser().parse_args(["--format", "yaml"])
 
     def test_case_sensitive(self):
         # argparse `choices` is case-sensitive; "Markdown" must be rejected
