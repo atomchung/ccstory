@@ -19,7 +19,7 @@ from .artifacts import ArtifactsReport
 from .categorizer import color_for, load_settings, normalize_project_name
 from .session_summarizer import SessionSummary
 from .time_tracking import CategoryRollup, SessionStat
-from .token_usage import UsageReport, fmt_tokens
+from .token_usage import UsageReport, fmt_tokens, get_snapshot_date
 from .trends import PeriodComparison, PeriodPoint, sparkline, trend_by_category
 
 # Supported markdown flavors for render_report().
@@ -336,6 +336,184 @@ def render_report(
     lines.append("")
 
     return "\n".join(lines)
+
+
+# ----- JSON output (#83) -------------------------------------------------------
+
+# Bump when a field is renamed/removed or its meaning changes. Additive
+# fields do NOT bump the version — consumers must tolerate unknown keys.
+JSON_SCHEMA_VERSION = 1
+
+
+def _session_summary_text(s: SessionStat, summaries: dict) -> str:
+    """Same one-liner precedence the markdown report uses."""
+    summ = summaries.get(s.session_id) if summaries else None
+    return summ.summary if summ else s.first_user_text[:100]
+
+
+def build_report_json(
+    label: str,
+    since: datetime,
+    until: datetime,
+    sessions: list[SessionStat],
+    rollups: list[CategoryRollup],
+    usage: UsageReport,
+    summaries: dict[str, SessionSummary],
+    overall_narrative: str | None = None,
+    comparison: PeriodComparison | None = None,
+    artifacts: ArtifactsReport | None = None,
+) -> dict:
+    """Machine-readable envelope mirroring the markdown report's content.
+
+    Consumed by downstream tooling (dashboards, bots, sync scripts) — field
+    names are a public contract governed by JSON_SCHEMA_VERSION.
+    """
+    total_min = sum(r.active_min for r in rollups)
+    payload: dict = {
+        "schema_version": JSON_SCHEMA_VERSION,
+        "kind": "recap",
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "window": {
+            "label": label,
+            "since": since.isoformat(),
+            "until": until.isoformat(),
+        },
+        "totals": {
+            "active_hours": round(total_min / 60, 2),
+            "sessions": len(sessions),
+            "messages": sum(r.messages for r in rollups),
+            "assistant_turns": usage.assistant_turns,
+            "cache_hit_ratio": round(usage.cache_hit_ratio, 4),
+            "tokens": {
+                "input_fresh": usage.total_input,
+                "cache_creation": usage.total_cache_creation,
+                "cache_read": usage.total_cache_read,
+                "output": usage.total_output,
+                "total": usage.total_tokens,
+            },
+            "cost_usd": round(usage.total_cost_usd, 2),
+            "cost_uncached_usd": round(usage.total_cost_uncached_usd, 2),
+            "cache_savings_usd": round(usage.cache_savings_usd, 2),
+        },
+        "pricing_snapshot": get_snapshot_date(),
+        "buckets": [
+            {
+                "name": r.category,
+                "active_hours": round(r.active_min / 60, 2),
+                "share": round(r.active_min / total_min, 4) if total_min else 0.0,
+                "sessions": r.sessions,
+                "messages": r.messages,
+            }
+            for r in rollups
+        ],
+        "sessions": [
+            {
+                "id": s.session_id,
+                "project": normalize_project_name(s.project) or s.project,
+                "bucket": s.category,
+                "start": s.start.isoformat(),
+                "end": s.end.isoformat(),
+                "active_min": s.active_min,
+                "messages": s.msg_count,
+                "summary": _session_summary_text(s, summaries),
+            }
+            for s in sorted(sessions, key=lambda x: x.start)
+        ],
+        "by_model": [
+            {
+                "model": model,
+                "turns": mu.turns,
+                "output_tokens": mu.output_tokens,
+                "cost_usd": round(mu.cost_usd, 2),
+            }
+            for model, mu in sorted(
+                usage.by_model.items(), key=lambda x: -x[1].total_tokens
+            )
+        ],
+        "narrative": {"overall": overall_narrative},
+    }
+    if comparison:
+        payload["comparison"] = {
+            "previous_label": comparison.previous_label,
+            "current_total_h": round(comparison.current_total_h, 2),
+            "previous_total_h": round(comparison.previous_total_h, 2),
+            "current_output_tokens": comparison.current_output_tokens,
+            "previous_output_tokens": comparison.previous_output_tokens,
+            "current_cost_usd": round(comparison.current_cost_usd, 2),
+            "previous_cost_usd": round(comparison.previous_cost_usd, 2),
+            "narrative": comparison.narrative,
+            "deltas": [
+                {
+                    "bucket": d.category,
+                    "current_min": d.current_min,
+                    "previous_min": d.previous_min,
+                    "delta_min": round(d.delta_min, 1),
+                    "pct_change": round(d.pct_change, 1)
+                    if d.pct_change is not None else None,
+                }
+                for d in comparison.deltas
+            ],
+        }
+    else:
+        payload["comparison"] = None
+    if artifacts:
+        payload["artifacts"] = {
+            "repos": [
+                {
+                    "name": r.name,
+                    "github": r.github,
+                    "commits": r.commits,
+                    "commit_subjects": r.commit_subjects,
+                    "prs_merged": r.prs_merged,
+                    "releases": r.releases,
+                    "stars": r.stars,
+                    "stars_delta": r.stars_delta,
+                }
+                for r in artifacts.repos
+            ],
+            "pypi": [
+                {"package": p.package, "downloads": p.downloads, "window": p.window}
+                for p in artifacts.pypi
+            ],
+            "totals": {
+                "commits": artifacts.total_commits,
+                "prs_merged": artifacts.total_prs,
+                "releases": artifacts.total_releases,
+            },
+        }
+    else:
+        payload["artifacts"] = None
+    return payload
+
+
+def build_trend_json(points: list[PeriodPoint], period: str) -> dict:
+    """Machine-readable trend series (per-period totals + bucket hours)."""
+    return {
+        "schema_version": JSON_SCHEMA_VERSION,
+        "kind": "trend",
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "period": period,
+        "pricing_snapshot": get_snapshot_date(),
+        "points": [
+            {
+                "label": p.label,
+                "since": p.since.isoformat(),
+                "until": p.until.isoformat(),
+                "total_hours": round(p.total_h, 2),
+                "output_tokens": p.output_tokens,
+                "cost_usd": round(p.cost_usd, 2),
+                "buckets": [
+                    {
+                        "name": r.category,
+                        "active_hours": round(r.active_min / 60, 2),
+                        "sessions": r.sessions,
+                    }
+                    for r in p.rollups
+                ],
+            }
+            for p in points
+        ],
+    }
 
 
 def _colored_bar(pct: float, color: str, width: int = 28) -> Text:

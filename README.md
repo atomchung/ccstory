@@ -216,6 +216,25 @@ exclude = ["playground"]   # substring match on repo path
 pypi = ["my-package"]      # extra packages beyond auto-detection
 ```
 
+## JSON output
+
+For dashboards, bots, and sync scripts — one machine-readable object instead
+of parsing markdown:
+
+```bash
+ccstory week --json          # shorthand for --format=json
+ccstory month --format json
+ccstory trend --weeks 8 --json
+```
+
+stdout is pure JSON (progress goes to stderr, same as markdown mode), so
+`ccstory week --json | jq .totals.active_hours` just works. The envelope
+carries `schema_version` (currently 1): renames/removals bump it, additive
+fields don't — consumers should tolerate unknown keys. Covers window, totals
+(hours/tokens/cost/cache), buckets, per-session lines, model breakdown,
+narrative, comparison, artifacts, and the pricing snapshot date. The markdown
+report file is still written either way; JSON is a view, not a replacement.
+
 ## Obsidian export
 
 `ccstory --for=obsidian` swaps the plain markdown for a PKM-vault-ready
@@ -351,7 +370,8 @@ No telemetry, no network calls, no upload buttons. Verify in
 
 ## Roadmap
 
-- [ ] More export flavors (Logseq, Notion)
+- [x] `--json` structured output — one general primitive over per-destination
+      export flavors
 - [ ] Optional PNG card export
 - [ ] `ccstory year` — annual recap (Spotify-Wrapped style)
 - [x] Git commit / PR correlation — period-level **What shipped** section
