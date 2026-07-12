@@ -73,6 +73,7 @@ from .session_summarizer import (
     language_directive,
     missing_ids,
     summarize_session,
+    synthesize_category_for_period,
     synthesize_comparison,
     synthesize_overall_for_period,
     upsert,
@@ -239,6 +240,46 @@ def _synthesize_overall_with_progress(
             category_hours=category_hours,
             sessions_by_category=sessions_by_cat,
         )
+
+
+def _synthesize_categories_with_progress(
+    label: str,
+    sessions: list,
+    rollups: list,
+    summaries: dict,
+    console: Console,
+) -> dict[str, str]:
+    """One 2-3 line narrative per bucket (#57), rollup order.
+
+    Same input contract as the overall narrative: only sessions with a real
+    summary (auto/record) feed the prompt. A bucket with none is skipped;
+    a bucket whose claude -p fails is simply absent from the result.
+    """
+    sessions_by_cat: dict[str, list[tuple[str, str]]] = {}
+    for s in sessions:
+        summ = summaries.get(s.session_id)
+        if not summ or summ.source not in ("auto", "record"):
+            continue
+        sessions_by_cat.setdefault(s.category, []).append(
+            (s.session_id, summ.summary)
+        )
+    cats = [r.category for r in rollups if r.category in sessions_by_cat]
+    out: dict[str, str] = {}
+    for i, cat in enumerate(cats, 1):
+        items = sessions_by_cat[cat]
+        with console.status(
+            f"[dim]Synthesizing bucket narrative {i}/{len(cats)} — "
+            f"{cat} (claude -p)…[/dim]"
+        ):
+            narrative = synthesize_category_for_period(
+                period_key=label,
+                category=cat,
+                session_ids=[sid for sid, _ in items],
+                summaries=[text for _, text in items],
+            )
+        if narrative:
+            out[cat] = narrative
+    return out
 
 
 def _resolve_all_sessions(
@@ -713,6 +754,14 @@ def main(argv: list[str] | None = None) -> int:
                              "(one claude -p call across all buckets)")
     parser.add_argument("--no-compare", action="store_true",
                         help="Skip the vs-previous-window comparison block")
+    parser.add_argument("--narrative", choices=["overall", "per-category", "both"],
+                        default="overall",
+                        help="Narrative depth. `overall` (default) = one "
+                             "3-sentence synthesis. `per-category` = 2-3 "
+                             "lines per bucket instead (one claude -p per "
+                             "bucket, cached until the bucket's session set "
+                             "changes). `both` = overall first, then "
+                             "per-bucket sections.")
     parser.add_argument("--no-artifacts", action="store_true",
                         help="Skip the What-shipped section (git commits / "
                              "merged PRs / releases / stars / PyPI downloads "
@@ -890,8 +939,13 @@ def main(argv: list[str] | None = None) -> int:
         f"[green]✓[/green] [dim]resolved into {len(rollups)} categories[/dim]\n"
     )
 
+    category_narratives: dict[str, str] = {}
     if not args.minimal:
-        if not args.no_aggregate and summaries:
+        if (
+            not args.no_aggregate
+            and summaries
+            and args.narrative in ("overall", "both")
+        ):
             overall_narrative = _synthesize_overall_with_progress(
                 label, sessions, rollups, summaries, console,
             )
@@ -899,6 +953,15 @@ def main(argv: list[str] | None = None) -> int:
                 console.print(
                     "[green]✓[/green] [dim]synthesized overall narrative"
                     "[/dim]\n"
+                )
+        if summaries and args.narrative in ("per-category", "both"):
+            category_narratives = _synthesize_categories_with_progress(
+                label, sessions, rollups, summaries, console,
+            )
+            if category_narratives:
+                console.print(
+                    f"[green]✓[/green] [dim]synthesized "
+                    f"{len(category_narratives)} bucket narrative(s)[/dim]\n"
                 )
 
     comparison = None
@@ -964,6 +1027,7 @@ def main(argv: list[str] | None = None) -> int:
         comparison=comparison,
         flavor=args.flavor,
         artifacts=artifacts,
+        category_narratives=category_narratives or None,
     )
     out_path.write_text(md, encoding="utf-8")
 
@@ -982,6 +1046,7 @@ def main(argv: list[str] | None = None) -> int:
             overall_narrative=overall_narrative,
             comparison=comparison,
             artifacts=artifacts,
+            category_narratives=category_narratives or None,
         )
         # Injected here, not in build_report_json — the path is a CLI-run
         # concern (label + --reports-dir), and downstream consumers need it

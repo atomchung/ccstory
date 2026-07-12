@@ -203,6 +203,7 @@ def render_report(
     comparison: PeriodComparison | None = None,
     flavor: str = "plain",
     artifacts: ArtifactsReport | None = None,
+    category_narratives: dict[str, str] | None = None,
 ) -> str:
     """Produce the full markdown report.
 
@@ -267,6 +268,19 @@ def render_report(
         lines.append("")
         lines.append(overall_narrative)
         lines.append("")
+
+    # Per-bucket narratives (#57) — rollup order so the biggest bucket leads
+    if category_narratives:
+        lines.append("## What you did, by category")
+        lines.append("")
+        for r in rollups:
+            narrative = category_narratives.get(r.category)
+            if not narrative:
+                continue
+            lines.append(f"### {r.category}")
+            lines.append("")
+            lines.append(narrative)
+            lines.append("")
 
     # Shipped-output metrics — the "what did the time produce" half (#90)
     if artifacts:
@@ -362,6 +376,7 @@ def build_report_json(
     overall_narrative: str | None = None,
     comparison: PeriodComparison | None = None,
     artifacts: ArtifactsReport | None = None,
+    category_narratives: dict[str, str] | None = None,
 ) -> dict:
     """Machine-readable envelope mirroring the markdown report's content.
 
@@ -369,6 +384,7 @@ def build_report_json(
     names are a public contract governed by JSON_SCHEMA_VERSION.
     """
     total_min = sum(r.active_min for r in rollups)
+    category_narratives = category_narratives or {}
     payload: dict = {
         "schema_version": JSON_SCHEMA_VERSION,
         "kind": "recap",
@@ -403,6 +419,9 @@ def build_report_json(
                 "share": round(r.active_min / total_min, 4) if total_min else 0.0,
                 "sessions": r.sessions,
                 "messages": r.messages,
+                # Additive (#57): null unless the run used
+                # --narrative per-category|both.
+                "narrative": category_narratives.get(r.category),
             }
             for r in rollups
         ],

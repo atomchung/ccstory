@@ -216,6 +216,21 @@ exclude = ["playground"]   # substring match on repo path
 pypi = ["my-package"]      # extra packages beyond auto-detection
 ```
 
+## Narrative depth
+
+`## What you did` is one 3-sentence synthesis by default. For real
+retrospectives, `--narrative` goes deeper:
+
+```bash
+ccstory week --narrative per-category   # 2-3 lines per bucket instead
+ccstory week --narrative both           # overall first, then per-bucket
+```
+
+Each bucket costs one `claude -p` call, cached until that bucket's session
+set changes — rerunning the same window is free. A bucket whose synthesis
+fails (or that has no real summaries) is simply omitted; the report never
+blocks on it. In `--json` mode the same text lands in `buckets[].narrative`.
+
 ## JSON output
 
 For dashboards, bots, and sync scripts — one machine-readable object instead
