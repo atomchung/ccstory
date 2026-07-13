@@ -382,7 +382,7 @@ def _backfill_with_progress(
 ) -> dict[str, int]:
     """Resolve narratives for sessions in this window.
 
-    Default path is the instant first-user-msg fallback for never-seen
+    Default path is the instant first/last-user-message fallback for never-seen
     sessions. Pass `use_llm=True` to opt into `claude -p`: it upgrades
     `fallback` rows to `auto` and regenerates stale `auto` rows (older
     prompt_version) — or, with `force=True`, every in-window `auto`. The
@@ -412,7 +412,7 @@ def _backfill_with_progress(
             f"({breakdown}). [bold]`claude -p` ETA ~{eta_min} min[/bold] "
             f"(~{CLAUDE_P_SEC_PER_SESSION}s/session cold start). "
             f"Press Ctrl+C to abort, or rerun without --llm-narrative "
-            f"for an instant first-user-msg fallback.\n"
+            f"for an instant first/last-message fallback.\n"
         )
         progress_desc = "Summarizing sessions via claude -p"
     else:
@@ -768,7 +768,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="Polish per-session narratives via `claude -p` "
                              "(slow ~40s/session cold start; shows ETA "
                              "before batch). Default is an instant "
-                             "first-user-msg fallback. Re-run on a past "
+                             "first/last-message fallback. Re-run on a past "
                              "window to upgrade those fallbacks to polished "
                              "summaries; already-polished sessions are reused "
                              "unless their prompt version is stale. Add "
@@ -938,7 +938,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.llm_narrative and not claude_bin_available():
             console.print(
                 "[yellow]![/yellow] [dim]`claude` not on PATH — "
-                "--llm-narrative will fall back to first user message[/dim]\n"
+                "--llm-narrative will fall back to first/last user messages[/dim]\n"
             )
         counts = _backfill_with_progress(
             sessions, console, use_llm=args.llm_narrative,

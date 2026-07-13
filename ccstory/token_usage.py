@@ -30,6 +30,7 @@ PROJECTS_DIR = Path.home() / ".claude" / "projects"
 # $5/$25, so historical cost_usd for this window was ~2-3x overstated (same
 # bug found in personal_os/core/token_usage.py, which this file forked from).
 PRICES_SNAPSHOT_DATE = "2026-07"
+PRICING_SNAPSHOT_STALE_DAYS = 90
 
 DEFAULT_PRICES: dict[str, dict[str, float]] = {
     "fable":  dict(inp=10.00, out=50.00, cw=12.50, cr=1.00),
@@ -57,6 +58,48 @@ def _price_for(model: str) -> dict | None:
 def get_snapshot_date() -> str:
     """Date the active price table was captured. Used for report disclosure."""
     return _active_snapshot_date
+
+
+def pricing_snapshot_age_days(
+    snapshot_date: str,
+    report_until: date | datetime,
+) -> int | None:
+    """Return snapshot age at a report window's end, or ``None`` if invalid.
+
+    The built-in and documented config format is ``YYYY-MM``. Treat that as
+    the first day of the named month so the check has deterministic semantics;
+    ``YYYY-MM-DD`` is also accepted for users who maintain a more exact custom
+    snapshot. This is deliberately date-only: no live pricing lookup happens.
+    """
+    raw = snapshot_date.strip() if isinstance(snapshot_date, str) else ""
+    if len(raw) == 7:
+        raw = f"{raw}-01"
+    try:
+        captured = date.fromisoformat(raw)
+    except ValueError:
+        return None
+
+    window_end = (
+        report_until.date()
+        if isinstance(report_until, datetime)
+        else report_until
+    )
+    return (window_end - captured).days
+
+
+def pricing_snapshot_warning(
+    report_until: date | datetime,
+    snapshot_date: str | None = None,
+) -> str | None:
+    """One-line warning when the effective price snapshot is over 90 days old."""
+    effective = snapshot_date if snapshot_date is not None else get_snapshot_date()
+    age = pricing_snapshot_age_days(effective, report_until)
+    if age is None or age <= PRICING_SNAPSHOT_STALE_DAYS:
+        return None
+    return (
+        f"Pricing snapshot {effective} may be stale ({age} days old); "
+        "verify current Anthropic API pricing."
+    )
 
 
 # Map user-facing config keys to the internal short keys used by _PRICES.

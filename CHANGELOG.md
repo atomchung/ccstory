@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A tag-driven release workflow now validates, builds, and publishes the wheel
+  and source distribution through PyPI Trusted Publishing before creating the
+  matching GitHub Release (#51).
+- Human-readable recaps and trends now warn when their pricing snapshot is more
+  than 90 days older than the report window (#91).
+
+### Changed
+
+- Zero-cost fallback narratives now show the first and last user-message
+  endpoints, making the session arc more useful without an LLM call (#70).
+- The README now documents actual Claude CLI call counts, latency/quota
+  behavior, and the exact network metadata used by What shipped (#59, #104).
+
+### Fixed
+
+- The pytest suite now isolates every test from the developer's real
+  `~/.ccstory`, `~/.claude`, and locale settings (#100).
+
 ## [0.5.0] - 2026-07-13
 
 ### Added
