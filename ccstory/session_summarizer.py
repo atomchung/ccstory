@@ -511,6 +511,39 @@ def claude_bin_available() -> bool:
     return shutil.which(CLAUDE_BIN) is not None
 
 
+_flag_confirmed_broken = False
+
+
+def run_claude_p(prompt: str, timeout: int) -> subprocess.CompletedProcess:
+    """Run `claude -p --output-format text <prompt>`, preferring
+    `--no-session-persistence` so one-off summarization calls don't clutter
+    the user's `claude --resume` list.
+
+    Some Claude Code CLI versions silently no-op with that flag — exit 0,
+    empty stdout (ccstory#52) — so on that exact signature we retry once
+    without it, and remember it process-wide: a single `ccstory` run can
+    call this dozens of times (once per session, per classification chunk,
+    ...), and re-discovering a known-broken flag on every one of those
+    calls would burn a wasted subprocess spawn each time. A real failure
+    (non-zero exit) is returned as-is and does NOT mark the flag broken —
+    callers keep their existing error handling.
+    """
+    global _flag_confirmed_broken
+    base = [CLAUDE_BIN, "-p", "--output-format", "text"]
+    if not _flag_confirmed_broken:
+        r = subprocess.run(
+            [*base, "--no-session-persistence", prompt],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+        if r.returncode != 0 or r.stdout.strip():
+            return r
+        _flag_confirmed_broken = True
+    return subprocess.run(
+        [*base, prompt],
+        capture_output=True, text=True, timeout=timeout, check=False,
+    )
+
+
 def summarize_via_claude_p(excerpt: str, timeout: int = 60) -> str | None:
     """Call local `claude -p` to summarize. Returns None on failure.
 
@@ -525,15 +558,7 @@ def summarize_via_claude_p(excerpt: str, timeout: int = 60) -> str | None:
         excerpt=excerpt[:8000], language_directive=language_directive(),
     )
     try:
-        r = subprocess.run(
-            [
-                CLAUDE_BIN, "-p",
-                "--output-format", "text",
-                "--no-session-persistence",
-                prompt,
-            ],
-            capture_output=True, text=True, timeout=timeout, check=False,
-        )
+        r = run_claude_p(prompt, timeout)
         if r.returncode != 0:
             LOG.warning("claude -p failed (rc=%s): %s", r.returncode, r.stderr.strip()[:200])
             return None
@@ -717,11 +742,7 @@ def synthesize_overall_for_period(
     )
 
     try:
-        r = subprocess.run(
-            [CLAUDE_BIN, "-p", "--output-format", "text",
-             "--no-session-persistence", prompt],
-            capture_output=True, text=True, timeout=timeout, check=False,
-        )
+        r = run_claude_p(prompt, timeout)
         if r.returncode != 0:
             LOG.warning("overall claude -p failed: %s", r.stderr.strip()[:200])
             return None
@@ -810,11 +831,7 @@ def synthesize_category_for_period(
     )
 
     try:
-        r = subprocess.run(
-            [CLAUDE_BIN, "-p", "--output-format", "text",
-             "--no-session-persistence", prompt],
-            capture_output=True, text=True, timeout=timeout, check=False,
-        )
+        r = run_claude_p(prompt, timeout)
         if r.returncode != 0:
             LOG.warning("category %r claude -p failed: %s",
                         category, r.stderr.strip()[:200])
@@ -1040,11 +1057,7 @@ def synthesize_comparison(
         current_summaries=_fmt(current_summaries)[:3000],
     )
     try:
-        r = subprocess.run(
-            [CLAUDE_BIN, "-p", "--output-format", "text",
-             "--no-session-persistence", prompt],
-            capture_output=True, text=True, timeout=timeout, check=False,
-        )
+        r = run_claude_p(prompt, timeout)
         if r.returncode != 0:
             LOG.warning("comparison claude -p failed: %s", r.stderr.strip()[:200])
             return None
@@ -1234,11 +1247,7 @@ def classify_sessions_by_content(
         )
         fresh: dict[str, str] = {}
         try:
-            r = subprocess.run(
-                [CLAUDE_BIN, "-p", "--output-format", "text",
-                 "--no-session-persistence", prompt],
-                capture_output=True, text=True, timeout=timeout, check=False,
-            )
+            r = run_claude_p(prompt, timeout)
             if r.returncode == 0:
                 parsed = _parse_classification_lines(r.stdout)
                 # Only accept rows whose session id is in THIS chunk — guards

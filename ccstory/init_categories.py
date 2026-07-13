@@ -40,10 +40,10 @@ from .categorizer import (
     normalize_project_name,
 )
 from .session_summarizer import (
-    CLAUDE_BIN,
     claude_bin_available,
     classify_sessions_by_content,
     get_many,
+    run_claude_p,
 )
 from .time_tracking import SessionStat, collect_sessions
 
@@ -112,11 +112,7 @@ def _call_claude_p(prompt: str, timeout: int = 120) -> str | None:
     if not claude_bin_available():
         return None
     try:
-        r = subprocess.run(
-            [CLAUDE_BIN, "-p", "--output-format", "text",
-             "--no-session-persistence", prompt],
-            capture_output=True, text=True, timeout=timeout, check=False,
-        )
+        r = run_claude_p(prompt, timeout)
         if r.returncode != 0:
             LOG.warning("claude -p failed: %s", r.stderr[:200])
             return None
