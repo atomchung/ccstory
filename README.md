@@ -211,7 +211,7 @@ repos you actually worked in during the window:
 ```markdown
 | Repo     | Commits | PRs merged | Releases | Stars   |
 |----------|--------:|-----------:|----------|--------:|
-| ccstory  | 5       | 3          | v0.5.0   | 42 (+6) |
+| ccstory  | 5       | 3          | v0.5.1   | 42 (+6) |
 | myapp    | 21      | 1          | –        | 12      |
 
 - PyPI **ccstory**: 107 downloads (last week)
