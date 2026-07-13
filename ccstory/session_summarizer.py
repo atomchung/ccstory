@@ -511,6 +511,9 @@ def claude_bin_available() -> bool:
     return shutil.which(CLAUDE_BIN) is not None
 
 
+_flag_confirmed_broken = False
+
+
 def run_claude_p(prompt: str, timeout: int) -> subprocess.CompletedProcess:
     """Run `claude -p --output-format text <prompt>`, preferring
     `--no-session-persistence` so one-off summarization calls don't clutter
@@ -518,20 +521,27 @@ def run_claude_p(prompt: str, timeout: int) -> subprocess.CompletedProcess:
 
     Some Claude Code CLI versions silently no-op with that flag — exit 0,
     empty stdout (ccstory#52) — so on that exact signature we retry once
-    without it. A real failure (non-zero exit) is returned as-is; callers
-    keep their existing error handling.
+    without it, and remember it process-wide: a single `ccstory` run can
+    call this dozens of times (once per session, per classification chunk,
+    ...), and re-discovering a known-broken flag on every one of those
+    calls would burn a wasted subprocess spawn each time. A real failure
+    (non-zero exit) is returned as-is and does NOT mark the flag broken —
+    callers keep their existing error handling.
     """
+    global _flag_confirmed_broken
     base = [CLAUDE_BIN, "-p", "--output-format", "text"]
-    r = subprocess.run(
-        [*base, "--no-session-persistence", prompt],
-        capture_output=True, text=True, timeout=timeout, check=False,
-    )
-    if r.returncode == 0 and not r.stdout.strip():
+    if not _flag_confirmed_broken:
         r = subprocess.run(
-            [*base, prompt],
+            [*base, "--no-session-persistence", prompt],
             capture_output=True, text=True, timeout=timeout, check=False,
         )
-    return r
+        if r.returncode != 0 or r.stdout.strip():
+            return r
+        _flag_confirmed_broken = True
+    return subprocess.run(
+        [*base, prompt],
+        capture_output=True, text=True, timeout=timeout, check=False,
+    )
 
 
 def summarize_via_claude_p(excerpt: str, timeout: int = 60) -> str | None:

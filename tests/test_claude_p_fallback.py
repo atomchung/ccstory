@@ -3,7 +3,9 @@
 Some Claude Code CLI versions silently no-op with `--no-session-persistence`
 (exit 0, empty stdout). `run_claude_p` is the single chokepoint all `claude
 -p` callsites go through; it retries once without the flag on that exact
-signature, and only that signature.
+signature, and remembers the result process-wide so later calls in the same
+`ccstory` run skip straight to the working invocation instead of re-paying
+the wasted first attempt every time.
 """
 
 from __future__ import annotations
@@ -18,45 +20,45 @@ from ccstory.session_summarizer import run_claude_p
 
 
 class _FakeRun:
-    """Stub subprocess.run; returns `stdout`/`returncode` for every call."""
+    """Stub subprocess.run.
 
-    def __init__(self, stdout: str = "a real answer", returncode: int = 0):
-        self.stdout = stdout
-        self.returncode = returncode
-        self.calls: list[list[str]] = []
-
-    def __call__(self, argv, **kwargs):
-        self.calls.append(argv)
-
-        class R:
-            returncode = self.returncode
-            stdout = self.stdout
-            stderr = ""
-
-        return R()
-
-
-class _FlakyRun:
-    """First call: exit 0 + empty stdout (the ccstory#52 signature).
-    Second call: succeeds.
+    Single-response mode (`stdout=`/`returncode=`) returns the same result
+    for every call. Sequence mode (`responses=[(returncode, stdout), ...]`)
+    returns each pair in order, then repeats the last one for extra calls —
+    e.g. `[(0, ""), (0, "ok")]` models a first attempt that silently no-ops
+    (the ccstory#52 signature) followed by a working retry.
     """
 
-    def __init__(self, second_stdout: str = "a real answer"):
-        self.second_stdout = second_stdout
+    def __init__(
+        self,
+        stdout: str = "a real answer",
+        returncode: int = 0,
+        responses: list[tuple[int, str]] | None = None,
+    ):
+        self.responses = responses or [(returncode, stdout)]
         self.calls: list[list[str]] = []
 
     def __call__(self, argv, **kwargs):
         self.calls.append(argv)
+        idx = min(len(self.calls) - 1, len(self.responses) - 1)
+        rc, out = self.responses[idx]
 
         class R:
-            returncode = 0
-            stdout = "" if len(self.calls) == 1 else self.second_stdout
+            returncode = rc
+            stdout = out
             stderr = ""
 
         return R()
 
 
 class TestRunClaudeP:
+    @pytest.fixture(autouse=True)
+    def _reset_flag_memoization(self, monkeypatch: pytest.MonkeyPatch):
+        # `_flag_confirmed_broken` is process-global by design (that's the
+        # point — see test_remembers_broken_flag_across_calls) so it must
+        # not leak between tests.
+        monkeypatch.setattr(ss, "_flag_confirmed_broken", False)
+
     def test_succeeds_on_first_try(self, monkeypatch: pytest.MonkeyPatch):
         fake = _FakeRun(stdout="a real answer")
         monkeypatch.setattr(ss.subprocess, "run", fake)
@@ -68,7 +70,7 @@ class TestRunClaudeP:
     def test_retries_without_flag_on_silent_empty_output(
         self, monkeypatch: pytest.MonkeyPatch
     ):
-        flaky = _FlakyRun(second_stdout="a real answer")
+        flaky = _FakeRun(responses=[(0, ""), (0, "a real answer")])
         monkeypatch.setattr(ss.subprocess, "run", flaky)
         r = run_claude_p("prompt", timeout=10)
         assert r.stdout == "a real answer"
@@ -84,6 +86,8 @@ class TestRunClaudeP:
         # Non-zero exit isn't the silent-empty-output bug — retrying wastes
         # a call on a failure the retry can't fix.
         assert len(fail.calls) == 1
+        # ...and must not be misread as "the flag is broken" for next time.
+        assert ss._flag_confirmed_broken is False
 
     def test_still_empty_after_retry_returns_empty(
         self, monkeypatch: pytest.MonkeyPatch
@@ -94,6 +98,33 @@ class TestRunClaudeP:
         assert r.stdout == ""
         # Bounded to one retry, not an infinite loop.
         assert len(always_empty.calls) == 2
+
+    def test_remembers_broken_flag_across_calls(self, monkeypatch: pytest.MonkeyPatch):
+        # Every call WITH the flag would silently no-op; every call WITHOUT
+        # it succeeds — models a genuinely broken CLI across a whole run.
+        def fake(argv, **kwargs):
+            fake.calls.append(argv)
+
+            class R:
+                returncode = 0
+                stdout = "" if "--no-session-persistence" in argv else "ok"
+                stderr = ""
+
+            return R()
+
+        fake.calls = []
+        monkeypatch.setattr(ss.subprocess, "run", fake)
+
+        r1 = run_claude_p("p1", timeout=10)
+        assert r1.stdout == "ok"
+        assert len(fake.calls) == 2  # pays the flag-detection cost once
+
+        r2 = run_claude_p("p2", timeout=10)
+        assert r2.stdout == "ok"
+        # Second (and any later) call skips the doomed flagged attempt
+        # entirely instead of re-discovering the same brokenness.
+        assert len(fake.calls) == 3
+        assert "--no-session-persistence" not in fake.calls[-1]
 
 
 def test_no_broken_session_flag_outside_helper() -> None:
