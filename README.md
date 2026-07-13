@@ -403,6 +403,10 @@ No telemetry, no network calls, no upload buttons. Verify in
 See the [issue tracker](https://github.com/atomchung/ccstory/issues) for the
 full backlog.
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for release history.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
