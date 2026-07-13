@@ -17,7 +17,7 @@ import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePath
 
 # Note: classify() is no longer called here. parse_session() leaves
 # SessionStat.category empty; the caller runs categorizer.resolve_session_bucket().
@@ -194,7 +194,7 @@ def collect_sessions(
     for path_str in glob.glob(str(CLAUDE_PROJECTS / "**" / "*.jsonl"), recursive=True):
         path = Path(path_str)
         # Skip nested subagent traces (double-count guard)
-        if "/subagents/" in path_str:
+        if _is_subagent_path(path):
             continue
         try:
             if path.stat().st_mtime < since_ts:
@@ -213,6 +213,11 @@ def collect_sessions(
             continue
         stats.append(s)
     return stats
+
+
+def _is_subagent_path(path: PurePath) -> bool:
+    """Detect the exact ``subagents`` component on any pathlib flavor."""
+    return "subagents" in path.parts
 
 
 def wall_clock_active_sec(stats: list[SessionStat]) -> int:

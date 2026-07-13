@@ -12,6 +12,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from ccstory import session_summarizer as ss
 from ccstory.session_summarizer import (
     _extract_excerpt,
@@ -322,7 +324,21 @@ class TestNeedsLlm:
         assert ss._needs_llm(SS("i", "s", "auto", prompt_version=None)) is True
 
 
-class TestPromptVersionMigration:
+class TestCacheSchemaMigrations:
+    def test_fresh_db_reaches_current_version(self, tmp_home: Path):
+        conn = ss._connect()
+        try:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            assert version == ss.CACHE_SCHEMA_VERSION
+            for table in (
+                "period_aggregates",
+                "comparison_narratives",
+                "session_content_buckets",
+            ):
+                assert "input_fingerprint" in ss._table_columns(conn, table)
+        finally:
+            conn.close()
+
     def test_legacy_rows_stamped_current(self, tmp_home: Path):
         # Simulate a pre-feature DB: session_summaries without prompt_version.
         ss.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -345,6 +361,112 @@ class TestPromptVersionMigration:
         assert row is not None
         assert row.prompt_version == ss.PROMPT_VERSION
         assert ss._needs_llm(row) is False
+        conn = sqlite3.connect(str(ss.DB_PATH))
+        try:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == (
+                ss.CACHE_SCHEMA_VERSION
+            )
+        finally:
+            conn.close()
+
+    def test_unversioned_current_db_preserves_every_cache_family(
+        self, tmp_home: Path,
+    ):
+        raw = sqlite3.connect(str(ss.DB_PATH))
+        ss._migration_1_baseline(raw)
+        raw.execute(
+            "INSERT INTO period_aggregates VALUES (?, ?, ?, ?, ?)",
+            ("p", "coding", "aggregate", "s1", 1.0),
+        )
+        raw.execute(
+            "INSERT INTO comparison_narratives VALUES (?, ?, ?, ?, ?)",
+            ("cur", "prev", "sig", "comparison", 1.0),
+        )
+        raw.execute(
+            "INSERT INTO session_content_buckets VALUES (?, ?, ?)",
+            ("s1", "coding", 1.0),
+        )
+        raw.commit()
+        raw.close()
+
+        migrated = ss._connect()
+        try:
+            assert migrated.execute(
+                "SELECT summary, input_fingerprint FROM period_aggregates"
+            ).fetchone() == ("aggregate", "")
+            assert migrated.execute(
+                "SELECT narrative, input_fingerprint "
+                "FROM comparison_narratives"
+            ).fetchone() == ("comparison", "")
+            assert migrated.execute(
+                "SELECT bucket, input_fingerprint "
+                "FROM session_content_buckets"
+            ).fetchone() == ("coding", "")
+        finally:
+            migrated.close()
+
+    def test_already_current_db_skips_migrations(
+        self, tmp_home: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        upsert("kept", "preserved summary", "auto")
+
+        def _boom(_conn):
+            raise AssertionError("current schema must not rerun migrations")
+
+        monkeypatch.setattr(ss, "_MIGRATIONS", (_boom, _boom))
+        assert get("kept").summary == "preserved summary"
+
+    def test_each_migration_is_transactional(
+        self, tmp_home: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        raw = sqlite3.connect(str(ss.DB_PATH))
+        raw.execute("BEGIN")
+        ss._migration_1_baseline(raw)
+        raw.execute("PRAGMA user_version = 1")
+        raw.commit()
+        raw.close()
+
+        def _broken(conn: sqlite3.Connection) -> None:
+            conn.execute("CREATE TABLE should_roll_back (id INTEGER)")
+            raise RuntimeError("migration failed")
+
+        monkeypatch.setattr(
+            ss, "_MIGRATIONS", (ss._migration_1_baseline, _broken),
+        )
+        with pytest.raises(RuntimeError, match="migration failed"):
+            ss._connect()
+
+        check = sqlite3.connect(str(ss.DB_PATH))
+        try:
+            assert check.execute("PRAGMA user_version").fetchone()[0] == 1
+            tables = {
+                row[0] for row in check.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            assert "should_roll_back" not in tables
+        finally:
+            check.close()
+
+    def test_newer_schema_is_left_untouched(
+        self, tmp_home: Path, capsys: pytest.CaptureFixture[str],
+    ):
+        raw = sqlite3.connect(str(ss.DB_PATH))
+        raw.execute(f"PRAGMA user_version = {ss.CACHE_SCHEMA_VERSION + 1}")
+        raw.commit()
+        raw.close()
+
+        with pytest.raises(SystemExit):
+            ss._connect()
+        assert "newer ccstory" in capsys.readouterr().err
+
+        check = sqlite3.connect(str(ss.DB_PATH))
+        try:
+            assert check.execute("PRAGMA user_version").fetchone()[0] == (
+                ss.CACHE_SCHEMA_VERSION + 1
+            )
+        finally:
+            check.close()
 
 
 class TestLanguageDirective:
@@ -568,28 +690,14 @@ class TestSynthesizeOverallForPeriod:
         assert out is None
 
     def test_cache_hit_skips_claude_call(self, tmp_home: Path, monkeypatch):
-        # Pre-seed the period_aggregates table with an overall narrative.
-        from ccstory.session_summarizer import _connect
-        import time as _time
-        conn = _connect()
-        try:
-            conn.execute(
-                """INSERT INTO period_aggregates
-                   (period_key, category, summary, session_ids, created_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                ("2026-05", OVERALL_KEY, "cached prose", "sess-a,sess-b", _time.time()),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        class Result:
+            returncode = 0
+            stdout = "cached prose"
+            stderr = ""
 
-        # If claude_bin_available is reached we'd return None — assert we don't
-        # get there. Patch to raise so a cache miss would surface as an error.
-        def boom():
-            raise AssertionError("claude_bin_available should not be called on cache hit")
-        monkeypatch.setattr(ss, "claude_bin_available", boom)
-
-        out = synthesize_overall_for_period(
+        monkeypatch.setattr(ss, "claude_bin_available", lambda: True)
+        monkeypatch.setattr(ss, "run_claude_p", lambda *_args: Result())
+        kwargs = dict(
             period_key="2026-05",
             category_hours=[("coding", 2.0), ("ops", 1.0)],
             sessions_by_category={
@@ -597,7 +705,13 @@ class TestSynthesizeOverallForPeriod:
                 "ops": [("sess-b", "did B")],
             },
         )
-        assert out == "cached prose"
+        assert synthesize_overall_for_period(**kwargs) == "cached prose"
+
+        # A matching input fingerprint must now hit without probing Claude.
+        def boom():
+            raise AssertionError("claude_bin_available should not be called on cache hit")
+        monkeypatch.setattr(ss, "claude_bin_available", boom)
+        assert synthesize_overall_for_period(**kwargs) == "cached prose"
 
     def test_cache_invalidates_when_session_ids_change(self, tmp_home: Path, monkeypatch):
         from ccstory.session_summarizer import _connect
@@ -624,6 +738,46 @@ class TestSynthesizeOverallForPeriod:
             sessions_by_category={"coding": [("sess-a", "A"), ("sess-c", "C")]},
         )
         assert out is None
+
+    def test_cache_invalidates_when_prompt_changes(
+        self, tmp_home: Path, monkeypatch,
+    ):
+        class Result:
+            returncode = 0
+            stdout = "generated narrative"
+            stderr = ""
+
+        kwargs = dict(
+            period_key="2026-05",
+            category_hours=[("coding", 2.0)],
+            sessions_by_category={"coding": [("sess-a", "did A")]},
+        )
+        monkeypatch.setattr(ss, "claude_bin_available", lambda: True)
+        monkeypatch.setattr(ss, "run_claude_p", lambda *_args: Result())
+        assert synthesize_overall_for_period(**kwargs) == "generated narrative"
+
+        monkeypatch.setattr(ss, "_OVERALL_PROMPT", ss._OVERALL_PROMPT + "\nBe direct.")
+        monkeypatch.setattr(ss, "claude_bin_available", lambda: False)
+        assert synthesize_overall_for_period(**kwargs) is None
+
+    def test_cache_invalidates_when_summary_text_changes(
+        self, tmp_home: Path, monkeypatch,
+    ):
+        class Result:
+            returncode = 0
+            stdout = "generated narrative"
+            stderr = ""
+
+        monkeypatch.setattr(ss, "claude_bin_available", lambda: True)
+        monkeypatch.setattr(ss, "run_claude_p", lambda *_args: Result())
+        assert synthesize_overall_for_period(
+            "2026-05", [("coding", 2.0)], {"coding": [("s1", "old")]},
+        ) == "generated narrative"
+
+        monkeypatch.setattr(ss, "claude_bin_available", lambda: False)
+        assert synthesize_overall_for_period(
+            "2026-05", [("coding", 2.0)], {"coding": [("s1", "new")]},
+        ) is None
 
     def test_get_overall_narrative_roundtrip(self, tmp_home: Path):
         from ccstory.session_summarizer import _connect

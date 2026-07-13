@@ -6,19 +6,42 @@ schema drifts, these tests fail loudly instead of silently dropping data.
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
 from ccstory.time_tracking import (
     GAP_CAP_SEC,
     SessionStat,
+    _is_subagent_path,
     parse_session,
     rollup_by_category,
     wall_clock_active_sec,
 )
 
 from tests.conftest import _ts, make_assistant_msg, make_user_msg, write_jsonl
+
+
+class TestSubagentPathDetection:
+    @pytest.mark.parametrize(
+        "path",
+        [
+            PurePosixPath("/home/me/.claude/projects/p/subagents/a.jsonl"),
+            PureWindowsPath(r"C:\Users\me\.claude\projects\p\subagents\a.jsonl"),
+        ],
+    )
+    def test_skips_subagent_component_on_both_path_flavors(self, path):
+        assert _is_subagent_path(path) is True
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            PurePosixPath("/home/me/subagents-notes/a.jsonl"),
+            PureWindowsPath(r"C:\Users\me\subagents-notes\a.jsonl"),
+        ],
+    )
+    def test_does_not_match_partial_component(self, path):
+        assert _is_subagent_path(path) is False
 
 
 class TestParseSession:

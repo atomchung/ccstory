@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from ccstory.report import VALID_FLAVORS, _md_cell, render_report
+from ccstory.report import VALID_FLAVORS, _format_date_range, _md_cell, render_report
 from ccstory.session_summarizer import SessionSummary
 from ccstory.time_tracking import CategoryRollup, SessionStat
 from ccstory.token_usage import ModelUsage, UsageReport
@@ -67,6 +67,24 @@ class TestFlavorValidation:
                 summaries={},
                 flavor="json",
             )
+
+
+class TestPortableDateRange:
+    def test_same_day(self):
+        day = datetime(2026, 1, 3, tzinfo=timezone.utc)
+        assert _format_date_range(day, day) == "Jan 3, 2026"
+
+    def test_same_month(self):
+        since = datetime(2026, 1, 3, tzinfo=timezone.utc)
+        until = datetime(2026, 1, 9, tzinfo=timezone.utc)
+        assert _format_date_range(since, until) == "Jan 3 – 9, 2026"
+
+    def test_cross_month_and_year(self):
+        since = datetime(2025, 12, 31, tzinfo=timezone.utc)
+        until = datetime(2026, 1, 2, tzinfo=timezone.utc)
+        assert _format_date_range(since, until) == (
+            "Dec 31, 2025 – Jan 2, 2026"
+        )
 
 
 class TestPlainFlavor:

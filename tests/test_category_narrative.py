@@ -64,6 +64,31 @@ class TestSynthesizeCategoryCache:
         synthesize_category_for_period("2026-W27", "coding", ["s1", "s3"], ["a", "b"])
         assert fake.calls == 2
 
+    def test_prompt_change_recomputes_same_session_set(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        fake = _FakeRun()
+        monkeypatch.setattr(ss.subprocess, "run", fake)
+        args = ("2026-W27", "coding", ["s1"], ["fixed auth"])
+        assert synthesize_category_for_period(*args) is not None
+        monkeypatch.setattr(ss, "_CATEGORY_PROMPT", ss._CATEGORY_PROMPT + "\nBe direct.")
+        assert synthesize_category_for_period(*args) is not None
+        assert fake.calls == 2
+
+    def test_category_config_edit_keeps_unrelated_narrative_cache_warm(
+        self, tmp_home, monkeypatch: pytest.MonkeyPatch,
+    ):
+        fake = _FakeRun()
+        monkeypatch.setattr(ss.subprocess, "run", fake)
+        args = ("2026-W27", "coding", ["s1"], ["fixed auth"])
+        assert synthesize_category_for_period(*args) is not None
+
+        (tmp_home / ".ccstory" / "config.toml").write_text(
+            '[categories]\n"work" = ["paperclip"]\n', encoding="utf-8",
+        )
+        assert synthesize_category_for_period(*args) is not None
+        assert fake.calls == 1
+
     def test_llm_failure_returns_none_and_caches_nothing(
         self, monkeypatch: pytest.MonkeyPatch
     ):

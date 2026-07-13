@@ -101,6 +101,21 @@ class TestCacheOps:
     def test_get_empty(self, tmp_home: Path):
         assert _classify_cache_get_many([]) == {}
 
+    def test_category_config_change_invalidates_only_compatible_rows(
+        self, tmp_home: Path,
+    ):
+        cfg = tmp_home / ".ccstory" / "config.toml"
+        cfg.write_text(
+            '[categories]\n"content" = ["blog"]\n', encoding="utf-8",
+        )
+        _classify_cache_upsert_many({"s1": "content"})
+        assert _classify_cache_get_many(["s1"]) == {"s1": "content"}
+
+        cfg.write_text(
+            '[categories]\n"work" = ["blog"]\n', encoding="utf-8",
+        )
+        assert _classify_cache_get_many(["s1"]) == {}
+
 
 class TestClassifySessionsByContent:
     def test_empty_items_returns_empty(self, tmp_home: Path):
@@ -230,6 +245,94 @@ class TestClassifySessionsByContent:
         assert run_mock.call_count == 3  # 80 + 80 + 40
         assert len(result) == 200
         assert all(b == "coding" for b in result.values())
+
+    def test_new_bucket_is_carried_into_later_chunk_prompt(self, tmp_home: Path):
+        items = [(f"s{i}", "platform", "maintained infra") for i in range(4)]
+        prompts: list[str] = []
+
+        def mock_run(cmd, *, capture_output, text, timeout, check):
+            prompt = cmd[-1]
+            prompts.append(prompt)
+            sids = [
+                line.split("]")[0].lstrip("[")
+                for line in prompt.splitlines()
+                if line.startswith("[s")
+            ]
+            stdout = "".join(
+                f'{{"session_id": "{sid}", "bucket": "infrastructure"}}\n'
+                for sid in sids
+            )
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout=stdout, stderr="",
+            )
+
+        with patch("ccstory.session_summarizer.claude_bin_available",
+                   return_value=True), \
+             patch("ccstory.session_summarizer.subprocess.run",
+                   side_effect=mock_run):
+            result = classify_sessions_by_content(items, batch_size=2)
+
+        assert len(prompts) == 2
+        assert "(none yet)" in prompts[0]
+        assert "infrastructure" in prompts[1].split("Pick from", 1)[0]
+        assert result == {f"s{i}": "infrastructure" for i in range(4)}
+
+    def test_run_wide_vocab_cap_rejects_third_invented_bucket(
+        self, tmp_home: Path,
+    ):
+        items = [(f"s{i}", "platform", "maintained systems") for i in range(6)]
+        proposed = ["research", "ops", "devops"]
+        calls = 0
+
+        def mock_run(cmd, *, capture_output, text, timeout, check):
+            nonlocal calls
+            bucket = proposed[calls]
+            calls += 1
+            sids = [
+                line.split("]")[0].lstrip("[")
+                for line in cmd[-1].splitlines()
+                if line.startswith("[s")
+            ]
+            stdout = "".join(
+                f'{{"session_id": "{sid}", "bucket": "{bucket}"}}\n'
+                for sid in sids
+            )
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout=stdout, stderr="",
+            )
+
+        with patch("ccstory.session_summarizer.claude_bin_available",
+                   return_value=True), \
+             patch("ccstory.session_summarizer.subprocess.run",
+                   side_effect=mock_run):
+            result = classify_sessions_by_content(items, batch_size=2)
+
+        # Default config supplies four preferred buckets, leaving room for
+        # two genuinely new names. The third never reaches the durable cache.
+        assert set(result.values()) == {"research", "ops"}
+        assert "s4" not in result and "s5" not in result
+        assert _classify_cache_get_many([f"s{i}" for i in range(6)]) == result
+
+    def test_one_off_invented_bucket_is_not_cached(self, tmp_home: Path):
+        proposed = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout=(
+                '{"session_id": "s1", "bucket": "one-off-label"}\n'
+                '{"session_id": "s2", "bucket": "coding"}\n'
+            ),
+            stderr="",
+        )
+        with patch("ccstory.session_summarizer.claude_bin_available",
+                   return_value=True), \
+             patch("ccstory.session_summarizer.subprocess.run",
+                   return_value=proposed):
+            result = classify_sessions_by_content([
+                ("s1", "x", "unique task"),
+                ("s2", "y", "software task"),
+            ])
+
+        assert result == {"s2": "coding"}
+        assert _classify_cache_get_many(["s1", "s2"]) == {"s2": "coding"}
 
     def test_on_chunk_complete_fires_per_chunk(self, tmp_home: Path):
         """Issue #75: progress callback lets callers update a console.status
@@ -413,4 +516,11 @@ class TestParseClassificationRejectsBlankBucket:
 
     def test_empty_string_bucket_dropped(self):
         text = '{"session_id": "s1", "bucket": ""}\n'
+        assert _parse_classification_lines(text) == {}
+
+    def test_control_character_and_overlong_bucket_dropped(self):
+        text = (
+            '{"session_id": "s1", "bucket": "bad\\u0000name"}\n'
+            f'{{"session_id": "s2", "bucket": "{"x" * 61}"}}\n'
+        )
         assert _parse_classification_lines(text) == {}
