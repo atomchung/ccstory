@@ -178,6 +178,150 @@ class TestSummarizeSession:
         assert result.source == "skipped"
 
 
+class TestRetroactiveRefresh:
+    """Retroactive upgrade/refresh of cached narratives (the freeze fix).
+
+    `--llm-narrative` must be able to upgrade a cached `fallback` to `auto`
+    and refresh a stale `auto`, while never re-burning an up-to-date one and
+    never downgrading a good summary on a transient `claude -p` failure.
+    """
+
+    def _jsonl(self, jsonl_factory):
+        return jsonl_factory(
+            "-Users-alice-code-myapp", "sess-r",
+            [make_user_msg("Refactor the auth flow", _ts(2026, 5, 10, 10, 0, 0))],
+        )
+
+    def test_use_llm_upgrades_fallback_to_auto(
+        self, tmp_home: Path, jsonl_factory, monkeypatch
+    ):
+        path = self._jsonl(jsonl_factory)
+        upsert("sess-r", "stale fallback line", "fallback", project="myapp")
+        monkeypatch.setattr(ss, "summarize_via_claude_p",
+                            lambda *a, **k: "polished outcome")
+        result = summarize_session("sess-r", path, use_llm=True)
+        assert result.source == "auto"
+        assert result.summary == "polished outcome"
+        assert result.prompt_version == ss.PROMPT_VERSION
+
+    def test_current_auto_not_reburned(
+        self, tmp_home: Path, jsonl_factory, monkeypatch
+    ):
+        path = self._jsonl(jsonl_factory)
+        upsert("sess-r", "good summary", "auto", project="myapp",
+               prompt_version=ss.PROMPT_VERSION)
+
+        def _boom(*a, **k):
+            raise AssertionError("claude -p must not run for an up-to-date auto row")
+
+        monkeypatch.setattr(ss, "summarize_via_claude_p", _boom)
+        result = summarize_session("sess-r", path, use_llm=True)
+        assert result.source == "auto"
+        assert result.summary == "good summary"
+
+    def test_stale_auto_refreshed(
+        self, tmp_home: Path, jsonl_factory, monkeypatch
+    ):
+        path = self._jsonl(jsonl_factory)
+        upsert("sess-r", "old-model summary", "auto", project="myapp",
+               prompt_version=ss.PROMPT_VERSION - 1)
+        monkeypatch.setattr(ss, "summarize_via_claude_p",
+                            lambda *a, **k: "new-model summary")
+        result = summarize_session("sess-r", path, use_llm=True)
+        assert result.summary == "new-model summary"
+        assert result.prompt_version == ss.PROMPT_VERSION
+
+    def test_force_regenerates_current_auto(
+        self, tmp_home: Path, jsonl_factory, monkeypatch
+    ):
+        path = self._jsonl(jsonl_factory)
+        upsert("sess-r", "good summary", "auto", project="myapp",
+               prompt_version=ss.PROMPT_VERSION)
+        monkeypatch.setattr(ss, "summarize_via_claude_p",
+                            lambda *a, **k: "forced refresh")
+        result = summarize_session("sess-r", path, use_llm=True, force=True)
+        assert result.summary == "forced refresh"
+
+    def test_failed_refresh_keeps_existing_auto(
+        self, tmp_home: Path, jsonl_factory, monkeypatch
+    ):
+        # Non-destructive: a claude -p failure must not downgrade a good
+        # auto summary to a fallback.
+        path = self._jsonl(jsonl_factory)
+        upsert("sess-r", "good summary", "auto", project="myapp",
+               prompt_version=ss.PROMPT_VERSION - 1)
+        monkeypatch.setattr(ss, "summarize_via_claude_p", lambda *a, **k: None)
+        result = summarize_session("sess-r", path, use_llm=True)
+        assert result.source == "auto"
+        assert result.summary == "good summary"
+
+    def test_skipped_not_retried(
+        self, tmp_home: Path, jsonl_factory, monkeypatch
+    ):
+        path = self._jsonl(jsonl_factory)
+        upsert("sess-r", "(no meaningful conversation)", "skipped", project="myapp")
+
+        def _boom(*a, **k):
+            raise AssertionError("claude -p must not run for a skipped row")
+
+        monkeypatch.setattr(ss, "summarize_via_claude_p", _boom)
+        result = summarize_session("sess-r", path, use_llm=True)
+        assert result.source == "skipped"
+
+    def test_use_llm_false_never_upgrades(
+        self, tmp_home: Path, jsonl_factory, monkeypatch
+    ):
+        path = self._jsonl(jsonl_factory)
+        upsert("sess-r", "fallback line", "fallback", project="myapp")
+
+        def _boom(*a, **k):
+            raise AssertionError("claude -p must not run without use_llm")
+
+        monkeypatch.setattr(ss, "summarize_via_claude_p", _boom)
+        result = summarize_session("sess-r", path, use_llm=False)
+        assert result.source == "fallback"
+
+
+class TestNeedsLlm:
+    def test_matrix(self):
+        SS = ss.SessionSummary
+        assert ss._needs_llm(None) is True
+        assert ss._needs_llm(SS("i", "s", "skipped")) is False
+        assert ss._needs_llm(SS("i", "s", "fallback")) is True
+        cur = SS("i", "s", "auto", prompt_version=ss.PROMPT_VERSION)
+        assert ss._needs_llm(cur) is False
+        assert ss._needs_llm(cur, force=True) is True
+        stale = SS("i", "s", "auto", prompt_version=ss.PROMPT_VERSION - 1)
+        assert ss._needs_llm(stale) is True
+        # legacy NULL prompt_version coerces to 0 → stale
+        assert ss._needs_llm(SS("i", "s", "auto", prompt_version=None)) is True
+
+
+class TestPromptVersionMigration:
+    def test_legacy_rows_stamped_current(self, tmp_home: Path):
+        # Simulate a pre-feature DB: session_summaries without prompt_version.
+        ss.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        raw = sqlite3.connect(str(ss.DB_PATH))
+        raw.execute(
+            """CREATE TABLE session_summaries (
+                   session_id TEXT PRIMARY KEY, summary TEXT NOT NULL,
+                   source TEXT NOT NULL, project TEXT, created_at REAL NOT NULL)"""
+        )
+        raw.execute(
+            "INSERT INTO session_summaries VALUES (?, ?, ?, ?, ?)",
+            ("legacy", "old summary", "auto", "proj", 1.0),
+        )
+        raw.commit()
+        raw.close()
+        # First ccstory connect must add the column and stamp the legacy row
+        # as *current* (not 0), so adopting the feature doesn't silently
+        # re-burn the existing cache.
+        row = get("legacy")
+        assert row is not None
+        assert row.prompt_version == ss.PROMPT_VERSION
+        assert ss._needs_llm(row) is False
+
+
 class TestLanguageDirective:
     def test_missing_claude_md_falls_back_to_english(self, tmp_home: Path):
         # No CLAUDE.md written → expect the English fallback line.

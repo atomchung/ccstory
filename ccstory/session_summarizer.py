@@ -37,6 +37,13 @@ N_USER_HEAD = 3
 N_USER_TAIL = 2
 N_ASSISTANT_TAIL = 1
 
+# Bump whenever the per-session narrative prompt (_PROMPT_TEMPLATE) is changed
+# materially, or when retuning it for a newer/better default `claude` model.
+# Cached "auto" summaries carrying a lower prompt_version are treated as stale
+# and regenerated on the next `--llm-narrative` run. Keep this an int so the
+# comparison `stored < PROMPT_VERSION` is monotonic.
+PROMPT_VERSION = 1
+
 
 _CLAUDE_MD_MAX_CHARS = 500
 
@@ -219,6 +226,11 @@ class SessionSummary:
     source: str  # "auto" | "skipped" | "fallback"
     project: str | None = None
     created_at: float = 0.0
+    # Version of the per-session prompt (_PROMPT_TEMPLATE / PROMPT_VERSION)
+    # that produced an "auto" summary. Used to detect staleness so a later
+    # release can refresh summaries when the prompt — or the model it's
+    # tuned for — improves. 0 / None for fallback/skipped/legacy rows.
+    prompt_version: int = 0
 
 
 def _connect() -> sqlite3.Connection:
@@ -243,14 +255,32 @@ def _connect() -> sqlite3.Connection:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS session_summaries (
-            session_id TEXT PRIMARY KEY,
-            summary    TEXT NOT NULL,
-            source     TEXT NOT NULL,
-            project    TEXT,
-            created_at REAL NOT NULL
+            session_id     TEXT PRIMARY KEY,
+            summary        TEXT NOT NULL,
+            source         TEXT NOT NULL,
+            project        TEXT,
+            created_at     REAL NOT NULL,
+            prompt_version INTEGER
         )
         """
     )
+    # Migrate DBs created before prompt_version existed. ALTER is the whole
+    # migration; it raises OperationalError once the column is present, so
+    # this stays a no-op on every subsequent connect. Pre-existing rows are
+    # stamped as *current* (not 0) so adopting this feature does NOT silently
+    # re-burn an existing cache — refresh only fires when PROMPT_VERSION is
+    # bumped in a later release, or the user passes --refresh.
+    try:
+        conn.execute(
+            "ALTER TABLE session_summaries ADD COLUMN prompt_version INTEGER"
+        )
+        conn.execute(
+            "UPDATE session_summaries SET prompt_version = ? "
+            "WHERE prompt_version IS NULL",
+            (PROMPT_VERSION,),
+        )
+    except sqlite3.OperationalError:
+        pass  # column already present
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS period_aggregates (
@@ -293,6 +323,7 @@ def upsert(
     summary: str,
     source: str,
     project: str | None = None,
+    prompt_version: int = 0,
 ) -> None:
     if not session_id or not summary:
         return
@@ -300,9 +331,10 @@ def upsert(
     try:
         conn.execute(
             """INSERT OR REPLACE INTO session_summaries
-               (session_id, summary, source, project, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            (session_id, summary.strip(), source, project, time.time()),
+               (session_id, summary, source, project, created_at, prompt_version)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (session_id, summary.strip(), source, project, time.time(),
+             prompt_version),
         )
         conn.commit()
     finally:
@@ -313,7 +345,8 @@ def get(session_id: str) -> SessionSummary | None:
     conn = _connect()
     try:
         row = conn.execute(
-            """SELECT session_id, summary, source, project, created_at
+            """SELECT session_id, summary, source, project, created_at,
+                      prompt_version
                FROM session_summaries WHERE session_id = ?""",
             (session_id,),
         ).fetchone()
@@ -329,7 +362,8 @@ def get_many(session_ids: list[str]) -> dict[str, SessionSummary]:
     try:
         placeholders = ",".join("?" for _ in session_ids)
         rows = conn.execute(
-            f"""SELECT session_id, summary, source, project, created_at
+            f"""SELECT session_id, summary, source, project, created_at,
+                       prompt_version
                 FROM session_summaries WHERE session_id IN ({placeholders})""",
             session_ids,
         ).fetchall()
@@ -363,10 +397,12 @@ def import_from_claude_recap() -> int:
         try:
             cur = conn.execute(
                 """INSERT OR IGNORE INTO session_summaries
-                   (session_id, summary, source, project, created_at)
-                   SELECT session_id, summary, source, project, created_at
+                   (session_id, summary, source, project, created_at,
+                    prompt_version)
+                   SELECT session_id, summary, source, project, created_at, ?
                    FROM recap.session_summaries
-                   WHERE summary IS NOT NULL AND summary <> ''"""
+                   WHERE summary IS NOT NULL AND summary <> ''""",
+                (PROMPT_VERSION,),
             )
             n = cur.rowcount or 0
             conn.commit()
@@ -521,32 +557,70 @@ def _fallback_narrative(excerpt: str) -> str:
     return line[:120]
 
 
+def _needs_llm(existing: SessionSummary | None, force: bool = False) -> bool:
+    """Whether a session should be (re)sent to `claude -p` under use_llm=True.
+
+    - missing            → yes (never summarized)
+    - source == skipped  → no  (no usable content; retrying only wastes calls)
+    - source == fallback → yes (Layer 0: upgrade the instant fallback to auto)
+    - source == auto     → only if `force`, or its prompt_version is behind
+                           PROMPT_VERSION (Layer 1: refresh when the prompt —
+                           or the model it's tuned for — has improved)
+    """
+    if existing is None:
+        return True
+    if existing.source == "skipped":
+        return False
+    if existing.source == "fallback":
+        return True
+    if force:  # source == "auto"
+        return True
+    return (existing.prompt_version or 0) < PROMPT_VERSION
+
+
 def summarize_session(
     session_id: str,
     jsonl_path: Path,
     use_llm: bool = False,
+    force: bool = False,
 ) -> SessionSummary | None:
-    """Idempotent: returns cached entry if present.
+    """Idempotent: returns the cached entry unless it needs (re)generation.
 
-    Default (`use_llm=False`) is instant — generates a fallback narrative
-    from the session's first user message and caches it as `source=fallback`.
+    Default (`use_llm=False`) never calls the LLM — it returns any cached
+    entry untouched, else writes an instant first-user-msg fallback
+    (`source=fallback`).
 
-    Set `use_llm=True` to attempt `claude -p` polish (slow, ~30-60s/session
-    cold start). On `claude -p` failure, falls through to the same fallback
-    narrative.
+    With `use_llm=True` the cache becomes *upgradable*: a `fallback` row is
+    promoted to `auto`, and a stale `auto` row (older `prompt_version`, or
+    any when `force=True`) is regenerated. An up-to-date `auto` row is
+    returned as-is so we never re-burn `claude -p`. Regeneration is
+    non-destructive — if `claude -p` fails, the existing summary is kept
+    rather than downgraded to a fallback.
     """
     existing = get(session_id)
-    if existing:
+    if not use_llm:
+        if existing:
+            return existing
+    elif existing and not _needs_llm(existing, force):
         return existing
+
     project, excerpt = _extract_excerpt(jsonl_path)
     if not excerpt:
+        # Nothing usable to summarize now — don't clobber a prior summary.
+        if existing and existing.source in ("auto", "fallback"):
+            return existing
         upsert(session_id, "(no meaningful conversation)", "skipped", project=project)
         return get(session_id)
     if use_llm:
         summary = summarize_via_claude_p(excerpt)
         if summary:
-            upsert(session_id, summary, "auto", project=project)
+            upsert(session_id, summary, "auto", project=project,
+                   prompt_version=PROMPT_VERSION)
             return get(session_id)
+        # claude -p failed: keep a good existing summary instead of
+        # downgrading it to a fallback on a transient failure.
+        if existing and existing.source == "auto":
+            return existing
     upsert(session_id, _fallback_narrative(excerpt), "fallback", project=project)
     return get(session_id)
 
@@ -1187,30 +1261,43 @@ def backfill_for_sessions(
     sessions: list,
     on_progress=None,
     use_llm: bool = False,
+    force: bool = False,
 ) -> dict:
-    """Summarize any sessions not yet in DB.
+    """Summarize sessions that are missing or, under `use_llm`, stale.
 
-    `sessions` is a list of objects with `.session_id` and `.project` attributes.
-    `use_llm=False` (default) uses the instant first-user-msg fallback;
-    `use_llm=True` opts into `claude -p` polish per session.
-    Returns {"summarized": N, "fallback": F, "skipped": M, "already": K}.
+    `sessions` is a list of objects with `.session_id` and `.project` attrs.
+    `use_llm=False` (default) only summarizes never-seen sessions with the
+    instant first-user-msg fallback. `use_llm=True` additionally upgrades
+    `fallback` rows to `auto` and regenerates stale `auto` rows (older
+    prompt_version, or every in-window `auto` when `force=True`).
+    Returns {"summarized": N, "fallback": F, "skipped": M, "already": K,
+             "regenerated": R}.
     """
     by_id = {s.session_id: s for s in sessions if getattr(s, "session_id", None)}
-    miss = missing_ids(list(by_id.keys()))
+    ids = list(by_id.keys())
+    existing = get_many(ids)
+    if use_llm:
+        todo = [sid for sid in ids if _needs_llm(existing.get(sid), force)]
+    else:
+        todo = [sid for sid in ids if existing.get(sid) is None]
+    regenerated = sum(1 for sid in todo if existing.get(sid) is not None)
     summarized = fallback = skipped = 0
-    for i, sid in enumerate(miss):
+    for i, sid in enumerate(todo):
         sess = by_id[sid]
         jsonl_path = PROJECTS_DIR / sess.project / f"{sid}.jsonl"
         if not jsonl_path.exists():
             matches = list(PROJECTS_DIR.rglob(f"{sid}.jsonl"))
             if not matches:
-                upsert(sid, "(jsonl not found)", "skipped", project=sess.project)
+                # Only record a "not found" skip when nothing is cached;
+                # otherwise keep the existing summary rather than clobber it.
+                if existing.get(sid) is None:
+                    upsert(sid, "(jsonl not found)", "skipped", project=sess.project)
                 skipped += 1
                 if on_progress:
-                    on_progress(i + 1, len(miss), sid, "skipped")
+                    on_progress(i + 1, len(todo), sid, "skipped")
                 continue
             jsonl_path = matches[0]
-        result = summarize_session(sid, jsonl_path, use_llm=use_llm)
+        result = summarize_session(sid, jsonl_path, use_llm=use_llm, force=force)
         if result and result.source == "auto":
             summarized += 1
         elif result and result.source == "fallback":
@@ -1218,10 +1305,11 @@ def backfill_for_sessions(
         else:
             skipped += 1
         if on_progress:
-            on_progress(i + 1, len(miss), sid, result.source if result else "fail")
+            on_progress(i + 1, len(todo), sid, result.source if result else "fail")
     return {
         "summarized": summarized,
         "fallback": fallback,
         "skipped": skipped,
-        "already": len(by_id) - len(miss),
+        "already": len(ids) - len(todo),
+        "regenerated": regenerated,
     }
