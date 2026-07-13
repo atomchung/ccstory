@@ -629,15 +629,23 @@ _OVERALL_PROMPT = """{language_directive}
 
 Below is a breakdown of every Claude Code session in a single time window, grouped by category. Each line under a category is one session's one-line summary.
 
-Write EXACTLY 3 sentences (max 90 words total) synthesizing what the user did across the WHOLE period. Cover:
-1. The dominant focus (the biggest category and its main thread)
-2. The other meaningful threads, grouped briefly
-3. Any cross-cutting decision, outcome, or shift worth flagging
+Reframe the period around the user's GOAL THREADS, NOT a category-by-category log. Merge the categories into 2-4 mission threads reflecting what the user is building toward (fold tool-building categories into one "build" thread; keep investing research its own thread). Lead with the thread that took the most time.
 
-Style:
-- Prose only — no bullets, no headers, no lists.
-- Concrete nouns (tickers, file names, tools) beat generic verbs.
-- Synthesize across categories; do NOT list every session.
+For EACH thread write a block with TWO parts:
+1) A SHORT bold header (ONE line): the CONCRETE thing achieved this period AND its payoff (what it now enables). Specific enough to identify THIS week alone, NEVER a generic progress arc reusable for any week. BANNED header styles (generic arcs reusable for ANY week): "laid the foundation", "now live", "from firefighting to foundation", "single-fix to platform", "X 從單點修復邁向地基層", "走向平台化", "全面收斂", "全面補強", "紀律收斂", "可信度全面補強", "維運全面收斂". Abstract progress-verbs used AS the payoff — 「收斂」「全面補強」「全面強化」「補強」「(全面)提升」— are BANNED: the payoff must be a concrete capability or result you can point to, never a process word. If a real version shipped (e.g. "ccstory v0.4.2"), name it. NO issue/PR numbers.
+2) Then 1-3 bullet points (each line starts with "- "): one concrete thing done, phrased as an outcome, not a pile of technical nouns.
+
+Concrete header examples (mirror this specificity in the response language):
+- Good: "fomo-kernel 現金流與多幣別帳本落地，portfolio 首次能算真實成本基礎"
+- Good: "ccstory v0.4.2 發版，週報改吃 record-claude 敘事管線"
+- Bad (abstract, reusable any week): "投資決策引擎從單點修復邁向地基層落地"
+- Bad (abstract progress-verb as payoff): "個人系統維運全面收斂，工具鏈可信度全面補強"
+
+Rules:
+- 2-4 threads total. Header = the key concrete win + its payoff, specific to THIS week. Bullets carry the supporting detail.
+- 1-3 bullets per thread. NO issue/PR/commit numbers anywhere (no "#162", no "closes #31"); those live in a separate table. Name qualitative outcomes.
+- Ground every claim in the summaries. Never invent a version or outcome. If a thread has no clear "before", just state the concrete win and its payoff; do not fabricate a before/after.
+- Respond in Traditional Chinese (正體字) only — NEVER Simplified. Write 「帳」not「賬」，「著」not「着」，「裡」not「里」; any Simplified glyph is a hard failure.
 
 Period: {period}
 Categories (hours): {category_summary}
@@ -645,7 +653,7 @@ Categories (hours): {category_summary}
 Session breakdown by category:
 {breakdown}
 
-Output the 3-sentence prose only — no quotes, no prefix, no fences."""
+Output only the thread blocks (bold header + bullet lines) — no preamble, no quotes, no fences."""
 
 OVERALL_KEY = "__overall__"
 
