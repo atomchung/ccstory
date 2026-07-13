@@ -11,6 +11,7 @@ Extracted from ting/personal_os/core/session_summarizer.py. Simplified for v1:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -44,6 +45,7 @@ N_ASSISTANT_TAIL = 1
 # and regenerated on the next `--llm-narrative` run. Keep this an int so the
 # comparison `stored < PROMPT_VERSION` is monotonic.
 PROMPT_VERSION = 1
+CACHE_SCHEMA_VERSION = 2
 
 
 _CLAUDE_MD_MAX_CHARS = 500
@@ -234,25 +236,18 @@ class SessionSummary:
     prompt_version: int = 0
 
 
-def _connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        conn = sqlite3.connect(str(DB_PATH))
-        # PRAGMA integrity_check returns "ok" on a healthy db. A corrupt
-        # file errors here instead of much later inside a query, so we
-        # can give the user a clear recovery hint at startup time.
-        conn.execute("PRAGMA schema_version").fetchone()
-    except sqlite3.DatabaseError as e:
-        import sys as _sys
-        print(
-            f"ccstory: error: cache at {DB_PATH} is corrupted ({e}).\n"
-            f"ccstory: to reset, delete the file and re-run:\n"
-            f"    rm {DB_PATH}\n"
-            f"You'll lose cached per-session narratives + bucket assignments; "
-            f"sessions get re-summarized on the next run.",
-            file=_sys.stderr,
-        )
-        raise SystemExit(1) from e
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    """Return the columns SQLite currently exposes for ``table``."""
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _migration_1_baseline(conn: sqlite3.Connection) -> None:
+    """Create/adopt the pre-fingerprint schema (#101).
+
+    Databases shipped before ``PRAGMA user_version`` may already contain any
+    subset of these tables.  ``CREATE IF NOT EXISTS`` plus the guarded column
+    add makes adopting them deterministic without dropping cached rows.
+    """
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS session_summaries (
@@ -265,23 +260,17 @@ def _connect() -> sqlite3.Connection:
         )
         """
     )
-    # Migrate DBs created before prompt_version existed. ALTER is the whole
-    # migration; it raises OperationalError once the column is present, so
-    # this stays a no-op on every subsequent connect. Pre-existing rows are
-    # stamped as *current* (not 0) so adopting this feature does NOT silently
-    # re-burn an existing cache — refresh only fires when PROMPT_VERSION is
-    # bumped in a later release, or the user passes --refresh.
-    try:
+    if "prompt_version" not in _table_columns(conn, "session_summaries"):
         conn.execute(
             "ALTER TABLE session_summaries ADD COLUMN prompt_version INTEGER"
         )
-        conn.execute(
-            "UPDATE session_summaries SET prompt_version = ? "
-            "WHERE prompt_version IS NULL",
-            (PROMPT_VERSION,),
-        )
-    except sqlite3.OperationalError:
-        pass  # column already present
+    # Preserve the old adoption contract: existing summaries are stamped as
+    # current rather than unexpectedly re-burning per-session Claude calls.
+    conn.execute(
+        "UPDATE session_summaries SET prompt_version = ? "
+        "WHERE prompt_version IS NULL",
+        (PROMPT_VERSION,),
+    )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS period_aggregates (
@@ -315,8 +304,112 @@ def _connect() -> sqlite3.Connection:
         )
         """
     )
-    conn.commit()
+
+
+def _add_column_if_missing(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    declaration: str,
+) -> None:
+    """Idempotently add one migration-owned column."""
+    if column not in _table_columns(conn, table):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+
+def _migration_2_cache_fingerprints(conn: sqlite3.Connection) -> None:
+    """Add per-family input fingerprints used by #102/#65."""
+    # Reassert the baseline so a manually edited/incomplete user_version=1 DB
+    # still gets a coherent schema rather than a cryptic ALTER failure.
+    _migration_1_baseline(conn)
+    for table in (
+        "period_aggregates",
+        "comparison_narratives",
+        "session_content_buckets",
+    ):
+        _add_column_if_missing(
+            conn, table, "input_fingerprint", "TEXT NOT NULL DEFAULT ''",
+        )
+
+
+_MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
+    _migration_1_baseline,
+    _migration_2_cache_fingerprints,
+)
+assert len(_MIGRATIONS) == CACHE_SCHEMA_VERSION
+
+
+class _CacheSchemaTooNew(sqlite3.DatabaseError):
+    """Raised when an older ccstory binary opens a newer cache schema."""
+
+
+def _run_migrations(conn: sqlite3.Connection) -> None:
+    """Apply missing cache migrations in ordered transactions."""
+    current = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    if current > CACHE_SCHEMA_VERSION:
+        raise _CacheSchemaTooNew(
+            f"cache schema {current} is newer than supported "
+            f"version {CACHE_SCHEMA_VERSION}"
+        )
+    for target in range(current + 1, CACHE_SCHEMA_VERSION + 1):
+        try:
+            conn.execute("BEGIN")
+            _MIGRATIONS[target - 1](conn)
+            conn.execute(f"PRAGMA user_version = {target}")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def _connect() -> sqlite3.Connection:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        # PRAGMA schema_version forces SQLite to parse the file early, so a
+        # corrupt cache gets the existing actionable recovery hint.
+        conn.execute("PRAGMA schema_version").fetchone()
+        _run_migrations(conn)
+    except _CacheSchemaTooNew as e:
+        if conn is not None:
+            conn.close()
+        import sys as _sys
+        print(
+            f"ccstory: error: cache at {DB_PATH} was written by a newer "
+            f"ccstory ({e}).\n"
+            "ccstory: upgrade ccstory before opening this cache; the file "
+            "was left untouched.",
+            file=_sys.stderr,
+        )
+        raise SystemExit(1) from e
+    except sqlite3.DatabaseError as e:
+        if conn is not None:
+            conn.close()
+        import sys as _sys
+        print(
+            f"ccstory: error: cache at {DB_PATH} is corrupted ({e}).\n"
+            f"ccstory: to reset, delete the file and re-run:\n"
+            f"    rm {DB_PATH}\n"
+            f"You'll lose cached per-session narratives + bucket assignments; "
+            f"sessions get re-summarized on the next run.",
+            file=_sys.stderr,
+        )
+        raise SystemExit(1) from e
+    except Exception:
+        if conn is not None:
+            conn.close()
+        raise
+    assert conn is not None
     return conn
+
+
+def _cache_fingerprint(family: str, *parts: str) -> str:
+    """Stable SHA-256 over the exact inputs that produced one cache family."""
+    payload = json.dumps(
+        [family, *parts], ensure_ascii=False, separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def upsert(
@@ -732,22 +825,6 @@ def synthesize_overall_for_period(
     if not all_ids:
         return None
 
-    conn = _connect()
-    try:
-        cur = conn.execute(
-            "SELECT summary, session_ids FROM period_aggregates "
-            "WHERE period_key = ? AND category = ?",
-            (period_key, OVERALL_KEY),
-        ).fetchone()
-        cached_ids = cur[1].split(",") if cur else []
-        if cur and not force_refresh and cached_ids == all_ids:
-            return cur[0]
-    finally:
-        conn.close()
-
-    if not claude_bin_available():
-        return None
-
     cat_hours_line = ", ".join(
         f"{cat} {hrs:.1f}h" for cat, hrs in category_hours if hrs > 0
     ) or "(none)"
@@ -765,6 +842,29 @@ def synthesize_overall_for_period(
         category_summary=cat_hours_line,
         breakdown=breakdown,
     )
+    input_fingerprint = _cache_fingerprint("period-overall", prompt)
+
+    conn = _connect()
+    try:
+        cur = conn.execute(
+            "SELECT summary, session_ids, input_fingerprint "
+            "FROM period_aggregates "
+            "WHERE period_key = ? AND category = ?",
+            (period_key, OVERALL_KEY),
+        ).fetchone()
+        cached_ids = cur[1].split(",") if cur else []
+        if (
+            cur
+            and not force_refresh
+            and cached_ids == all_ids
+            and cur[2] == input_fingerprint
+        ):
+            return cur[0]
+    finally:
+        conn.close()
+
+    if not claude_bin_available():
+        return None
 
     try:
         r = run_claude_p(prompt, timeout)
@@ -782,10 +882,11 @@ def synthesize_overall_for_period(
     try:
         conn.execute(
             """INSERT OR REPLACE INTO period_aggregates
-               (period_key, category, summary, session_ids, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
+               (period_key, category, summary, session_ids, created_at,
+                input_fingerprint)
+               VALUES (?, ?, ?, ?, ?, ?)""",
             (period_key, OVERALL_KEY, narrative,
-             ",".join(all_ids), time.time()),
+             ",".join(all_ids), time.time(), input_fingerprint),
         )
         conn.commit()
     finally:
@@ -831,22 +932,6 @@ def synthesize_category_for_period(
         return None
     ids_sorted = sorted(session_ids)
 
-    conn = _connect()
-    try:
-        cur = conn.execute(
-            "SELECT summary, session_ids FROM period_aggregates "
-            "WHERE period_key = ? AND category = ?",
-            (period_key, category),
-        ).fetchone()
-        cached_ids = cur[1].split(",") if cur else []
-        if cur and not force_refresh and cached_ids == ids_sorted:
-            return cur[0]
-    finally:
-        conn.close()
-
-    if not claude_bin_available():
-        return None
-
     bullets = "\n".join(f"- {s}" for s in summaries)[:6000]
     prompt = _CATEGORY_PROMPT.format(
         language_directive=language_directive(),
@@ -854,6 +939,29 @@ def synthesize_category_for_period(
         count=len(summaries),
         bullets=bullets,
     )
+    input_fingerprint = _cache_fingerprint("period-category", prompt)
+
+    conn = _connect()
+    try:
+        cur = conn.execute(
+            "SELECT summary, session_ids, input_fingerprint "
+            "FROM period_aggregates "
+            "WHERE period_key = ? AND category = ?",
+            (period_key, category),
+        ).fetchone()
+        cached_ids = cur[1].split(",") if cur else []
+        if (
+            cur
+            and not force_refresh
+            and cached_ids == ids_sorted
+            and cur[2] == input_fingerprint
+        ):
+            return cur[0]
+    finally:
+        conn.close()
+
+    if not claude_bin_available():
+        return None
 
     try:
         r = run_claude_p(prompt, timeout)
@@ -872,10 +980,11 @@ def synthesize_category_for_period(
     try:
         conn.execute(
             """INSERT OR REPLACE INTO period_aggregates
-               (period_key, category, summary, session_ids, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
+               (period_key, category, summary, session_ids, created_at,
+                input_fingerprint)
+               VALUES (?, ?, ?, ?, ?, ?)""",
             (period_key, category, narrative,
-             ",".join(ids_sorted), time.time()),
+             ",".join(ids_sorted), time.time(), input_fingerprint),
         )
         conn.commit()
     finally:
@@ -1002,7 +1111,6 @@ def _comparison_signature(
     narrative when a session's summary is refreshed (e.g. via --force-refresh
     on session_summarizer) without its id changing.
     """
-    import hashlib
     cur = sorted(current_summaries)
     prev = sorted(previous_summaries)
     delta_part = sorted(deltas or [])
@@ -1039,23 +1147,7 @@ def synthesize_comparison(
     Returns the narrative string, or None on claude -p failure / absent
     summaries.
     """
-    sig = _comparison_signature(current_summaries, previous_summaries, deltas)
-
-    conn = _connect()
-    try:
-        cur = conn.execute(
-            "SELECT narrative, signature FROM comparison_narratives "
-            "WHERE current_key = ? AND previous_key = ?",
-            (current_key, previous_key),
-        ).fetchone()
-        if cur and not force_refresh and cur[1] == sig:
-            return cur[0]
-    finally:
-        conn.close()
-
     if not current_summaries or not previous_summaries:
-        return None
-    if not claude_bin_available():
         return None
 
     def _fmt(items: list[tuple[str, str]]) -> str:
@@ -1081,6 +1173,30 @@ def synthesize_comparison(
         previous_summaries=_fmt(previous_summaries)[:3000],
         current_summaries=_fmt(current_summaries)[:3000],
     )
+    sig = _comparison_signature(current_summaries, previous_summaries, deltas)
+    input_fingerprint = _cache_fingerprint("period-comparison", prompt)
+
+    conn = _connect()
+    try:
+        cur = conn.execute(
+            "SELECT narrative, signature, input_fingerprint "
+            "FROM comparison_narratives "
+            "WHERE current_key = ? AND previous_key = ?",
+            (current_key, previous_key),
+        ).fetchone()
+        if (
+            cur
+            and not force_refresh
+            and cur[1] == sig
+            and cur[2] == input_fingerprint
+        ):
+            return cur[0]
+    finally:
+        conn.close()
+
+    if not claude_bin_available():
+        return None
+
     try:
         r = run_claude_p(prompt, timeout)
         if r.returncode != 0:
@@ -1097,9 +1213,11 @@ def synthesize_comparison(
     try:
         conn.execute(
             """INSERT OR REPLACE INTO comparison_narratives
-               (current_key, previous_key, signature, narrative, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            (current_key, previous_key, sig, narrative, time.time()),
+               (current_key, previous_key, signature, narrative, created_at,
+                input_fingerprint)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (current_key, previous_key, sig, narrative, time.time(),
+             input_fingerprint),
         )
         conn.commit()
     finally:
@@ -1111,6 +1229,9 @@ _CONTENT_CLASSIFY_PROMPT = """You are categorizing Claude Code sessions by their
 
 Preferred bucket vocabulary (from this user's config — prefer these names so the report stays aligned with the user's mental model):
 {category_context}
+
+Buckets already assigned earlier in this run or recovered from the compatible cache:
+{already_used_buckets}
 
 Pick from the preferred vocabulary when a session reasonably fits. Only introduce a NEW bucket name if multiple sessions clearly share a theme that none of the preferred buckets cover. Keep spelling exactly consistent across rows. Keep the total bucket vocabulary small (≤ 6).
 
@@ -1133,6 +1254,43 @@ _DEFAULT_VOCAB_BLOCK = (
     "- writing: blogs, newsletters, posts, drafts, essays, docs\n"
     "- other: scratch, sandbox, experiments, anything that doesn't fit above"
 )
+_DEFAULT_BUCKET_NAMES = frozenset({"coding", "investment", "writing", "other"})
+MAX_CONTENT_BUCKETS = 6
+CONTENT_CLASSIFIER_POLICY_VERSION = 2
+
+
+def _normalize_bucket_name(raw: object) -> str | None:
+    """Normalize a model-proposed bucket while rejecting unsafe cache values."""
+    if not isinstance(raw, str):
+        return None
+    normalized = " ".join(raw.strip().lower().split())
+    if not normalized or len(normalized) > 60:
+        return None
+    if any(ord(char) < 32 or ord(char) == 127 for char in normalized):
+        return None
+    return normalized
+
+
+def _build_category_vocabulary() -> tuple[str, set[str]]:
+    """Return the rendered prompt context and normalized preferred names."""
+    # Local import avoids a module-load dependency and keeps monkeypatching
+    # CONFIG_PATH effective in tests.
+    from .categorizer import list_user_categories
+    cats = list_user_categories()
+    if not cats:
+        return _DEFAULT_VOCAB_BLOCK, set(_DEFAULT_BUCKET_NAMES)
+    lines: list[str] = []
+    names: set[str] = set()
+    for bucket in sorted(cats):
+        kws = cats[bucket]
+        normalized = _normalize_bucket_name(bucket)
+        if not kws or normalized is None:
+            continue
+        lines.append(f"- {bucket}: project leaves {', '.join(kws)}")
+        names.add(normalized)
+    if not lines:
+        return _DEFAULT_VOCAB_BLOCK, set(_DEFAULT_BUCKET_NAMES)
+    return "\n".join(lines), names
 
 
 def _build_category_context() -> str:
@@ -1144,48 +1302,61 @@ def _build_category_context() -> str:
     has no `[categories]` table — same vocabulary `init` advertises, so the
     two LLM paths never publish parallel bucket names (issue #62).
     """
-    # Local import to avoid a circular dependency at module load
-    # (`categorizer` doesn't import this module, but keeping the boundary
-    # explicit makes test monkeypatching cleaner).
-    from .categorizer import list_user_categories
-    cats = list_user_categories()
-    if not cats:
-        return _DEFAULT_VOCAB_BLOCK
-    lines = []
-    for bucket in sorted(cats):
-        kws = cats[bucket]
-        if not kws:
-            continue
-        lines.append(f"- {bucket}: project leaves {', '.join(kws)}")
-    return "\n".join(lines) if lines else _DEFAULT_VOCAB_BLOCK
+    return _build_category_vocabulary()[0]
 
 
-def _classify_cache_get_many(session_ids: list[str]) -> dict[str, str]:
+def _content_classification_fingerprint(category_context: str | None = None) -> str:
+    """Fingerprint prompt policy plus the user's effective category config."""
+    context = (
+        category_context
+        if category_context is not None
+        else _build_category_context()
+    )
+    return _cache_fingerprint(
+        "content-classification",
+        str(CONTENT_CLASSIFIER_POLICY_VERSION),
+        str(MAX_CONTENT_BUCKETS),
+        _CONTENT_CLASSIFY_PROMPT,
+        context,
+    )
+
+
+def _classify_cache_get_many(
+    session_ids: list[str],
+    input_fingerprint: str | None = None,
+) -> dict[str, str]:
     if not session_ids:
         return {}
+    fingerprint = input_fingerprint or _content_classification_fingerprint()
     conn = _connect()
     try:
         placeholders = ",".join("?" for _ in session_ids)
         rows = conn.execute(
             f"SELECT session_id, bucket FROM session_content_buckets "
-            f"WHERE session_id IN ({placeholders})",
-            session_ids,
+            f"WHERE session_id IN ({placeholders}) "
+            f"AND input_fingerprint = ?",
+            [*session_ids, fingerprint],
         ).fetchall()
         return {sid: bucket for sid, bucket in rows}
     finally:
         conn.close()
 
 
-def _classify_cache_upsert_many(items: dict[str, str]) -> None:
+def _classify_cache_upsert_many(
+    items: dict[str, str],
+    input_fingerprint: str | None = None,
+) -> None:
     if not items:
         return
+    fingerprint = input_fingerprint or _content_classification_fingerprint()
     conn = _connect()
     try:
         now = time.time()
         conn.executemany(
             """INSERT OR REPLACE INTO session_content_buckets
-               (session_id, bucket, created_at) VALUES (?, ?, ?)""",
-            [(sid, b, now) for sid, b in items.items()],
+               (session_id, bucket, created_at, input_fingerprint)
+               VALUES (?, ?, ?, ?)""",
+            [(sid, b, now, fingerprint) for sid, b in items.items()],
         )
         conn.commit()
     finally:
@@ -1207,12 +1378,45 @@ def _parse_classification_lines(text: str) -> dict[str, str]:
         except json.JSONDecodeError:
             continue
         sid = obj.get("session_id")
-        bucket = obj.get("bucket")
-        if isinstance(sid, str) and isinstance(bucket, str):
-            normalized = bucket.strip().lower()
-            if normalized:
-                out[sid] = normalized
+        bucket = _normalize_bucket_name(obj.get("bucket"))
+        if isinstance(sid, str) and bucket is not None:
+            out[sid] = bucket
     return out
+
+
+def _validated_chunk_buckets(
+    parsed: dict[str, str],
+    chunk_ids: list[str],
+    accepted_buckets: set[str],
+    bucket_limit: int,
+) -> dict[str, str]:
+    """Accept only requested rows and enforce the run-wide vocabulary cap."""
+    requested = set(chunk_ids)
+    new_bucket_counts: dict[str, int] = {}
+    for sid, bucket in parsed.items():
+        if sid in requested and bucket not in accepted_buckets:
+            new_bucket_counts[bucket] = new_bucket_counts.get(bucket, 0) + 1
+
+    fresh: dict[str, str] = {}
+    for sid in chunk_ids:
+        bucket = parsed.get(sid)
+        if bucket is None:
+            continue
+        if bucket not in accepted_buckets:
+            if new_bucket_counts.get(bucket, 0) < 2:
+                LOG.warning(
+                    "dropping one-off content bucket %r for %s", bucket, sid,
+                )
+                continue
+            if len(accepted_buckets) >= bucket_limit:
+                LOG.warning(
+                    "dropping content bucket %r for %s: vocabulary limit %d",
+                    bucket, sid, bucket_limit,
+                )
+                continue
+            accepted_buckets.add(bucket)
+        fresh[sid] = bucket
+    return fresh
 
 
 def classify_sessions_by_content(
@@ -1246,7 +1450,13 @@ def classify_sessions_by_content(
         return {}
 
     sids = [sid for sid, _, _ in items]
-    cached = _classify_cache_get_many(sids) if not force_refresh else {}
+    category_context, preferred_buckets = _build_category_vocabulary()
+    input_fingerprint = _content_classification_fingerprint(category_context)
+    cached = (
+        _classify_cache_get_many(sids, input_fingerprint)
+        if not force_refresh
+        else {}
+    )
 
     pending = [(sid, leaf, summ) for sid, leaf, summ in items if sid not in cached]
     if not pending or not claude_bin_available():
@@ -1254,10 +1464,12 @@ def classify_sessions_by_content(
 
     combined = dict(cached)
     total_chunks = (len(pending) + batch_size - 1) // batch_size
-    # Resolve user [categories] once for the whole pass — every chunk shares
-    # the same vocab block, and avoiding per-chunk file IO matters when a big
-    # window splits into 3+ batches.
-    category_context = _build_category_context()
+    # The preferred/configured names count toward the global cap even before
+    # the model uses them. Compatible cached values seed the carry-forward so
+    # a partial-cache run keeps the same vocabulary as its earlier sessions.
+    accepted_buckets = set(preferred_buckets) | set(cached.values())
+    used_buckets = set(cached.values())
+    bucket_limit = max(MAX_CONTENT_BUCKETS, len(accepted_buckets))
 
     for chunk_idx, chunk_start in enumerate(
         range(0, len(pending), batch_size), start=1,
@@ -1268,18 +1480,22 @@ def classify_sessions_by_content(
             for sid, leaf, summ in chunk
         )
         prompt = _CONTENT_CLASSIFY_PROMPT.format(
-            rows=rows, category_context=category_context,
+            rows=rows,
+            category_context=category_context,
+            already_used_buckets=(
+                ", ".join(sorted(used_buckets)) if used_buckets else "(none yet)"
+            ),
         )
         fresh: dict[str, str] = {}
         try:
             r = run_claude_p(prompt, timeout)
             if r.returncode == 0:
                 parsed = _parse_classification_lines(r.stdout)
-                # Only accept rows whose session id is in THIS chunk — guards
-                # against the model hallucinating ids or returning rows we
-                # never asked about.
-                chunk_ids = {sid for sid, _, _ in chunk}
-                fresh = {sid: b for sid, b in parsed.items() if sid in chunk_ids}
+                # Validate ids and vocabulary before anything reaches SQLite.
+                chunk_ids = [sid for sid, _, _ in chunk]
+                fresh = _validated_chunk_buckets(
+                    parsed, chunk_ids, accepted_buckets, bucket_limit,
+                )
             else:
                 LOG.warning(
                     "content-classify claude -p failed (chunk %d-%d): %s",
@@ -1291,8 +1507,9 @@ def classify_sessions_by_content(
 
         # Upsert + accumulate (no-op on empty fresh); always fire the
         # progress callback so a failed chunk still advances the counter.
-        _classify_cache_upsert_many(fresh)
+        _classify_cache_upsert_many(fresh, input_fingerprint)
         combined.update(fresh)
+        used_buckets.update(fresh.values())
         if on_chunk_complete is not None:
             on_chunk_complete(chunk_idx, total_chunks)
 

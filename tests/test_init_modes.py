@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -135,7 +136,7 @@ class TestRunSkipMode:
         from ccstory import categorizer
         cfg = tmp_home / ".ccstory" / "config.toml"
         assert not cfg.exists()
-        rc = run_skip_mode(console=Console(file=open("/dev/null", "w")))
+        rc = run_skip_mode(console=Console(file=StringIO()))
         assert rc == 0
         assert cfg.exists()
         # Template should contain the [categories] anchor even if empty
@@ -144,7 +145,7 @@ class TestRunSkipMode:
     def test_dry_run_skips_write(self, tmp_home: Path):
         cfg = tmp_home / ".ccstory" / "config.toml"
         assert not cfg.exists()
-        rc = run_skip_mode(dry_run=True, console=Console(file=open("/dev/null", "w")))
+        rc = run_skip_mode(dry_run=True, console=Console(file=StringIO()))
         assert rc == 0
         assert not cfg.exists()
 
@@ -156,12 +157,12 @@ class TestRunQuickAndDeepClaudeUnavailable:
 
     def test_quick_returns_1_without_claude(self, tmp_home: Path):
         with patch.object(init_categories, "claude_bin_available", return_value=False):
-            rc = run_quick_mode(console=Console(file=open("/dev/null", "w")))
+            rc = run_quick_mode(console=Console(file=StringIO()))
         assert rc == 1
 
     def test_deep_returns_1_without_claude(self, tmp_home: Path):
         with patch.object(init_categories, "claude_bin_available", return_value=False):
-            rc = run_deep_mode(console=Console(file=open("/dev/null", "w")))
+            rc = run_deep_mode(console=Console(file=StringIO()))
         assert rc == 1
 
 
@@ -177,7 +178,7 @@ class TestRunDeepClampsBadInputs:
              patch.object(init_categories, "collect_sessions", return_value=[]):
             rc = run_deep_mode(
                 days=0, max_n=200,
-                console=Console(file=open("/dev/null", "w")),
+                console=Console(file=StringIO()),
             )
         # Returns 0 (no sessions) — the important thing is no crash and no
         # silent "since = now" sampling. Clamp message would print to console.
@@ -188,7 +189,7 @@ class TestRunDeepClampsBadInputs:
              patch.object(init_categories, "collect_sessions", return_value=[]):
             rc = run_deep_mode(
                 days=7, max_n=0,
-                console=Console(file=open("/dev/null", "w")),
+                console=Console(file=StringIO()),
             )
         assert rc == 0
 
@@ -208,7 +209,7 @@ class TestPromptForMode:
     which triggered a yes/no instinct."""
 
     def _silent(self) -> Console:
-        return Console(file=open("/dev/null", "w"))
+        return Console(file=StringIO())
 
     def test_q_maps_to_quick(self):
         with patch.object(init_categories.Prompt, "ask", return_value="Q"):

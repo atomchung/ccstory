@@ -33,13 +33,19 @@ VALID_FLAVORS = ("plain", "obsidian")
 
 def _format_date_range(since: datetime, until: datetime) -> str:
     """Human-readable date range. Same year/month collapsed for compactness."""
+    def _month_day(value: datetime) -> str:
+        return f"{value.strftime('%b')} {value.day}"
+
+    def _full(value: datetime) -> str:
+        return f"{_month_day(value)}, {value.year}"
+
     if since.date() == until.date():
-        return since.strftime("%b %-d, %Y")
+        return _full(since)
     if since.year == until.year and since.month == until.month:
-        return f"{since.strftime('%b %-d')} – {until.strftime('%-d, %Y')}"
+        return f"{_month_day(since)} – {until.day}, {until.year}"
     if since.year == until.year:
-        return f"{since.strftime('%b %-d')} – {until.strftime('%b %-d, %Y')}"
-    return f"{since.strftime('%b %-d, %Y')} – {until.strftime('%b %-d, %Y')}"
+        return f"{_month_day(since)} – {_full(until)}"
+    return f"{_full(since)} – {_full(until)}"
 
 
 def _top_session_text(rollup: CategoryRollup, summaries: dict, max_chars: int = 70) -> str:

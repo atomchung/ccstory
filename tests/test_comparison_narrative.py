@@ -90,24 +90,21 @@ class TestSynthesizeComparison:
         assert result is None
 
     def test_cache_hit_skips_claude(self, tmp_home: Path):
-        # Prime the cache directly
-        from ccstory.session_summarizer import DB_PATH, _connect
-        _connect().close()  # ensure schema exists
-
         current = [("c1", "current")]
         previous = [("p1", "previous")]
-        sig = _comparison_signature(current, previous)
-        conn = sqlite3.connect(str(DB_PATH))
-        try:
-            conn.execute(
-                """INSERT INTO comparison_narratives
-                   (current_key, previous_key, signature, narrative, created_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                ("k_cur", "k_prev", sig, "cached prose", 1.0),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="cached prose", stderr="",
+        )
+        with patch("ccstory.session_summarizer.claude_bin_available",
+                   return_value=True), \
+             patch("ccstory.session_summarizer.run_claude_p",
+                   return_value=result):
+            assert synthesize_comparison(
+                current_key="k_cur",
+                previous_key="k_prev",
+                current_summaries=current,
+                previous_summaries=previous,
+            ) == "cached prose"
 
         # claude_bin_available should never be called when cache hits
         with patch("ccstory.session_summarizer.claude_bin_available",
@@ -120,6 +117,29 @@ class TestSynthesizeComparison:
             )
         assert result == "cached prose"
 
+    def test_prompt_change_invalidates_cache(self, tmp_home: Path):
+        current = [("c1", "current")]
+        previous = [("p1", "previous")]
+        generated = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="generated comparison", stderr="",
+        )
+        with patch("ccstory.session_summarizer.claude_bin_available",
+                   return_value=True), \
+             patch("ccstory.session_summarizer.run_claude_p",
+                   return_value=generated):
+            assert synthesize_comparison(
+                "cur", "prev", current, previous,
+            ) == "generated comparison"
+
+        from ccstory import session_summarizer as ss
+        with patch.object(ss, "_COMPARISON_PROMPT",
+                          ss._COMPARISON_PROMPT + "\nBe direct."), \
+             patch("ccstory.session_summarizer.claude_bin_available",
+                   return_value=False):
+            assert synthesize_comparison(
+                "cur", "prev", current, previous,
+            ) is None
+
     def test_cache_signature_change_triggers_regen(self, tmp_home: Path):
         # Prime cache with one signature
         from ccstory.session_summarizer import DB_PATH, _connect
@@ -128,7 +148,9 @@ class TestSynthesizeComparison:
         conn = sqlite3.connect(str(DB_PATH))
         try:
             conn.execute(
-                """INSERT INTO comparison_narratives VALUES (?, ?, ?, ?, ?)""",
+                """INSERT INTO comparison_narratives
+                   (current_key, previous_key, signature, narrative, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
                 ("k_cur", "k_prev", old_sig, "stale", 1.0),
             )
             conn.commit()
@@ -160,7 +182,9 @@ class TestSynthesizeComparison:
         conn = sqlite3.connect(str(DB_PATH))
         try:
             conn.execute(
-                """INSERT INTO comparison_narratives VALUES (?, ?, ?, ?, ?)""",
+                """INSERT INTO comparison_narratives
+                   (current_key, previous_key, signature, narrative, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
                 ("k_cur", "k_prev", stale_sig, "stale prose", 1.0),
             )
             conn.commit()

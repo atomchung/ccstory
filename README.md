@@ -250,8 +250,8 @@ ccstory week --narrative per-category   # 2-3 lines per bucket instead
 ccstory week --narrative both           # overall first, then per-bucket
 ```
 
-Each bucket costs one `claude -p` call, cached until that bucket's session
-set changes — rerunning the same window is free. A bucket whose synthesis
+Each bucket costs one `claude -p` call, cached until its exact input or prompt
+changes — rerunning the same window is normally free. A bucket whose synthesis
 fails (or that has no real summaries) is simply omitted; the report never
 blocks on it. In `--json` mode the same text lands in `buckets[].narrative`.
 
@@ -268,10 +268,10 @@ API charge.
 | `ccstory init --quick` | 1 (usually ~10s) | One-time config proposal |
 | `ccstory init --deep` | 1 per 80 sampled sessions (up to 3 with the default cap of 200) | Writes per-session classification cache |
 | `ccstory init --skip` | 0 | Uses local folder rules only |
-| Hybrid/content classification | 1 per 80 uncached sessions | Reused from `~/.ccstory/cache.db` |
-| Overall narrative | 0 or 1 on a cache miss | Reused while the period's session set is unchanged |
-| Per-category narrative | Up to 1 per eligible bucket on a cache miss | Reused while that bucket's session set is unchanged |
-| Previous-window narrative | 0 or 1 on a cache miss | Reused while the comparison inputs are unchanged |
+| Hybrid/content classification | 1 per 80 uncached or stale sessions | Reused until its prompt or category vocabulary changes |
+| Overall narrative | 0 or 1 on a cache miss | Reused while its rendered inputs and prompt are unchanged |
+| Per-category narrative | Up to 1 per eligible bucket on a cache miss | Reused while that bucket's inputs and prompt are unchanged |
+| Previous-window narrative | 0 or 1 on a cache miss | Reused while its comparison inputs and prompt are unchanged |
 | `--llm-narrative` | 1 per uncached or stale session | Reused per session; `--refresh` deliberately regenerates |
 
 The default recap uses hybrid classification, an overall narrative, and a
@@ -285,8 +285,10 @@ Deep/content classification is batched; per-session `--llm-narrative` work is
 linear and the CLI budgets roughly 40 seconds per cold session, showing an ETA
 before it starts. Aggregate call latency varies with Claude CLI startup and
 input size. A same-window rerun is usually cache-only, but new sessions,
-changed period membership, `--refresh`, or a newer prompt version can trigger
-fresh calls.
+changed inputs/config, `--refresh`, or a newer prompt version can trigger fresh
+calls. Content classification carries accepted bucket names into later
+80-session batches and enforces one run-wide vocabulary cap, preventing a
+large first run from fragmenting one theme into several near-duplicate labels.
 
 If `claude` is absent from `PATH`, LLM classification and synthesis degrade
 gracefully: classification uses folder/fallback rules, per-session prose uses

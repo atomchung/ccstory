@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching GitHub Release (#51).
 - Human-readable recaps and trends now warn when their pricing snapshot is more
   than 90 days older than the report window (#91).
+- The shared SQLite cache now uses ordered, transactional schema migrations so
+  upgrades preserve existing narratives and classifications (#101).
 
 ### Changed
 
@@ -26,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The pytest suite now isolates every test from the developer's real
   `~/.ccstory`, `~/.claude`, and locale settings (#100).
+- Cached aggregate, comparison, and content-classification LLM outputs now
+  regenerate when their prompt or relevant category config changes (#65,
+  #102).
+- Content classification carries accepted bucket names across 80-session
+  batches and enforces one run-wide vocabulary limit before caching (#63).
+- Date labels and subagent-path exclusion now behave consistently on Windows,
+  macOS, and Linux; CI includes Windows coverage (#103).
 
 ## [0.5.0] - 2026-07-13
 
