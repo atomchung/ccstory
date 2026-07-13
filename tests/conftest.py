@@ -1,29 +1,46 @@
 """Shared pytest fixtures.
 
-Every module in ccstory captures `Path.home() / ...` at import time, so test
-isolation requires patching the resulting constants on each module. The
-`tmp_home` fixture wires those up under a `tmp_path`-derived directory tree.
+Every test runs against a fresh fake home.  Most ccstory modules capture
+``Path.home() / ...`` at import time, so changing ``$HOME`` alone is not
+enough: the autouse ``tmp_home`` fixture also redirects those captured paths
+and the aliases imported by the CLI/init modules.
 """
 
 from __future__ import annotations
 
 import json
+import locale
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from ccstory import artifacts, categorizer, session_summarizer, time_tracking, token_usage
+from ccstory import (
+    artifacts,
+    categorizer,
+    cli,
+    init_categories,
+    session_summarizer,
+    time_tracking,
+    token_usage,
+)
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def tmp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Isolated fake home with redirected paths on every ccstory module."""
+    """Isolate every test from the developer's real ccstory/Claude state."""
     home = tmp_path / "home"
     projects = home / ".claude" / "projects"
     projects.mkdir(parents=True)
     ccstory_dir = home / ".ccstory"
     ccstory_dir.mkdir()
+    reports_dir = ccstory_dir / "reports"
+
+    # Cover runtime Path.home()/expanduser calls as well as subprocesses
+    # launched by tests.  Constants already captured at module import are
+    # redirected explicitly below.
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
 
     monkeypatch.setattr(time_tracking, "CLAUDE_PROJECTS", projects)
     monkeypatch.setattr(token_usage, "PROJECTS_DIR", projects)
@@ -49,15 +66,23 @@ def tmp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "CCSTORY_CONFIG_PATH",
         ccstory_dir / "config.toml",
     )
-    # Stub locale detection + scrub the env var so language_directive() lands
-    # on the English fallback by default. Tests that exercise the new lang
-    # layers re-monkeypatch these explicitly.
-    monkeypatch.setattr(session_summarizer, "_detect_system_locale", lambda: None)
+    # Make the default language deterministic without replacing ccstory's
+    # locale detector itself; detector-focused tests can still monkeypatch
+    # locale.getlocale() and exercise the real implementation.
+    monkeypatch.setattr(locale, "getlocale", lambda: ("C", "UTF-8"))
     monkeypatch.delenv(session_summarizer.CCSTORY_LANG_ENV, raising=False)
     # language_directive() is @lru_cache'd; flush so per-test CLAUDE.md edits take effect.
     session_summarizer.language_directive.cache_clear()
     monkeypatch.setattr(categorizer, "CONFIG_PATH", ccstory_dir / "config.toml")
     monkeypatch.setattr(artifacts, "DB_PATH", ccstory_dir / "cache.db")
+
+    # cli.py and init_categories.py import path constants by value, so
+    # patching their source modules does not update these aliases.
+    monkeypatch.setattr(cli, "CLAUDE_PROJECTS", projects)
+    monkeypatch.setattr(cli, "SUMMARIZER_PROJECTS_DIR", projects)
+    monkeypatch.setattr(cli, "CONFIG_PATH", ccstory_dir / "config.toml")
+    monkeypatch.setattr(cli, "REPORTS_DIR", reports_dir)
+    monkeypatch.setattr(init_categories, "CONFIG_PATH", ccstory_dir / "config.toml")
     return home
 
 

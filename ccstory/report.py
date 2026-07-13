@@ -19,7 +19,12 @@ from .artifacts import ArtifactsReport
 from .categorizer import color_for, load_settings, normalize_project_name
 from .session_summarizer import SessionSummary
 from .time_tracking import CategoryRollup, SessionStat
-from .token_usage import UsageReport, fmt_tokens, get_snapshot_date
+from .token_usage import (
+    UsageReport,
+    fmt_tokens,
+    get_snapshot_date,
+    pricing_snapshot_warning,
+)
 from .trends import PeriodComparison, PeriodPoint, sparkline, trend_by_category
 
 # Supported markdown flavors for render_report().
@@ -347,6 +352,13 @@ def render_report(
         "[ccusage](https://github.com/ryoppippi/ccusage). ccstory tells the story; "
         "ccusage tells the bill."
     )
+    lines.append(f"> Pricing snapshot: `{get_snapshot_date()}`.")
+    pricing_warning = pricing_snapshot_warning(until)
+    if pricing_warning:
+        lines.append(
+            f"> ⚠️ {pricing_warning} "
+            "[Check current pricing](https://platform.claude.com/docs/en/pricing)."
+        )
     lines.append("")
 
     return "\n".join(lines)
@@ -658,6 +670,10 @@ def render_terminal_card(
         footer.append(report_path, style="dim underline")
         parts.append(footer)
 
+    pricing_warning = pricing_snapshot_warning(until)
+    if pricing_warning:
+        parts.append(Text(f"⚠️ {pricing_warning}", style="yellow"))
+
     title_range = _format_date_range(since, until)
     return Panel(
         Group(*parts),
@@ -858,7 +874,7 @@ def render_trend_card(points: list[PeriodPoint], period: str) -> Panel:
             _delta_text(burn_series[-1], burn_series[-2] if len(burn_series) > 1 else 0),
         )
 
-    body = Group(
+    body_parts: list = [
         Text("Hours by bucket", style="bold underline"),
         table,
         Text(""),
@@ -866,7 +882,14 @@ def render_trend_card(points: list[PeriodPoint], period: str) -> Panel:
         extra,
         Text(""),
         axis_hint,
-    )
+    ]
+    pricing_warning = pricing_snapshot_warning(points[-1].until)
+    if pricing_warning:
+        body_parts.extend((
+            Text(""),
+            Text(f"⚠️ {pricing_warning}", style="yellow"),
+        ))
+    body = Group(*body_parts)
     return Panel(
         body,
         title=f"[bold]Claude Code Trend[/bold] "
@@ -914,6 +937,14 @@ def render_trend_markdown(points: list[PeriodPoint], period: str) -> str:
         lines.append(
             f"| `{_md_cell(p.label)}` | {p.total_h:.1f} | "
             f"{p.output_tokens/1_000_000:.2f} | ${p.cost_usd:,.0f} |"
+        )
+    lines.append("")
+    lines.append(f"> Pricing snapshot: `{get_snapshot_date()}`.")
+    pricing_warning = pricing_snapshot_warning(points[-1].until)
+    if pricing_warning:
+        lines.append(
+            f"> ⚠️ {pricing_warning} "
+            "[Check current pricing](https://platform.claude.com/docs/en/pricing)."
         )
     lines.append("")
     return "\n".join(lines)

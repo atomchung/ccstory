@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -572,14 +573,38 @@ def summarize_via_claude_p(excerpt: str, timeout: int = 60) -> str | None:
 
 
 def _fallback_narrative(excerpt: str) -> str:
-    """First non-empty user message line as a poor-man's narrative.
+    """Zero-cost first → last user-message narrative.
 
-    Format of excerpt is `[USER 1]\n<text>\n\n[USER 2]\n...`, so [1] after
-    splitting on newline is the first user message body.
+    A single-message session keeps the old 120-character fallback.  With
+    multiple messages, showing both endpoints gives the reader a cheap hint
+    of the session's arc without spending a ``claude -p`` call (#70).
+    ``_extract_excerpt`` inserts bracketed role markers (plus an optional
+    ``...`` sentinel), so parse those markers rather than splitting on blank
+    lines that may legitimately occur inside a message.
     """
-    parts = excerpt.split("\n", 2)
-    line = parts[1] if len(parts) > 1 else excerpt
-    return line[:120]
+    if not excerpt:
+        return ""
+
+    marker = re.compile(
+        r"(?m)^(?:\[(USER(?: \d+| LATE)|ASSISTANT END)\]|\.\.\.)\n?"
+    )
+    matches = list(marker.finditer(excerpt))
+    user_msgs: list[str] = []
+    for idx, match in enumerate(matches):
+        role = match.group(1)
+        if not role or not role.startswith("USER"):
+            continue
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(excerpt)
+        text = " ".join(excerpt[match.end():end].split())
+        if text:
+            user_msgs.append(text)
+
+    # Be defensive for direct callers that pass an unmarked string.
+    if not user_msgs:
+        return " ".join(excerpt.split())[:120]
+    if len(user_msgs) == 1:
+        return user_msgs[0][:120]
+    return f"{user_msgs[0][:60]} → {user_msgs[-1][:60]}"
 
 
 def _needs_llm(existing: SessionSummary | None, force: bool = False) -> bool:
@@ -612,7 +637,7 @@ def summarize_session(
     """Idempotent: returns the cached entry unless it needs (re)generation.
 
     Default (`use_llm=False`) never calls the LLM — it returns any cached
-    entry untouched, else writes an instant first-user-msg fallback
+    entry untouched, else writes an instant first/last-user-message fallback
     (`source=fallback`).
 
     With `use_llm=True` the cache becomes *upgradable*: a `fallback` row is
@@ -1284,7 +1309,7 @@ def backfill_for_sessions(
 
     `sessions` is a list of objects with `.session_id` and `.project` attrs.
     `use_llm=False` (default) only summarizes never-seen sessions with the
-    instant first-user-msg fallback. `use_llm=True` additionally upgrades
+    instant first/last-user-message fallback. `use_llm=True` additionally upgrades
     `fallback` rows to `auto` and regenerates stale `auto` rows (older
     prompt_version, or every in-window `auto` when `force=True`).
     Returns {"summarized": N, "fallback": F, "skipped": M, "already": K,

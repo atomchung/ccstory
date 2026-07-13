@@ -26,6 +26,17 @@ That's it. `init` is a one-time auto-categorize step that scans your
 recent sessions; `ccstory week` produces the recap. Full report saves to
 `~/.ccstory/reports/recap-*.md`.
 
+The default **What shipped** section may query GitHub and PyPI metadata.
+For a first run with no network access at all, use:
+
+```bash
+ccstory init --skip
+ccstory week --minimal --classify folder --no-artifacts
+```
+
+`--no-artifacts` alone disables ccstory's GitHub/PyPI lookups while keeping
+the normal narrative flow, which may invoke your installed Claude Code CLI.
+
 ## Demo
 
 ```
@@ -50,7 +61,7 @@ recent sessions; `ccstory week` produces the recap. Full report saves to
 
 The markdown report adds a **2–3 sentence synthesis per bucket** plus
 per-session one-liners. Run with `--llm-narrative` to upgrade per-session
-lines from the instant first-user-msg fallback to claude-polished prose:
+lines from the instant first/last-message fallback to claude-polished prose:
 
 > **Re-running upgrades retroactively.** If you viewed a window in the
 > default (instant) mode first, re-running it with `--llm-narrative` upgrades
@@ -209,17 +220,22 @@ repos you actually worked in during the window:
 - **Repos are inferred from session working directories** — no config needed.
   Worktrees collapse into their main repository.
 - **Commits** come from local git (works offline, counts all branches).
-  **PRs merged / releases / stars** need the `gh` CLI; without it those
-  columns degrade to `–`. **PyPI downloads** come from pypistats.org for
-  packages auto-detected in active repos' `pyproject.toml`.
+  **PRs merged / releases / stars** need the `gh` CLI; the lookup sends the
+  GitHub repo slug and requests recent merged-PR/release timestamps plus the
+  current star count. ccstory applies the report window locally. Without `gh`,
+  those columns degrade to `–`. **PyPI downloads** send the package name to
+  pypistats.org for packages auto-detected in active repos' `pyproject.toml`.
+- The artifacts collector never sends conversation text, prompts, summaries,
+  commit contents, or local paths. It uses only repository/package metadata.
 - **Stars delta** compares against the last snapshot taken before the window,
   so it becomes meaningful from your second run onward.
 
-Skip per run with `--no-artifacts`, or persistently via config:
+Skip all GitHub/PyPI metadata calls per run with `--no-artifacts`, or
+persistently via config:
 
 ```toml
 [artifacts]
-enabled = true
+enabled = false            # no GitHub/PyPI metadata lookups
 exclude = ["playground"]   # substring match on repo path
 pypi = ["my-package"]      # extra packages beyond auto-detection
 ```
@@ -238,6 +254,44 @@ Each bucket costs one `claude -p` call, cached until that bucket's session
 set changes — rerunning the same window is free. A bucket whose synthesis
 fails (or that has no real summaries) is simply omitted; the report never
 blocks on it. In `--json` mode the same text lands in `buckets[].narrative`.
+
+## Claude CLI calls, latency, and quota
+
+There is no single fixed call total: it depends on init mode, uncached
+sessions, narrative depth, and which cache entries already exist. Every
+`claude -p` call runs through your installed Claude Code CLI and uses that
+CLI's signed-in plan/quota; ccstory does not use an API key or add a separate
+API charge.
+
+| Operation | Fresh `claude -p` calls | Cache behavior |
+|---|---:|---|
+| `ccstory init --quick` | 1 (usually ~10s) | One-time config proposal |
+| `ccstory init --deep` | 1 per 80 sampled sessions (up to 3 with the default cap of 200) | Writes per-session classification cache |
+| `ccstory init --skip` | 0 | Uses local folder rules only |
+| Hybrid/content classification | 1 per 80 uncached sessions | Reused from `~/.ccstory/cache.db` |
+| Overall narrative | 0 or 1 on a cache miss | Reused while the period's session set is unchanged |
+| Per-category narrative | Up to 1 per eligible bucket on a cache miss | Reused while that bucket's session set is unchanged |
+| Previous-window narrative | 0 or 1 on a cache miss | Reused while the comparison inputs are unchanged |
+| `--llm-narrative` | 1 per uncached or stale session | Reused per session; `--refresh` deliberately regenerates |
+
+The default recap uses hybrid classification, an overall narrative, and a
+previous-window narrative; per-session LLM prose remains opt-in. Use
+`--narrative per-category|both` to trade the overall call for, or add, bucket
+calls. `--no-aggregate`, `--no-compare-narrative`, and `--classify folder`
+remove those call types; `--minimal --classify folder` makes the recap itself
+use zero Claude calls.
+
+Deep/content classification is batched; per-session `--llm-narrative` work is
+linear and the CLI budgets roughly 40 seconds per cold session, showing an ETA
+before it starts. Aggregate call latency varies with Claude CLI startup and
+input size. A same-window rerun is usually cache-only, but new sessions,
+changed period membership, `--refresh`, or a newer prompt version can trigger
+fresh calls.
+
+If `claude` is absent from `PATH`, LLM classification and synthesis degrade
+gracefully: classification uses folder/fallback rules, per-session prose uses
+the local first/last-message fallback, and Claude quota usage is zero. This does
+not disable What-shipped metadata calls; add `--no-artifacts` for that.
 
 ## JSON output
 
@@ -310,9 +364,10 @@ so any name Claude can parse (`"Traditional Chinese"`, `"日本語"`,
 
 ## Custom pricing
 
-Default API list prices snapshot to `2026-07`. The report footer always
-shows the snapshot date so a stale price table can't silently distort cost
-over time. Override per-model in `~/.ccstory/config.toml`:
+Default API list prices snapshot to `2026-07`. Every human-readable report
+shows the snapshot date and warns once it is over 90 days old relative to the
+report window end. This is a date-only reminder, not a live pricing lookup.
+Override per-model in `~/.ccstory/config.toml`:
 
 ```toml
 [prices]
@@ -339,7 +394,7 @@ brand-new model (`[prices.custom]`) with only some keys defaults the rest to
 | Per-session narrative | — | ✅ via local `claude -p` |
 | Per-bucket synthesis | — | ✅ |
 | Cross-period narrative | — | ✅ |
-| Local-only / no telemetry | ✅ | ✅ |
+| Conversation logs stay local / no telemetry | ✅ | ✅ |
 
 Pair them — `ccusage monthly` for the spend, `ccstory month` for the
 breakdown:
@@ -349,18 +404,28 @@ ccusage monthly
 ccstory month
 ```
 
-## Privacy
+## Privacy and network behavior
 
-Everything runs locally. ccstory never sends your conversation data
-anywhere.
+ccstory never sends your conversation data to its own service or to the
+What-shipped metadata providers. There is no ccstory telemetry or account.
 
 - **Data source**: `~/.claude/projects/**/*.jsonl` — Claude Code's own logs.
-- **Narratives**: subprocess-call your *local* `claude -p` (uses your own
-  session / quota, no API key needed, no cost to ccstory).
+- **Narratives and classification**: subprocess-call your locally installed
+  `claude -p`. The Claude CLI contacts Anthropic using your signed-in session
+  and plan quota; ccstory does not use your API key or operate a proxy.
+- **What shipped**: local git supplies commit counts. By default, `gh` may send
+  a repo slug and request recent PR/release timestamps plus the current star
+  count from GitHub; ccstory filters timestamps to the report window locally.
+  The pypistats request sends a package name to pypistats.org. No conversation
+  text, prompt, summary, local path, or commit contents are included.
 - **Cache**: `~/.ccstory/cache.db` (sqlite, per-session summaries).
 - **Reports**: `~/.ccstory/reports/recap-*.md`.
 
-No telemetry, no network calls, no upload buttons. Verify in
+Disable GitHub/PyPI metadata calls with `--no-artifacts` or persistent
+`[artifacts] enabled = false`. For a fully no-network report, also avoid
+Claude CLI calls with `--minimal --classify folder` (and initialize with
+`ccstory init --skip`). Relevant implementations are
+[ccstory/artifacts.py](ccstory/artifacts.py) and
 [ccstory/session_summarizer.py](ccstory/session_summarizer.py).
 
 ## Requirements
@@ -369,7 +434,7 @@ No telemetry, no network calls, no upload buttons. Verify in
   (`brew install pipx` on macOS, [other platforms](https://pipx.pypa.io/stable/installation/)).
 - **Claude Code CLI** on `PATH` — required for `--llm-narrative`, content
   classification, and the cross-period synthesis. Without it, narratives
-  fall back to the first user message and `--classify` falls back to
+  fall back to first/last user-message excerpts and `--classify` falls back to
   folder rules.
 
 ## Implementation notes
@@ -388,8 +453,8 @@ No telemetry, no network calls, no upload buttons. Verify in
   which inflates with turn count and system prompt size and isn't a stable
   signal of work done. Output tokens stay comparable month over month.
 - **Pricing**: prices are list prices snapshotted by date (default
-  `2026-07`); the snapshot date renders in every report footer so stale
-  numbers can't sneak past unnoticed.
+  `2026-07`); every human-readable report shows the snapshot date and warns
+  when it is over 90 days old relative to that report's window end.
 
 ## Roadmap
 

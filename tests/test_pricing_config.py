@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from ccstory import token_usage
+from ccstory.report import render_report, render_trend_markdown
+from ccstory.trends import PeriodPoint
 from ccstory.token_usage import (
     DEFAULT_PRICES,
     PRICES_SNAPSHOT_DATE,
@@ -17,6 +19,8 @@ from ccstory.token_usage import (
     collect_usage,
     get_snapshot_date,
     load_prices_config,
+    pricing_snapshot_age_days,
+    pricing_snapshot_warning,
 )
 
 from tests.conftest import _ts, make_assistant_msg, make_user_msg
@@ -38,6 +42,64 @@ class TestDefaults:
 
     def test_default_opus_price_unchanged(self):
         assert _price_for("claude-opus-4-7")["inp"] == 5.0
+
+
+class TestSnapshotStaleness:
+    def test_month_snapshot_uses_first_day(self):
+        assert pricing_snapshot_age_days("2026-07", date(2026, 9, 29)) == 90
+
+    def test_warns_only_after_90_days(self):
+        assert pricing_snapshot_warning(date(2026, 9, 29), "2026-07") is None
+        warning = pricing_snapshot_warning(date(2026, 9, 30), "2026-07")
+        assert warning is not None
+        assert "2026-07" in warning
+        assert "91 days old" in warning
+
+    def test_exact_snapshot_date_and_datetime_supported(self):
+        assert pricing_snapshot_age_days(
+            "2026-07-15", datetime(2026, 10, 14, tzinfo=timezone.utc),
+        ) == 91
+
+    def test_future_or_invalid_snapshot_does_not_warn(self):
+        assert pricing_snapshot_warning(date(2026, 7, 1), "2026-08") is None
+        assert pricing_snapshot_warning(date(2026, 10, 1), "not-a-date") is None
+
+    def test_recap_markdown_surfaces_warning(self):
+        apply_prices(DEFAULT_PRICES, snapshot_date="2026-07")
+        since = datetime(2026, 9, 24, tzinfo=timezone.utc)
+        until = datetime(2026, 10, 1, tzinfo=timezone.utc)
+        usage = token_usage.UsageReport(since=since, until=until)
+
+        report = render_report(
+            label="2026-W39",
+            since=since,
+            until=until,
+            sessions=[],
+            rollups=[],
+            usage=usage,
+            summaries={},
+        )
+
+        assert "> Pricing snapshot: `2026-07`." in report
+        assert "⚠️ Pricing snapshot 2026-07 may be stale" in report
+        assert "platform.claude.com" in report
+
+    def test_trend_markdown_uses_latest_window_end(self):
+        apply_prices(DEFAULT_PRICES, snapshot_date="2026-07")
+        points = [PeriodPoint(
+            label="2026-W39",
+            since=datetime(2026, 9, 24, tzinfo=timezone.utc),
+            until=datetime(2026, 10, 1, tzinfo=timezone.utc),
+            rollups=[],
+            total_h=0.0,
+            output_tokens=0,
+            cost_usd=0.0,
+        )]
+
+        report = render_trend_markdown(points, "week")
+
+        assert "> Pricing snapshot: `2026-07`." in report
+        assert "⚠️ Pricing snapshot 2026-07 may be stale" in report
 
 
 class TestLoadPricesConfig:

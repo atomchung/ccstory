@@ -132,14 +132,39 @@ class TestExtractExcerpt:
 
 
 class TestFallbackNarrative:
-    def test_extracts_first_user_body(self):
+    def test_combines_first_and_last_user_body(self):
         excerpt = "[USER 1]\nRefactor the auth flow\n\n[USER 2]\nMore stuff"
-        assert _fallback_narrative(excerpt) == "Refactor the auth flow"
+        assert _fallback_narrative(excerpt) == "Refactor the auth flow → More stuff"
 
-    def test_caps_at_120_chars(self):
+    def test_single_message_caps_at_120_chars(self):
         long_text = "x" * 200
         excerpt = f"[USER 1]\n{long_text}"
         assert len(_fallback_narrative(excerpt)) == 120
+
+    def test_multi_message_uses_excerpt_endpoints_and_caps_each(self):
+        first = "first " * 20
+        last = "last " * 20
+        excerpt = (
+            f"[USER 1]\n{first}\n\n"
+            "[USER 2]\nmiddle one\n\n"
+            "[USER 3]\nmiddle two\n\n"
+            "...\n\n"
+            f"[USER LATE]\n{last}\n\n"
+            "[ASSISTANT END]\ndone"
+        )
+        result = _fallback_narrative(excerpt)
+        start, end = result.split(" → ")
+        assert start == first.strip()[:60]
+        assert end == last.strip()[:60]
+
+    def test_collapses_multiline_user_messages(self):
+        excerpt = (
+            "[USER 1]\nBuild the CLI\nwith JSON output\n\n"
+            "[USER LATE]\nShip it\nafter tests"
+        )
+        assert _fallback_narrative(excerpt) == (
+            "Build the CLI with JSON output → Ship it after tests"
+        )
 
     def test_empty_input(self):
         assert _fallback_narrative("") == ""
