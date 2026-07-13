@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-14
+
 ### Added
 
 - A tag-driven release workflow now validates, builds, and publishes the wheel
@@ -26,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `claude -p` calls that return silently empty now retry once without
+  `--no-session-persistence`, recovering narratives that would otherwise be
+  dropped (#99).
 - The pytest suite now isolates every test from the developer's real
   `~/.ccstory`, `~/.claude`, and locale settings (#100).
 - Cached aggregate, comparison, and content-classification LLM outputs now
