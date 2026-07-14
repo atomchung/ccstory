@@ -898,17 +898,20 @@ _CATEGORY_PROMPT = """{language_directive}
 
 Below are one-line summaries of every Claude Code session in the "{category}" category for one time window ({count} sessions).
 
-Write 2-3 short lines (max 60 words total) synthesizing what the user did in THIS category over the period — the main thread first, then secondary work or an outcome worth flagging.
+Write a short synthesis of what the user did in THIS category over the period, in two parts:
+1) ONE header line (max 20 words): the main thread, phrased as a narrative hook — not a flat category label.
+2) Then 1-3 bullet points (each line starts with "- ", max 20 words each): concrete outcomes or decisions, in order of importance.
 
 Style:
-- Prose only — no bullets, no headers, no lists.
 - Concrete nouns (tickers, file names, tools) beat generic verbs.
 - Synthesize; do NOT enumerate every session.
+- No markdown bold, no fences, no quotes on the header line.
+- One blank line between the header and the bullets; no blank lines between bullets.
 
 Sessions:
 {bullets}
 
-Output the 2-3 lines only — no quotes, no prefix, no fences."""
+Output the header line + bullets only — no preamble, no prefix, no fences."""
 
 
 def synthesize_category_for_period(
@@ -919,7 +922,7 @@ def synthesize_category_for_period(
     force_refresh: bool = False,
     timeout: int = 90,
 ) -> str | None:
-    """Synthesize a 2-3 line narrative for ONE category in a period (#57).
+    """Synthesize a header + 1-3 bullets narrative for ONE category in a period (#57).
 
     Cache key: (period_key, category) in the same period_aggregates table
     the overall narrative uses — OVERALL_KEY ("__overall__") is reserved,
