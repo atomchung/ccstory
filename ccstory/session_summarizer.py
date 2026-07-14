@@ -922,7 +922,7 @@ def synthesize_category_for_period(
     force_refresh: bool = False,
     timeout: int = 90,
 ) -> str | None:
-    """Synthesize a 2-3 line narrative for ONE category in a period (#57).
+    """Synthesize a header + 1-3 bullets narrative for ONE category in a period (#57).
 
     Cache key: (period_key, category) in the same period_aggregates table
     the overall narrative uses — OVERALL_KEY ("__overall__") is reserved,
