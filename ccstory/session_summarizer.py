@@ -900,7 +900,7 @@ Below are one-line summaries of every Claude Code session in the "{category}" ca
 
 Write a short synthesis of what the user did in THIS category over the period, in two parts:
 1) ONE header line (max 20 words): the main thread, phrased as a narrative hook — not a flat category label.
-2) Then 1-3 bullet points (each line starts with "- ", max 20 words each): concrete outcomes or decisions, in order of importance.
+2) Then 2-4 bullet points (each line starts with "- ", max 20 words each): concrete outcomes or decisions, in order of importance. Include incidents and security issues even when they are not the dominant theme.
 
 Style:
 - Concrete nouns (tickers, file names, tools) beat generic verbs.
@@ -922,7 +922,7 @@ def synthesize_category_for_period(
     force_refresh: bool = False,
     timeout: int = 90,
 ) -> str | None:
-    """Synthesize a header + 1-3 bullets narrative for ONE category in a period (#57).
+    """Synthesize a header + 2-4 bullets narrative for ONE category in a period (#57).
 
     Cache key: (period_key, category) in the same period_aggregates table
     the overall narrative uses — OVERALL_KEY ("__overall__") is reserved,
