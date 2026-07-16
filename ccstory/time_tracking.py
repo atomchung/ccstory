@@ -178,6 +178,8 @@ def collect_sessions(
 ) -> list[SessionStat]:
     """All sessions overlapping [since, until). until=None means now.
 
+    Integration API (semi-stable, #110) — see README "Library usage".
+
     `since` and `until` may be tz-aware or naive. Naive values are treated
     as UTC so the comparison against tz-aware jsonl timestamps remains
     well-defined. Callers that care about local-midnight boundaries (e.g.
@@ -250,7 +252,10 @@ class CategoryRollup:
 def rollup_by_category(
     stats: list[SessionStat], dedup_to_wall_clock: bool = True
 ) -> list[CategoryRollup]:
-    """Aggregate by category, optionally scaled to deduplicated wall clock."""
+    """Aggregate by category, optionally scaled to deduplicated wall clock.
+
+    Integration API (semi-stable, #110) — see README "Library usage".
+    """
     buckets: dict[str, list[SessionStat]] = defaultdict(list)
     for s in stats:
         buckets[s.category].append(s)
