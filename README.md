@@ -465,21 +465,30 @@ ccstory is primarily a CLI, but a small set of functions is maintained as a
 scripts, and (eventually) the MCP server (#35):
 
 ```python
+from ccstory.recap import build_recap
 from ccstory.time_tracking import collect_sessions, rollup_by_category
 from ccstory.categorizer import classify, load_rules
 
+result   = build_recap("week")                   # one call = full recap
 sessions = collect_sessions(since, until)        # any window, tz-aware
 rollups  = rollup_by_category(sessions)          # per-bucket hours/share
 bucket   = classify(project_dir)                 # folder-rule bucketing
 rules    = load_rules()                          # parsed ~/.ccstory/config.toml
 ```
 
+`build_recap()` runs the same pipeline as the CLI (the CLI is a thin shell
+over it) and returns a `RecapResult`: rich objects (`.sessions`,
+`.rollups`, `.usage`, narratives, comparison) plus `.markdown`,
+`.report_path`, and `.to_json()` — the `schema_version: 1` envelope, same
+shape as `--json` stdout. Keyword args mirror the CLI flags one-to-one
+(`llm_narrative=`, `narrative=`, `classify=`, …); pass a Rich `Console` via
+`console=` for progress output, or nothing for silence. An empty window
+raises `RecapUnavailable` instead of exiting the process.
+
 Semi-stable means: signatures may still change with minor versions, but
 renames and behavior changes are called out in the changelog instead of
 happening silently. Everything else in the package is internal. The JSON
 envelope (`--json`, `schema_version: 1`) is the other supported contract.
-
-A higher-level `build_recap()` one-call entry point is planned (#110).
 
 ## Roadmap
 

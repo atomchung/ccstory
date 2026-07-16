@@ -20,6 +20,7 @@ from ccstory import (
     categorizer,
     cli,
     init_categories,
+    recap,
     session_summarizer,
     time_tracking,
     token_usage,
@@ -76,10 +77,13 @@ def tmp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(categorizer, "CONFIG_PATH", ccstory_dir / "config.toml")
     monkeypatch.setattr(artifacts, "DB_PATH", ccstory_dir / "cache.db")
 
-    # cli.py and init_categories.py import path constants by value, so
-    # patching their source modules does not update these aliases.
+    # recap.py / cli.py / init_categories.py import path constants by value,
+    # so patching their source modules does not update these aliases.
+    monkeypatch.setattr(recap, "CLAUDE_PROJECTS", projects)
+    monkeypatch.setattr(recap, "SUMMARIZER_PROJECTS_DIR", projects)
+    monkeypatch.setattr(recap, "CONFIG_PATH", ccstory_dir / "config.toml")
+    monkeypatch.setattr(recap, "REPORTS_DIR", reports_dir)
     monkeypatch.setattr(cli, "CLAUDE_PROJECTS", projects)
-    monkeypatch.setattr(cli, "SUMMARIZER_PROJECTS_DIR", projects)
     monkeypatch.setattr(cli, "CONFIG_PATH", ccstory_dir / "config.toml")
     monkeypatch.setattr(cli, "REPORTS_DIR", reports_dir)
     monkeypatch.setattr(init_categories, "CONFIG_PATH", ccstory_dir / "config.toml")
