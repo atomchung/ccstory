@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `ccstory.recap.build_recap()` — the one-call library entry point for the
+  full recap pipeline (#110). Returns a `RecapResult` with the rich objects,
+  the rendered markdown, the report path, and a `.to_json()` envelope
+  matching `--json` stdout. The CLI's default flow is now a thin shell over
+  it, so programmatic consumers and the CLI stay behaviorally identical by
+  construction. Empty windows raise `RecapUnavailable` instead of exiting.
+
+### Changed
+
+- The recap orchestration moved from `ccstory/cli.py` into
+  `ccstory/recap.py` (`parse_window`, summary backfill, bucket resolution,
+  narrative synthesis, comparison, artifacts, render). CLI flags and
+  behavior are unchanged.
+
 ## [0.5.1] - 2026-07-14
 
 ### Added

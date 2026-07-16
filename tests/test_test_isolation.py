@@ -7,6 +7,7 @@ from ccstory import (
     categorizer,
     cli,
     init_categories,
+    recap,
     session_summarizer,
     time_tracking,
     token_usage,
@@ -34,8 +35,11 @@ def test_autouse_fake_home_redirects_all_home_bound_paths():
     assert artifacts.DB_PATH == cache
 
     # These modules import the constants by value and need their own patches.
+    assert recap.CLAUDE_PROJECTS == projects
+    assert recap.SUMMARIZER_PROJECTS_DIR == projects
+    assert recap.CONFIG_PATH == config
+    assert recap.REPORTS_DIR == ccstory_dir / "reports"
     assert cli.CLAUDE_PROJECTS == projects
-    assert cli.SUMMARIZER_PROJECTS_DIR == projects
     assert cli.CONFIG_PATH == config
     assert cli.REPORTS_DIR == ccstory_dir / "reports"
     assert init_categories.CONFIG_PATH == config
