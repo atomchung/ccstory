@@ -458,6 +458,29 @@ Claude CLI calls with `--minimal --classify folder` (and initialize with
   `2026-07`); every human-readable report shows the snapshot date and warns
   when it is over 90 days old relative to that report's window end.
 
+## Library usage (integration API)
+
+ccstory is primarily a CLI, but a small set of functions is maintained as a
+**semi-stable integration API** for programmatic consumers — dashboards,
+scripts, and (eventually) the MCP server (#35):
+
+```python
+from ccstory.time_tracking import collect_sessions, rollup_by_category
+from ccstory.categorizer import classify, load_rules
+
+sessions = collect_sessions(since, until)        # any window, tz-aware
+rollups  = rollup_by_category(sessions)          # per-bucket hours/share
+bucket   = classify(project_dir)                 # folder-rule bucketing
+rules    = load_rules()                          # parsed ~/.ccstory/config.toml
+```
+
+Semi-stable means: signatures may still change with minor versions, but
+renames and behavior changes are called out in the changelog instead of
+happening silently. Everything else in the package is internal. The JSON
+envelope (`--json`, `schema_version: 1`) is the other supported contract.
+
+A higher-level `build_recap()` one-call entry point is planned (#110).
+
 ## Roadmap
 
 - [x] `--json` structured output — one general primitive over per-destination

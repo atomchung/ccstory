@@ -131,6 +131,8 @@ def _load_toml(path: Path) -> dict | None:
 def load_rules(config_path: Path | None = None) -> list[CategoryRule]:
     """Load category rules: user override first, then defaults for unmatched.
 
+    Integration API (semi-stable, #110) — see README "Library usage".
+
     If user config defines a `[categories]` table, those rules take precedence
     (first-match-wins). Defaults still kick in for projects that none of
     user-defined rules match.
@@ -225,6 +227,8 @@ def classify(
     fallback: str = DEFAULT_FALLBACK_BUCKET,
 ) -> str:
     """Token-level match on normalized project leaf. First-match-wins.
+
+    Integration API (semi-stable, #110) — see README "Library usage".
 
     Splits the leaf by `-` and compares each token to rule needles. A multi-
     token needle like `deep-dive` matches if the leaf contains both tokens
