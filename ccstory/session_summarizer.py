@@ -466,6 +466,26 @@ def get_many(session_ids: list[str]) -> dict[str, SessionSummary]:
         conn.close()
 
 
+def recent_auto_timestamps(limit: int = 60) -> list[float]:
+    """`created_at` of the most recent `auto` summaries, oldest first.
+
+    A backfill writes one row per `claude -p` call, so the gaps between
+    consecutive rows are how long the calls actually took on this machine.
+    That lets the ETA measure itself instead of trusting a constant (#113).
+    """
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            """SELECT created_at FROM session_summaries
+               WHERE source = 'auto'
+               ORDER BY created_at DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return sorted(r[0] for r in rows)
+
+
 def import_from_claude_recap() -> int:
     """Pull cached summaries from ~/.claude/session_summaries.db (written by
     the personal_os /recap skill) into ccstory's cache.
