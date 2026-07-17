@@ -381,7 +381,25 @@ def _run_mcp(argv: list[str]) -> int:
     Stdio transport, read-only. Deferred import: `mcp` is an optional
     dependency (`pip install 'ccstory[mcp]'`) so a plain `pip install
     ccstory` stays lightweight for CLI-only users who never touch this.
+
+    Takes no flags in v0 — but still parses `argv` rather than ignoring it,
+    so `ccstory mcp --help` (or a mistyped flag) prints usage instead of
+    silently entering the stdio blocking read loop, which looks identical
+    to a hang from the terminal.
     """
+    if argv:
+        if argv[0] in ("-h", "--help"):
+            print(
+                "usage: ccstory mcp\n\n"
+                "Serve recap/comparison/category data over MCP (stdio), "
+                "read-only.\nTakes no arguments. See README \"MCP server\" "
+                "for client setup.",
+                file=sys.stderr,
+            )
+            return 0
+        print(f"ccstory mcp: unrecognized argument(s): {' '.join(argv)}",
+              file=sys.stderr)
+        return 1
     try:
         from .mcp_server import run
     except ImportError as e:

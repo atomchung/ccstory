@@ -16,7 +16,7 @@ import pytest
 
 pytest.importorskip("mcp")
 
-from ccstory import recap  # noqa: E402
+from ccstory import cli, recap  # noqa: E402
 from ccstory import session_summarizer as ss  # noqa: E402
 from tests.conftest import make_assistant_msg, make_user_msg  # noqa: E402
 
@@ -27,7 +27,9 @@ from ccstory.mcp_server import (  # noqa: E402
 )
 
 
-def _ts(hours_ago: float) -> str:
+def _recent_ts(hours_ago: float) -> str:
+    # Named _recent_ts, not _ts, to avoid colliding with conftest.py's own
+    # exported _ts(year, month, day, ...) — same name, unrelated signature.
     dt = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
     return dt.isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -35,11 +37,12 @@ def _ts(hours_ago: float) -> str:
 def _seed_session(jsonl_factory, project: str, sid: str, hours_ago: float) -> None:
     """One engaged session (2 real user messages) `hours_ago` hours back."""
     records = [
-        make_user_msg("Fix the login bug", _ts(hours_ago)),
-        make_assistant_msg("Looking at auth.py", _ts(hours_ago - 0.05), f"{sid}-m1"),
-        make_user_msg("Also add a regression test", _ts(hours_ago - 0.1)),
-        make_assistant_msg("Done — patched and tested.", _ts(hours_ago - 0.15),
-                           f"{sid}-m2"),
+        make_user_msg("Fix the login bug", _recent_ts(hours_ago)),
+        make_assistant_msg("Looking at auth.py", _recent_ts(hours_ago - 0.05),
+                           f"{sid}-m1"),
+        make_user_msg("Also add a regression test", _recent_ts(hours_ago - 0.1)),
+        make_assistant_msg("Done — patched and tested.",
+                           _recent_ts(hours_ago - 0.15), f"{sid}-m2"),
     ]
     jsonl_factory(project, sid, records)
 
@@ -102,15 +105,59 @@ class TestGetRecap:
     ):
         """session_summarizer._connect() raises SystemExit on a corrupt
         cache.db — BaseException, not Exception, so it must be caught
-        explicitly or it kills the whole MCP server process."""
+        explicitly or it kills the whole MCP server process. It also
+        chains the real diagnostic via `from e`, which must survive into
+        the response instead of collapsing to the bare exit code."""
         _seed_session(jsonl_factory, "-Users-me-proj", "sess-1", hours_ago=2)
 
         def _boom(*a, **kw):
-            raise SystemExit(1)
+            raise SystemExit(1) from ValueError("cache.db is corrupted")
 
         monkeypatch.setattr(recap, "_classify_cache_get_many", _boom)
         out = get_recap(window="week")
-        assert out == {"ok": False, "error": "1"}
+        assert out == {"ok": False, "error": "cache.db is corrupted"}
+
+    def test_allow_llm_false_never_synthesizes_narrative(
+        self, tmp_home, jsonl_factory, monkeypatch,
+    ):
+        """The core promise: allow_llm=False (default) must not run ANY
+        synthesis step, not just per-session polish — top_focus and every
+        category's narrative stay null rather than triggering claude -p."""
+        _seed_session(jsonl_factory, "-Users-me-proj", "sess-1", hours_ago=2)
+
+        def _boom(*a, **kw):
+            raise AssertionError("allow_llm=False must not synthesize narrative")
+
+        monkeypatch.setattr(recap, "_synthesize_overall", _boom)
+        monkeypatch.setattr(recap, "_synthesize_categories", _boom)
+        out = get_recap(window="week", allow_llm=False)
+        assert out["ok"] is True
+        assert out["top_focus"] is None
+        assert all(c["narrative"] is None for c in out["categories"])
+
+    def test_allow_llm_true_synthesizes_both_narrative_levels(
+        self, tmp_home, jsonl_factory, monkeypatch,
+    ):
+        """allow_llm=True is the opt-in: both the overall and per-category
+        synthesis steps must actually run (previously narrative= was never
+        passed through, so category narratives stayed null regardless)."""
+        _seed_session(jsonl_factory, "-Users-me-proj", "sess-1", hours_ago=2)
+        calls = {"overall": 0, "categories": 0}
+
+        def _fake_overall(*a, **kw):
+            calls["overall"] += 1
+            return "fake overall narrative"
+
+        def _fake_categories(label, sessions, rollups, summaries, console):
+            calls["categories"] += 1
+            return {r.category: "fake category narrative" for r in rollups}
+
+        monkeypatch.setattr(recap, "_synthesize_overall", _fake_overall)
+        monkeypatch.setattr(recap, "_synthesize_categories", _fake_categories)
+        out = get_recap(window="week", allow_llm=True)
+        assert calls == {"overall": 1, "categories": 1}
+        assert out["top_focus"] == "fake overall narrative"
+        assert out["categories"][0]["narrative"] == "fake category narrative"
 
 
 class TestCompareToPrevious:
@@ -152,6 +199,35 @@ class TestCompareToPrevious:
         assert out["ok"] is False
         assert "unrecognized window" in out["error"]
 
+    def test_window_all_is_rejected(self, tmp_home):
+        """No meaningful "previous window" for an open-ended range — must
+        reject before doing any work, not silently scan ~26 years back."""
+        out = compare_to_previous(window="all")
+        assert out["ok"] is False
+        assert "does not support window='all'" in out["error"]
+
+    def test_applies_configured_prices_before_computing_cost(
+        self, tmp_home, jsonl_factory,
+    ):
+        """Regression: cost figures must reflect the user's config.toml
+        [prices] override, not whatever DEFAULT_PRICES / leftover global
+        state token_usage._active_prices happens to hold at call time."""
+        _seed_session(jsonl_factory, "-Users-me-proj", "sess-cur", hours_ago=2)
+        _seed_session(jsonl_factory, "-Users-me-proj", "sess-prev", hours_ago=9 * 24)
+        # make_assistant_msg() defaults to model="claude-opus-4-7"; _price_for()
+        # substring-matches "opus", so [prices.opus] is the override that
+        # actually applies to these fixture sessions.
+        config_path = tmp_home / ".ccstory" / "config.toml"
+        config_path.write_text(
+            "[prices.opus]\ninput = 999.0\noutput = 999.0\n", encoding="utf-8",
+        )
+        out = compare_to_previous(window="week")
+        assert out["ok"] is True
+        # Default opus pricing on the fixture's 100in/50out-token exchanges
+        # is ~$0.004; the extreme override must move the number well past
+        # that without needing an exact-value assertion.
+        assert out["current_cost_usd"] > 0.1
+
 
 class TestListCategories:
     def test_returns_default_rules_shape(self, tmp_home):
@@ -161,6 +237,19 @@ class TestListCategories:
         assert "coding" in names  # built-in default bucket, no config.toml yet
         for c in out["categories"]:
             assert isinstance(c["needles"], list) and c["needles"]
+
+    def test_error_normalizes_instead_of_raising(self, tmp_home, monkeypatch):
+        """Same contract as the other two tools: an exception from the
+        underlying call must come back as {"ok": False, ...}, not propagate
+        and hand the caller an MCP-level ToolError instead."""
+        from ccstory import mcp_server
+
+        def _boom():
+            raise ValueError("config.toml is unreadable")
+
+        monkeypatch.setattr(mcp_server, "load_rules", _boom)
+        out = list_categories()
+        assert out == {"ok": False, "error": "config.toml is unreadable"}
 
 
 def test_no_stdout_leak_across_tools(tmp_home, jsonl_factory, capsys):
@@ -172,3 +261,19 @@ def test_no_stdout_leak_across_tools(tmp_home, jsonl_factory, capsys):
     compare_to_previous(window="week")
     list_categories()
     assert capsys.readouterr().out == ""
+
+
+class TestRunMcpArgvHandling:
+    """`ccstory mcp` takes no flags in v0, but must not silently ignore
+    argv and fall into the stdio blocking read loop on --help or a typo —
+    that looks identical to a hang from the terminal."""
+
+    def test_help_prints_usage_and_exits_zero(self, capsys):
+        rc = cli._run_mcp(["--help"])
+        assert rc == 0
+        assert "usage: ccstory mcp" in capsys.readouterr().err
+
+    def test_unrecognized_arg_errors_instead_of_hanging(self, capsys):
+        rc = cli._run_mcp(["--bogus"])
+        assert rc == 1
+        assert "unrecognized argument" in capsys.readouterr().err
