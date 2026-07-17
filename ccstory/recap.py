@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import os
 import re
+import sqlite3
+import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -50,6 +52,7 @@ from .session_summarizer import (
     invalidate_content_buckets,
     invalidate_period_aggregates,
     language_directive,
+    recent_auto_timestamps,
     summarize_session,
     synthesize_category_for_period,
     synthesize_comparison,
@@ -63,7 +66,15 @@ from .trends import PeriodComparison, compare_to_previous
 REPORTS_DIR = Path.home() / ".ccstory" / "reports"
 CONFIG_PATH = Path.home() / ".ccstory" / "config.toml"
 
-CLAUDE_P_SEC_PER_SESSION = 40  # rough cold-start average on M1 Pro
+# First-run guess, used only until the cache has real timings to learn from.
+# Deliberately pessimistic: with no history, over-stating is safer than
+# promising a speed this machine may not deliver. `_sec_per_session()` takes
+# over from the second run on (#113).
+CLAUDE_P_SEC_FALLBACK = 40
+
+_ETA_HISTORY = 60        # how many past `auto` rows to learn from
+_ETA_MIN_SAMPLES = 8     # fewer gaps than this and the median is just noise
+_ETA_RUN_GAP_SEC = 300   # a wider gap separates two runs, not two sessions
 
 
 class RecapUnavailable(RuntimeError):
@@ -347,6 +358,31 @@ def _resolve_all_sessions(
             s.category_source = "fallback"
 
 
+def _sec_per_session() -> tuple[float, bool]:
+    """How long one `claude -p` summary actually takes on this machine.
+
+    Learns from the cache rather than guessing: a backfill writes one `auto`
+    row per call, so gaps between consecutive rows are real timings for
+    exactly the work being predicted. Gaps wider than `_ETA_RUN_GAP_SEC` fall
+    between separate runs, not between sessions, so they are dropped. The
+    median, not the mean, keeps one stalled call from skewing the estimate.
+
+    Returns `(seconds, measured)`; `measured` is False when there is not yet
+    enough history, so the caller can label the number honestly instead of
+    presenting a guess as a measurement.
+    """
+    try:
+        stamps = recent_auto_timestamps(_ETA_HISTORY)
+    except sqlite3.Error:
+        return CLAUDE_P_SEC_FALLBACK, False
+    gaps = [
+        b - a for a, b in zip(stamps, stamps[1:]) if b - a < _ETA_RUN_GAP_SEC
+    ]
+    if len(gaps) < _ETA_MIN_SAMPLES:
+        return CLAUDE_P_SEC_FALLBACK, False
+    return statistics.median(gaps), True
+
+
 def _backfill_summaries(
     sessions,
     console: Console,
@@ -376,14 +412,16 @@ def _backfill_summaries(
         return counts
 
     if use_llm:
-        eta_min = max(1, (len(todo) * CLAUDE_P_SEC_PER_SESSION + 59) // 60)
+        sec, measured = _sec_per_session()
+        eta_min = max(1, int((len(todo) * sec + 59) // 60))
         breakdown = f"{len(todo) - regen} new"
         if regen:
             breakdown += f" + {regen} regenerated"
+        basis = "measured on this machine" if measured else "first-run estimate"
         console.print(
             f"[yellow]![/yellow] {len(todo)} session(s) to summarize "
             f"({breakdown}). [bold]`claude -p` ETA ~{eta_min} min[/bold] "
-            f"(~{CLAUDE_P_SEC_PER_SESSION}s/session cold start). "
+            f"(~{sec:.0f}s/session, {basis}). "
             f"Press Ctrl+C to abort, or rerun without --llm-narrative "
             f"for an instant first/last-message fallback.\n"
         )

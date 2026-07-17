@@ -22,6 +22,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ccstory/recap.py` (`parse_window`, summary backfill, bucket resolution,
   narrative synthesis, comparison, artifacts, render). CLI flags and
   behavior are unchanged.
+- `recap.CLAUDE_P_SEC_PER_SESSION` is now `recap.CLAUDE_P_SEC_FALLBACK`, and
+  only seeds the first run (#113). It was never part of the documented
+  library API.
+
+### Fixed
+
+- The `--llm-narrative` ETA no longer over-states by ~6x (#113). It
+  multiplied the session count by a hard-coded 40s — a cold start profiled
+  once on one M1 Pro — while a backfill's calls run back-to-back and land
+  ~6-8s. A real 127-session run announced `ETA ~85 min` and finished in
+  ~15, which inverted the warning's purpose: it exists to save users from a
+  silently-hanging job, not to scare them off a short one. The estimate now
+  measures `claude -p` from the gaps between `auto` rows already in the
+  cache. A genuine first run has no history to read and still shows the old
+  constant, labeled `first-run estimate` rather than passed off as measured.
 
 ## [0.5.1] - 2026-07-14
 
