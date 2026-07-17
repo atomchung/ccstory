@@ -43,6 +43,13 @@ dependencies = [
 test = [
     "pytest>=8.0",
 ]
+# <2 is a hard requirement, not conservative padding: the `mcp` SDK is mid
+# v1→v2 transition (v2.0.0b2 already out) and v2 renames FastMCP to
+# MCPServer with no compat shim, which would break ccstory/mcp_server.py's
+# import on sight. Do not widen this without updating that import first.
+mcp = [
+    "mcp>=1.9,<2",
+]
 
 [project.urls]
 Homepage = "https://github.com/atomchung/ccstory"

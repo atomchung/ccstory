@@ -462,7 +462,8 @@ Claude CLI calls with `--minimal --classify folder` (and initialize with
 
 ccstory is primarily a CLI, but a small set of functions is maintained as a
 **semi-stable integration API** for programmatic consumers — dashboards,
-scripts, and (eventually) the MCP server (#35):
+scripts, and the [MCP server](#mcp-server) below all call these instead of
+shelling out to the CLI:
 
 ```python
 from ccstory.recap import build_recap
@@ -489,6 +490,55 @@ Semi-stable means: signatures may still change with minor versions, but
 renames and behavior changes are called out in the changelog instead of
 happening silently. Everything else in the package is internal. The JSON
 envelope (`--json`, `schema_version: 1`) is the other supported contract.
+
+## MCP server
+
+```bash
+pip install 'ccstory[mcp]'
+ccstory mcp   # stdio MCP server — read-only, no fresh `claude -p` by default
+```
+
+Point any MCP-aware client (Claude Desktop, Claude Code, or another local
+agent) at the `ccstory mcp` command and it can ask for your recap live in
+conversation instead of you running the CLI and pasting output back in.
+Example client config (Claude Desktop's `claude_desktop_config.json`, or
+Claude Code's MCP settings — same shape):
+
+```json
+{
+  "mcpServers": {
+    "ccstory": {
+      "command": "ccstory",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Three read-only tools in v0:
+
+| Tool | Returns |
+|---|---|
+| `get_recap(window, classify, allow_llm)` | Totals, per-category active hours + narrative, the overall narrative, top 5 sessions, cost. |
+| `compare_to_previous(window, classify)` | Active-hours and cost deltas vs. the immediately preceding same-length window. |
+| `list_categories()` | The bucket rules ccstory classifies sessions into (user + built-in defaults). |
+
+`window` accepts `week` / `month` / `all` / `YYYY-MM`, same as the CLI.
+Default `classify="folder"` and `allow_llm=False` never trigger a fresh
+`claude -p` call — an MCP client may call these tools opportunistically
+mid-conversation, so nothing here should cost you latency or tokens unless
+you explicitly ask for it (`classify="content"` / `"hybrid"`, or
+`allow_llm=True` on `get_recap`).
+
+**This is a third, distinct JSON contract**, not the same shape as either
+of the two above: not `--json` / `RecapResult.to_json()` (which lists
+every session in the window) and not the Python function signatures.
+MCP responses are deliberately compact — top 5 sessions, not the full
+list — so they're cheap for an agent to read into its own context, and
+never include raw transcript text, only summaries.
+
+`get_trend` (multi-period sparkline data) isn't in v0 yet — see
+[#35](https://github.com/atomchung/ccstory/issues/35) for status.
 
 ## Roadmap
 
