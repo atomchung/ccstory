@@ -15,6 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching `--json` stdout. The CLI's default flow is now a thin shell over
   it, so programmatic consumers and the CLI stay behaviorally identical by
   construction. Empty windows raise `RecapUnavailable` instead of exiting.
+- `ccstory mcp` — a read-only MCP server (#35), install via
+  `pip install 'ccstory[mcp]'`. Three v0 tools over stdio — `get_recap`,
+  `compare_to_previous`, `list_categories` — let any MCP-aware agent query
+  a recap live instead of shelling out to the CLI. Each is a thin wrapper
+  over the same semi-stable functions above, returning a third, more
+  compact JSON shape (top 5 sessions, not the full list). Default
+  `classify="folder"` and `allow_llm=False` never fire a fresh `claude -p`
+  call. `get_trend` isn't included yet — see the issue for status. See
+  README "MCP server" for setup.
 
 ### Changed
 

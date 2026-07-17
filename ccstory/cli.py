@@ -375,6 +375,27 @@ def _run_trend(argv: list[str]) -> int:
     return 0
 
 
+def _run_mcp(argv: list[str]) -> int:
+    """`ccstory mcp` — serve recap/comparison/category data over MCP (#35).
+
+    Stdio transport, read-only. Deferred import: `mcp` is an optional
+    dependency (`pip install 'ccstory[mcp]'`) so a plain `pip install
+    ccstory` stays lightweight for CLI-only users who never touch this.
+    """
+    try:
+        from .mcp_server import run
+    except ImportError as e:
+        print(
+            "ccstory mcp requires the optional `mcp` dependency: "
+            "pip install 'ccstory[mcp]'",
+            file=sys.stderr,
+        )
+        print(f"  (underlying: {e})", file=sys.stderr)
+        return 1
+    run()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     raw = list(argv) if argv is not None else sys.argv[1:]
 
@@ -382,7 +403,8 @@ def main(argv: list[str] | None = None) -> int:
     # / `ccstory month` flow simple positional. `init` / `category` only
     # emit progress lines, so a stdout Console is fine; `trend` and the
     # default recap path resolve --format themselves and may switch to
-    # a stderr Console so the markdown report can own stdout.
+    # a stderr Console so the markdown report can own stdout. `mcp` owns
+    # stdout for the whole process (protocol stream) — no Console at all.
     if raw and raw[0] == "trend":
         logging.basicConfig(level=logging.WARNING)
         return _run_trend(raw[1:])
@@ -392,6 +414,9 @@ def main(argv: list[str] | None = None) -> int:
     if raw and raw[0] == "category":
         logging.basicConfig(level=logging.WARNING)
         return _run_category(raw[1:], Console())
+    if raw and raw[0] == "mcp":
+        logging.basicConfig(level=logging.WARNING)
+        return _run_mcp(raw[1:])
 
     parser = argparse.ArgumentParser(
         prog="ccstory",
@@ -407,6 +432,10 @@ def main(argv: list[str] | None = None) -> int:
             "      Per-bucket sparklines + burn-% over N periods.\n"
             "  ccstory category {list,set,unset} ...\n"
             "      Edit project-bucket rules from the CLI.\n"
+            "  ccstory mcp\n"
+            "      Serve recap/comparison/category data over MCP (stdio) so\n"
+            "      other agents can query ccstory live. Requires the optional\n"
+            "      `mcp` extra: pip install 'ccstory[mcp]'.\n"
             "\n"
             "Examples:\n"
             "  ccstory week                  # last 7 days, instant fallback\n"
