@@ -19,8 +19,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePath
 
+from .categorizer import alias_fold, normalize_project_name
+
 # Note: classify() is no longer called here. parse_session() leaves
 # SessionStat.category empty; the caller runs categorizer.resolve_session_bucket().
+# alias_fold/normalize_project_name are used only to derive the layer-2 project
+# identity for the read-time (area, project) rollup (#69), never to classify.
 
 LOG = logging.getLogger("ccstory.time_tracking")
 
@@ -241,20 +245,76 @@ def wall_clock_active_min(stats: list[SessionStat]) -> float:
 
 
 @dataclass
+class ProjectRollup:
+    """Layer-2 (#69): one project's slice within an area.
+
+    Computed at read time from the sessions already in hand — no cache row,
+    no fingerprint, no migration. ``project`` is the alias-folded normalized
+    leaf (``categorizer.project_identity``); the physical fact of which folder
+    the work happened in, never a content/LLM override.
+    """
+    project: str
+    active_min: float
+    sessions: int
+    messages: int
+
+
+@dataclass
 class CategoryRollup:
     category: str
     active_min: float
     sessions: int
     messages: int
     top_sessions: list[SessionStat] = field(default_factory=list)
+    # Layer-2 rollup, biggest project first. Additive (#69): layer-1 fields
+    # above are untouched, so every existing consumer keeps its numbers.
+    projects: list[ProjectRollup] = field(default_factory=list)
+
+
+def _rollup_projects(
+    items: list[SessionStat],
+    scale: float,
+    aliases: dict[str, str] | None,
+) -> list[ProjectRollup]:
+    """Second-level (area → project) rollup for one area's sessions.
+
+    Uses the same wall-clock ``scale`` as the parent area so project hours sum
+    back to the area total. Groups by the alias-folded project leaf.
+    """
+    groups: dict[str, list[SessionStat]] = defaultdict(list)
+    for s in items:
+        leaf = alias_fold(normalize_project_name(s.project) or s.project, aliases)
+        groups[leaf].append(s)
+    out: list[ProjectRollup] = []
+    for proj, sess in groups.items():
+        proj_sec = sum(i.active_sec for i in sess) * scale
+        out.append(
+            ProjectRollup(
+                project=proj,
+                active_min=round(proj_sec / 60, 1),
+                sessions=len(sess),
+                messages=sum(i.msg_count for i in sess),
+            )
+        )
+    out.sort(key=lambda p: p.active_min, reverse=True)
+    return out
 
 
 def rollup_by_category(
-    stats: list[SessionStat], dedup_to_wall_clock: bool = True
+    stats: list[SessionStat],
+    dedup_to_wall_clock: bool = True,
+    aliases: dict[str, str] | None = None,
 ) -> list[CategoryRollup]:
-    """Aggregate by category, optionally scaled to deduplicated wall clock.
+    """Aggregate by category (layer 1), with a read-time per-project breakdown
+    (layer 2, #69) attached to each rollup.
 
     Integration API (semi-stable, #110) — see README "Library usage".
+
+    ``aliases`` is the optional ``[projects]`` fold map (``categorizer.
+    load_project_aliases``); pass it so layer-2 groups variant folder names
+    under one canonical project. Layer-1 numbers are independent of it — the
+    ``projects`` field is purely additive, so trend/compare (which omit it)
+    keep byte-identical area totals.
     """
     buckets: dict[str, list[SessionStat]] = defaultdict(list)
     for s in stats:
@@ -277,6 +337,7 @@ def rollup_by_category(
                 sessions=len(items),
                 messages=sum(i.msg_count for i in items),
                 top_sessions=items[:5],
+                projects=_rollup_projects(items, scale, aliases),
             )
         )
     rollups.sort(key=lambda r: r.active_min, reverse=True)

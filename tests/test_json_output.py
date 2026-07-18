@@ -73,6 +73,8 @@ class TestReportJson:
         assert p["buckets"] == [{
             "name": "coding", "active_hours": 1.0, "share": 1.0,
             "sessions": 1, "messages": 10, "narrative": None,
+            # Additive layer-2 (#69); empty when the rollup carries no projects.
+            "projects": [],
         }]
 
     def test_session_summary_precedence(self):

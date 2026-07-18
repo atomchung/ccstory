@@ -35,6 +35,7 @@ from rich.progress import (
 from .artifacts import ArtifactsReport, collect_artifacts
 from .categorizer import (
     duplicate_memberships,
+    load_project_aliases,
     load_settings,
     normalize_project_name,
     resolve_session_bucket,
@@ -642,7 +643,11 @@ def build_recap(
     _resolve_all_sessions(
         sessions, summaries, classify, fallback_bucket, console,
     )
-    rollups = rollup_by_category(sessions)
+    # aliases feed the layer-2 (area → project) rollup (#69); layer-1 area
+    # totals are independent of it.
+    rollups = rollup_by_category(
+        sessions, aliases=load_project_aliases(CONFIG_PATH),
+    )
     console.print(
         f"[green]✓[/green] [dim]resolved into {len(rollups)} categories[/dim]\n"
     )
