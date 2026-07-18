@@ -34,6 +34,7 @@ from rich.progress import (
 
 from .artifacts import ArtifactsReport, collect_artifacts
 from .categorizer import (
+    duplicate_memberships,
     load_settings,
     normalize_project_name,
     resolve_session_bucket,
@@ -542,6 +543,17 @@ def build_recap(
     # Load user price overrides (config [prices] table). No-op if absent.
     prices, snapshot = load_prices_config(CONFIG_PATH)
     apply_prices(prices, snapshot)
+
+    # Config validation (#69): a project listed under two areas is ambiguous.
+    # The resolver keeps the first (exact-membership, config order); surface
+    # the shadowed ones once so the user can clean up rather than silently
+    # losing a membership.
+    for needle, areas in duplicate_memberships(CONFIG_PATH):
+        console.print(
+            f"[yellow]![/yellow] [dim]config: project '{needle}' is listed "
+            f"under multiple areas ({', '.join(areas)}); using '{areas[0]}' "
+            f"(first wins). Remove it from the others to silence this.[/dim]"
+        )
 
     since, until, label = parse_window(window)
     console.print(
