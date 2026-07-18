@@ -15,12 +15,12 @@ to a handful of top sessions, and never returns raw transcript text. See
 README "MCP server" for the full field reference.
 
 v0 scope (deliberately): read-only, no fresh `claude -p` calls unless the
-caller opts in (`get_recap`'s `allow_llm`; `compare_to_previous` never
-fires one at all — see its own docstring for where that guarantee
-actually comes from), stdio transport only. `get_trend` is intentionally
-not included yet — its compact shape is the least settled part of issue
-#35, so it's left for a follow-up once the other three tools' conventions
-have seen real agent traffic.
+caller opts in (`get_recap`'s `allow_llm`; `compare_to_previous` and
+`get_trend` never fire one at all — see their docstrings for where that
+guarantee actually comes from), stdio transport only. `get_trend` landed
+last, after the other three tools' conventions had settled (the ordering
+issue #35 asked for), and follows them: compact points, cache-only bucket
+resolution, cost figures behind the same config [prices] override step.
 """
 
 from __future__ import annotations
@@ -47,6 +47,7 @@ from .recap import RecapUnavailable, build_recap, parse_window  # noqa: E402
 from .time_tracking import collect_sessions, rollup_by_category  # noqa: E402
 from .token_usage import apply_prices, collect_usage, load_prices_config  # noqa: E402
 from .trends import _resolve_sessions_from_cache  # noqa: E402
+from .trends import collect_trend  # noqa: E402
 from .trends import compare_to_previous as _compare_to_previous  # noqa: E402
 
 mcp = FastMCP("ccstory")
@@ -235,6 +236,61 @@ def compare_to_previous(
     if cmp is None:
         return {"ok": False, "error": "No sessions in the previous window to compare."}
     return _compact_comparison(cmp)
+
+
+@mcp.tool()
+def get_trend(
+    period: Literal["week", "month"] = "week",
+    count: int = 8,
+    classify: Classify = _DEFAULT_CLASSIFY,
+) -> dict:
+    """Per-period activity series over the last `count` weeks or months —
+    active hours, cost, and per-category hours for each window, oldest
+    first. `count` is clamped to 1..24.
+
+    Never fires a fresh `claude -p` call — like `compare_to_previous`,
+    this holds for every parameter combination: `collect_trend()` resolves
+    buckets cache-only by design (cache-miss sessions land in the fallback
+    bucket), so `classify="hybrid"` here only changes which cache layers
+    are consulted, never whether an LLM runs.
+    """
+    try:
+        n = max(1, min(int(count), 24))
+        # Same price-override step every cost-reporting entry point takes
+        # (build_recap, _run_trend, compare_to_previous above) — without it
+        # the per-point cost_usd would depend on whatever prices some other
+        # call in this server process happened to leave applied (#115).
+        prices, snapshot = load_prices_config(recap.CONFIG_PATH)
+        apply_prices(prices, snapshot)
+        fallback_bucket = load_settings().get("default_bucket", "coding")
+        points = collect_trend(
+            period=period, count=n, mode=classify, fallback=fallback_bucket,
+        )
+    except _TOOL_ERRORS as e:
+        return _normalize_error(e)
+    return {
+        "ok": True,
+        "period": period,
+        "count": n,
+        "points": [
+            {
+                "label": p.label,
+                "since": p.since.isoformat(),
+                "until": p.until.isoformat(),
+                "active_hours": round(p.total_h, 2),
+                "cost_usd": round(p.cost_usd, 2),
+                "buckets": [
+                    {
+                        "name": r.category,
+                        "active_hours": round(r.active_min / 60, 2),
+                        "sessions": r.sessions,
+                    }
+                    for r in p.rollups
+                ],
+            }
+            for p in points
+        ],
+    }
 
 
 @mcp.tool()

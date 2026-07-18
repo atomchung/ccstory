@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `get_trend` MCP tool — the fourth and final tool from #35: per-period
+  activity series over the last `count` weeks/months (oldest first) with
+  active hours, cost, and per-category hours per point. Cache-only under
+  every parameter combination (like `compare_to_previous`), applies the
+  same config `[prices]` override as every other cost-reporting entry
+  point, and clamps `count` to 1..24.
+
 ## [0.5.2] - 2026-07-18
 
 ### Added
