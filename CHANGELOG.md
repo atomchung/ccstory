@@ -45,6 +45,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   narrative above correctly-localized category narratives. Language
   selection is back to `language_directive()` alone; cached overalls
   regenerate on the next `--llm-narrative` run via the prompt fingerprint.
+- Upgrading a pre-0.5.1 cache no longer orphans existing content
+  classifications (#118). Migration 2 stamped legacy rows with an empty
+  fingerprint that no read path matches, so every pre-upgrade
+  classification silently stopped resolving: recaps re-burned `claude -p`
+  for sessions that were already classified, and the cache-only trend /
+  compare paths permanently degraded old windows to folder/fallback
+  buckets. Migration 3 adopts those rows under the current fingerprint
+  (the same no-re-burn contract migration 1 applies to `prompt_version`),
+  which also retroactively resurrects caches on installs that already
+  upgraded — the rows were still there, just unreadable. Aggregate and
+  comparison narratives are deliberately re-synthesized instead: their
+  prompts changed after v0.5.1, and that costs a few calls per window,
+  not one per session.
 - The `--llm-narrative` ETA no longer over-states by ~6x (#113). It
   multiplied the session count by a hard-coded 40s — a cold start profiled
   once on one M1 Pro — while a backfill's calls run back-to-back and land
@@ -54,6 +67,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   measures `claude -p` from the gaps between `auto` rows already in the
   cache. A genuine first run has no history to read and still shows the old
   constant, labeled `first-run estimate` rather than passed off as measured.
+- A corrupt, locked, or newer-schema `~/.ccstory/cache.db` no longer kills
+  the host process (#119). `_connect()` raised `SystemExit` — right for the
+  CLI, fatal for in-process consumers (`build_recap()` library callers, the
+  MCP server), since `except Exception` cannot catch a `BaseException`. It
+  now raises `session_summarizer.CacheUnavailable`; the CLI catches it at
+  the entry point and keeps the exact old behavior (message to stderr,
+  exit 1). A transient `database is locked` is also no longer misreported
+  as corruption with `rm ~/.ccstory/cache.db` advice — it now says another
+  process holds the cache and to retry.
 
 ## [0.5.1] - 2026-07-14
 

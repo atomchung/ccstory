@@ -521,9 +521,12 @@ def build_recap(
     and updates ccstory's own caches (summaries, classifications, period
     aggregates) in ``~/.ccstory/cache.db`` — same as a CLI run.
 
-    Raises ``ValueError`` for an unrecognized window and
+    Raises ``ValueError`` for an unrecognized window,
     ``RecapUnavailable`` when there is no Claude Code data / no engaged
-    sessions in the window.
+    sessions in the window, and ``session_summarizer.CacheUnavailable``
+    when ``~/.ccstory/cache.db`` cannot be opened (corrupt, locked, or
+    written by a newer ccstory) — all normal exceptions a host process
+    can catch (#119).
     """
     if console is None:
         console = Console(quiet=True)

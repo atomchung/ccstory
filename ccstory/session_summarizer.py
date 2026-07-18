@@ -45,7 +45,7 @@ N_ASSISTANT_TAIL = 1
 # and regenerated on the next `--llm-narrative` run. Keep this an int so the
 # comparison `stored < PROMPT_VERSION` is monotonic.
 PROMPT_VERSION = 1
-CACHE_SCHEMA_VERSION = 2
+CACHE_SCHEMA_VERSION = 3
 
 
 _CLAUDE_MD_MAX_CHARS = 500
@@ -332,15 +332,57 @@ def _migration_2_cache_fingerprints(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migration_3_adopt_legacy_classifications(conn: sqlite3.Connection) -> None:
+    """Stamp pre-fingerprint classification rows with the current fingerprint.
+
+    Migration 2 backfilled ``input_fingerprint = ''`` — a value no read path
+    ever matches — so every pre-existing classification silently stopped
+    resolving (#118). The cache-only readers (trends / compare) never fire
+    fresh LLM calls, so for them the orphaned rows could never lazily heal
+    either: old windows degraded to fallback buckets permanently. Adopting
+    the rows under the *current* config mirrors what migration 1 does for
+    ``prompt_version``: zero re-burn for cache that is still meaningful.
+
+    ``period_aggregates`` / ``comparison_narratives`` are deliberately left
+    unstamped: their prompts changed after v0.5.1, and re-synthesis costs a
+    few calls per window rather than one per session.
+    """
+    # Same manually-edited-DB guard migration 2 applies to a v1 DB: reassert
+    # the full v2 shape so the UPDATE below cannot hit a missing column.
+    _migration_2_cache_fingerprints(conn)
+    conn.execute(
+        "UPDATE session_content_buckets SET input_fingerprint = ? "
+        "WHERE input_fingerprint = ''",
+        (_content_classification_fingerprint(),),
+    )
+
+
 _MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_1_baseline,
     _migration_2_cache_fingerprints,
+    _migration_3_adopt_legacy_classifications,
 )
 assert len(_MIGRATIONS) == CACHE_SCHEMA_VERSION
 
 
 class _CacheSchemaTooNew(sqlite3.DatabaseError):
     """Raised when an older ccstory binary opens a newer cache schema."""
+
+
+class CacheUnavailable(RuntimeError):
+    """``~/.ccstory/cache.db`` cannot be opened — corrupt, locked, or
+    written by a newer ccstory.
+
+    Raised instead of ``SystemExit`` because ccstory also runs in-process
+    inside other tools (``build_recap()`` library consumers, the MCP
+    server), and ``SystemExit`` subclasses ``BaseException`` — a host's
+    ``except Exception`` cannot catch it, so one bad cache file would kill
+    the whole host process (#119). The CLI catches this at its entry point
+    and preserves the old behavior exactly: message to stderr, exit 1.
+
+    ``str(exc)`` is the complete user-facing message, ``ccstory:``-prefixed
+    lines included.
+    """
 
 
 def _run_migrations(conn: sqlite3.Connection) -> None:
@@ -362,6 +404,17 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
             raise
 
 
+def _corrupt_cache_message(e: Exception) -> str:
+    """The recovery hint for a cache SQLite refuses to parse."""
+    return (
+        f"ccstory: error: cache at {DB_PATH} is corrupted ({e}).\n"
+        f"ccstory: to reset, delete the file and re-run:\n"
+        f"    rm {DB_PATH}\n"
+        f"You'll lose cached per-session narratives + bucket assignments; "
+        f"sessions get re-summarized on the next run."
+    )
+
+
 def _connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn: sqlite3.Connection | None = None
@@ -374,28 +427,30 @@ def _connect() -> sqlite3.Connection:
     except _CacheSchemaTooNew as e:
         if conn is not None:
             conn.close()
-        import sys as _sys
-        print(
+        raise CacheUnavailable(
             f"ccstory: error: cache at {DB_PATH} was written by a newer "
             f"ccstory ({e}).\n"
             "ccstory: upgrade ccstory before opening this cache; the file "
-            "was left untouched.",
-            file=_sys.stderr,
-        )
-        raise SystemExit(1) from e
+            "was left untouched."
+        ) from e
+    except sqlite3.OperationalError as e:
+        if conn is not None:
+            conn.close()
+        if "locked" in str(e).lower():
+            # Transient concurrency (another ccstory process holds the DB,
+            # e.g. two runs racing the one-shot migration) — advising `rm`
+            # here would destroy a healthy cache over a retryable condition.
+            raise CacheUnavailable(
+                f"ccstory: error: cache at {DB_PATH} is locked by another "
+                f"process ({e}).\n"
+                "ccstory: another ccstory run (or a tool embedding it) is "
+                "using the cache — retry once it finishes."
+            ) from e
+        raise CacheUnavailable(_corrupt_cache_message(e)) from e
     except sqlite3.DatabaseError as e:
         if conn is not None:
             conn.close()
-        import sys as _sys
-        print(
-            f"ccstory: error: cache at {DB_PATH} is corrupted ({e}).\n"
-            f"ccstory: to reset, delete the file and re-run:\n"
-            f"    rm {DB_PATH}\n"
-            f"You'll lose cached per-session narratives + bucket assignments; "
-            f"sessions get re-summarized on the next run.",
-            file=_sys.stderr,
-        )
-        raise SystemExit(1) from e
+        raise CacheUnavailable(_corrupt_cache_message(e)) from e
     except Exception:
         if conn is not None:
             conn.close()
