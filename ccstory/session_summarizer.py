@@ -45,7 +45,7 @@ N_ASSISTANT_TAIL = 1
 # and regenerated on the next `--llm-narrative` run. Keep this an int so the
 # comparison `stored < PROMPT_VERSION` is monotonic.
 PROMPT_VERSION = 1
-CACHE_SCHEMA_VERSION = 2
+CACHE_SCHEMA_VERSION = 3
 
 
 _CLAUDE_MD_MAX_CHARS = 500
@@ -332,9 +332,35 @@ def _migration_2_cache_fingerprints(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migration_3_adopt_legacy_classifications(conn: sqlite3.Connection) -> None:
+    """Stamp pre-fingerprint classification rows with the current fingerprint.
+
+    Migration 2 backfilled ``input_fingerprint = ''`` — a value no read path
+    ever matches — so every pre-existing classification silently stopped
+    resolving (#118). The cache-only readers (trends / compare) never fire
+    fresh LLM calls, so for them the orphaned rows could never lazily heal
+    either: old windows degraded to fallback buckets permanently. Adopting
+    the rows under the *current* config mirrors what migration 1 does for
+    ``prompt_version``: zero re-burn for cache that is still meaningful.
+
+    ``period_aggregates`` / ``comparison_narratives`` are deliberately left
+    unstamped: their prompts changed after v0.5.1, and re-synthesis costs a
+    few calls per window rather than one per session.
+    """
+    # Same manually-edited-DB guard migration 2 applies to a v1 DB: reassert
+    # the full v2 shape so the UPDATE below cannot hit a missing column.
+    _migration_2_cache_fingerprints(conn)
+    conn.execute(
+        "UPDATE session_content_buckets SET input_fingerprint = ? "
+        "WHERE input_fingerprint = ''",
+        (_content_classification_fingerprint(),),
+    )
+
+
 _MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_1_baseline,
     _migration_2_cache_fingerprints,
+    _migration_3_adopt_legacy_classifications,
 )
 assert len(_MIGRATIONS) == CACHE_SCHEMA_VERSION
 
