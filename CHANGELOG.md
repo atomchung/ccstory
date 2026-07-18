@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Two-layer classification, layer 3 of 3 — MCP `get_recap` exposes the
+  per-project breakdown (#69). Each `categories[]` entry gains an additive
+  `children` array of `{name, active_hours}`, biggest first — the compact
+  layer-2 view for MCP clients. Additive only: existing fields are unchanged
+  and `get_trend` / `compare_to_previous` stay layer-1. README's Categories
+  section is rewritten to document the two-layer (area → project) model,
+  the exact-membership vs token-needle tiers, the `[projects]` alias table,
+  and that area overrides never touch a session's project.
 - Two-layer classification, layer 2 of 3 — read-time area → project rollup
   and two-layer presentation (#69). Each `CategoryRollup` now carries a
   `projects` list (biggest first), grouped by the alias-folded project leaf

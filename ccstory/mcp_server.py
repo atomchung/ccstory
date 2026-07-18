@@ -100,6 +100,17 @@ def _compact_recap(result) -> dict:
                 "name": r.category,
                 "active_hours": round(r.active_min / 60, 2),
                 "narrative": result.category_narratives.get(r.category),
+                # Layer-2 (#69): additive per-project breakdown under each
+                # area, biggest first. Compact shape — name + hours only, no
+                # session detail. Older clients that ignore unknown keys keep
+                # working; the compact contract stays otherwise unchanged.
+                "children": [
+                    {
+                        "name": p.project,
+                        "active_hours": round(p.active_min / 60, 2),
+                    }
+                    for p in r.projects
+                ],
             }
             for r in result.rollups
         ],

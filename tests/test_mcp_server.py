@@ -361,3 +361,34 @@ class TestRunMcpArgvHandling:
         rc = cli._run_mcp(["--bogus"])
         assert rc == 1
         assert "unrecognized argument" in capsys.readouterr().err
+
+
+class TestGetRecapChildren:
+    """Layer-2 (#69): each category gains an additive `children` breakdown.
+
+    Two projects with no user config both fall to the default bucket under
+    classify="folder", so that area splits into two children.
+    """
+
+    def test_children_present_and_shaped(self, tmp_home, jsonl_factory):
+        _seed_session(jsonl_factory, "-Users-me-alpha", "sess-a", hours_ago=2)
+        _seed_session(jsonl_factory, "-Users-me-beta", "sess-b", hours_ago=5)
+        out = get_recap(window="week")
+        assert out["ok"] is True
+        # Both land in one area (default bucket); find it by its children.
+        cat = next(c for c in out["categories"] if len(c["children"]) >= 2)
+        assert {"name", "active_hours"} == set(cat["children"][0].keys())
+        names = {child["name"] for child in cat["children"]}
+        assert {"alpha", "beta"} <= names
+        # children hours sum back to the area total (read-time rollup).
+        assert round(
+            sum(child["active_hours"] for child in cat["children"]), 2
+        ) == cat["active_hours"]
+
+    def test_get_trend_stays_layer1_only(self, tmp_home, jsonl_factory):
+        _seed_session(jsonl_factory, "-Users-me-alpha", "sess-a", hours_ago=2)
+        out = get_trend(period="week", count=2)
+        assert out["ok"] is True
+        for point in out["points"]:
+            for bucket in point["buckets"]:
+                assert "children" not in bucket
