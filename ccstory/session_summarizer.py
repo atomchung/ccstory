@@ -808,7 +808,6 @@ Rules:
 - 2-4 threads total. Header = the key concrete win + its payoff, specific to THIS week. Bullets carry the supporting detail.
 - 1-3 bullets per thread. NO issue/PR/commit numbers anywhere (no "#162", no "closes #31"); those live in a separate table. Name qualitative outcomes.
 - Ground every claim in the summaries. Never invent a version or outcome. If a thread has no clear "before", just state the concrete win and its payoff; do not fabricate a before/after.
-- Respond in Traditional Chinese (正體字) only — NEVER Simplified. Write 「帳」not「賬」，「著」not「着」，「裡」not「里」; any Simplified glyph is a hard failure.
 
 Period: {period}
 Categories (hours): {category_summary}

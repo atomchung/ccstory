@@ -37,6 +37,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The overall-period narrative no longer hardcodes "Respond in Traditional
+  Chinese" in its prompt (#116). The rule leaked into `_OVERALL_PROMPT` in
+  v0.5.0 and overrode the resolved language directive (`CCSTORY_LANG` >
+  `config.toml` > `CLAUDE.md` > `settings.json` > locale) for the overall
+  synthesis only — non-Chinese users got a Traditional-Chinese overall
+  narrative above correctly-localized category narratives. Language
+  selection is back to `language_directive()` alone; cached overalls
+  regenerate on the next `--llm-narrative` run via the prompt fingerprint.
 - The `--llm-narrative` ETA no longer over-states by ~6x (#113). It
   multiplied the session count by a hard-coded 40s — a cold start profiled
   once on one M1 Pro — while a backfill's calls run back-to-back and land
