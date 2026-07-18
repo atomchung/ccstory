@@ -177,9 +177,20 @@ monthly quota. Set `monthly_quota_usd` in `~/.ccstory/config.toml`
 
 ## Categories
 
-Four default buckets, matched against the project folder name:
+ccstory classifies each session into two layers:
 
-| Bucket | Keywords (sample) |
+- **Area** (layer 1) — the coarse bucket (`coding`, `investment`, …). Trend and
+  compare aggregate at this layer, and its numbers are the stable contract
+  downstream tools (dashboards, the MCP `get_recap` / `get_trend` shapes) read.
+- **Project** (layer 2) — the normalized project-folder leaf (e.g. `ccstory`,
+  `stock`). Projects emerge automatically from your session folders — no extra
+  config — and the recap card, markdown report, and `--json` break each area
+  down by project. This breakdown is computed at read time, so it adds no cache
+  and never re-classifies history.
+
+Four default areas, matched against the project folder name:
+
+| Area | Keywords (sample) |
 |---|---|
 | `investment` | investment, stock, portfolio, trading, ticker, etf, finance |
 | `writing` | blog, newsletter, post, docs, content, article |
@@ -193,14 +204,36 @@ Unmatched projects fall back to `coding`. Customize in
 default_bucket = "coding"
 
 [categories]
-"work"    = ["company-repo", "internal-tool"]
-"writing" = ["blog", "newsletter", "essay"]
+# An entry equal to a project's normalized leaf is an *exact member* of that
+# area. Substrings still work as a fuzzy fallback, so existing configs keep
+# resolving exactly as before.
+"learning"   = ["info-collector", "ai-project-research"]
+"investment" = ["stock", "kol-collector"]
 ```
 
-Folder rules can be overridden per-session by content (`--classify content` /
-`hybrid`), where one batched `claude -p` call re-buckets sessions by what they
-were actually about. Results cache in `~/.ccstory/cache.db` so reruns are
-free.
+**Two matching tiers.** The resolver checks *exact membership* first (the
+project's normalized leaf listed verbatim under an area), then falls back to
+the older *token-needle* fuzzy match. Because an exact member always wins over
+an earlier area's fuzzy hit, you can delete the section-ordering workarounds
+fuzzy matching used to force (listing one area before another just so a shared
+substring resolved the way you wanted). Listing the same project under two
+areas prints a warning at load and keeps the first.
+
+**Aliases** (optional). Fold variant folder-leaf names onto one canonical
+project with a `[projects]` table — useful when the same work shows up under
+more than one folder name:
+
+```toml
+[projects]
+"infocollector" = "info-collector"   # both roll up as one project
+```
+
+**Area overrides.** Folder rules can be overridden per-session by content
+(`--classify content` / `hybrid`), where one batched `claude -p` call
+re-buckets sessions by what they were actually about. An override changes a
+session's *area* only — its project is the physical fact of which folder the
+work happened in, never reassigned. Results cache in `~/.ccstory/cache.db` so
+reruns are free.
 
 ## What shipped
 
@@ -519,7 +552,7 @@ Four read-only tools:
 
 | Tool | Returns |
 |---|---|
-| `get_recap(window, classify, allow_llm)` | Totals, per-category active hours + narrative, the overall narrative, top 5 sessions, cost. |
+| `get_recap(window, classify, allow_llm)` | Totals, per-category active hours + narrative + a `children` per-project breakdown (name + hours), the overall narrative, top 5 sessions, cost. |
 | `compare_to_previous(window, classify)` | Active-hours and cost deltas vs. the immediately preceding same-length window. |
 | `get_trend(period, count, classify)` | Per-period series over the last `count` weeks/months (oldest first): active hours, cost, per-category hours. `count` clamped to 1..24. |
 | `list_categories()` | The bucket rules ccstory classifies sessions into (user + built-in defaults). |
