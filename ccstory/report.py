@@ -303,6 +303,18 @@ def render_report(
     for r in rollups:
         lines.append(f"### {r.category}")
         lines.append("")
+        # Layer-2 (#69): indented top-3 projects by active hours. Full list is
+        # in --json; this keeps the markdown scannable.
+        if r.projects:
+            top3 = r.projects[:3]
+            proj_bits = " · ".join(
+                f"**{_md_cell(p.project)}** {p.active_min / 60:.1f}h" for p in top3
+            )
+            extra = len(r.projects) - len(top3)
+            if extra > 0:
+                proj_bits += f" · +{extra} more"
+            lines.append(f"_Projects:_ {proj_bits}")
+            lines.append("")
         for s in r.top_sessions:
             summ = summaries.get(s.session_id)
             text = summ.summary if summ else s.first_user_text[:100]
@@ -440,6 +452,18 @@ def build_report_json(
                 # Additive (#57): null unless the run used
                 # --narrative per-category|both.
                 "narrative": category_narratives.get(r.category),
+                # Additive layer-2 (#69): full per-project breakdown, biggest
+                # first. schema_version stays 1 — consumers tolerate unknown
+                # keys, and layer-1 fields above are unchanged.
+                "projects": [
+                    {
+                        "name": p.project,
+                        "active_hours": round(p.active_min / 60, 2),
+                        "sessions": p.sessions,
+                        "messages": p.messages,
+                    }
+                    for p in r.projects
+                ],
             }
             for r in rollups
         ],
@@ -640,12 +664,40 @@ def render_terminal_card(
                 Text(f"{pct*100:.0f}%", style="dim"),
             )
 
+    # --- Layer-2 (#69): top projects per multi-project area ---
+    # Kept in its own grid below the bars so the layer-1 bar chart stays
+    # pixel-identical, and project names get a column wide enough not to wrap.
+    # Single-project areas are skipped — their breakdown is just themselves.
+    split_areas = [r for r in rollups if total_min > 0 and len(r.projects) >= 2]
+    proj_table: Table | None = None
+    if split_areas:
+        proj_table = Table.grid(padding=(0, 1))
+        proj_table.add_column(width=12, no_wrap=True, overflow="ellipsis")
+        proj_table.add_column(no_wrap=True, overflow="ellipsis", width=52)
+        for r in split_areas:
+            color = color_for(r.category)
+            top3 = r.projects[:3]
+            summary = " · ".join(
+                f"{p.project} {p.active_min/60:.1f}h" for p in top3
+            )
+            extra = len(r.projects) - len(top3)
+            if extra > 0:
+                summary += f" · +{extra}"
+            proj_table.add_row(
+                Text(r.category, style=color), Text(summary, style="dim"),
+            )
+
     parts: list = []
     parts.extend(highlight_block)
     parts.append(metrics)
     parts.append(Text(""))
     parts.append(Text("Time by category", style="bold underline"))
     parts.append(bars)
+
+    if proj_table is not None:
+        parts.append(Text(""))
+        parts.append(Text("By project", style="bold underline"))
+        parts.append(proj_table)
 
     if overall_narrative:
         parts.append(Text(""))

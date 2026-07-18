@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Two-layer classification, layer 2 of 3 — read-time area → project rollup
+  and two-layer presentation (#69). Each `CategoryRollup` now carries a
+  `projects` list (biggest first), grouped by the alias-folded project leaf
+  and scaled by the same wall-clock factor as its area, so project hours
+  sum back to the area total. Computed entirely at read time from the
+  sessions already in hand — **no new cache family, no fingerprint, no
+  migration** (the #118-class regression the RFC guards against). The
+  terminal card gains a "By project" block for areas that split across more
+  than one project (layer-1 bar chart unchanged); the markdown report shows
+  an indented top-3-projects line per area; `--json` gains an additive
+  `projects` array inside each bucket (`schema_version` stays 1). trend /
+  compare stay layer-1 only.
 - Two-layer classification, layer 1 of 3 — resolver v2 (#69). The area
   resolver now checks **exact membership** first (the project's normalized
   leaf listed verbatim under an area) before the existing token-needle
