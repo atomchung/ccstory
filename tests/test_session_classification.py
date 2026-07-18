@@ -308,12 +308,17 @@ class TestClassifySessionsByContent:
             result = classify_sessions_by_content(items, batch_size=2)
 
         # Default config supplies four preferred buckets, leaving room for
-        # two genuinely new names. The third never reaches the durable cache.
-        assert set(result.values()) == {"research", "ops"}
-        assert "s4" not in result and "s5" not in result
+        # two genuinely new names. The third never enters the vocabulary —
+        # but its sessions are negative-cached at the fallback bucket (#120)
+        # instead of silently re-burning a claude -p chunk every future run.
+        assert result["s0"] == result["s1"] == "research"
+        assert result["s2"] == result["s3"] == "ops"
+        assert result["s4"] == result["s5"] == "coding"  # default fallback
         assert _classify_cache_get_many([f"s{i}" for i in range(6)]) == result
 
-    def test_one_off_invented_bucket_is_not_cached(self, tmp_home: Path):
+    def test_one_off_invented_bucket_never_enters_vocab_but_is_cached(
+        self, tmp_home: Path,
+    ):
         proposed = subprocess.CompletedProcess(
             args=[], returncode=0,
             stdout=(
@@ -331,8 +336,66 @@ class TestClassifySessionsByContent:
                 ("s2", "y", "software task"),
             ])
 
-        assert result == {"s2": "coding"}
-        assert _classify_cache_get_many(["s1", "s2"]) == {"s2": "coding"}
+        # The one-off name is rejected from the vocabulary, but the session
+        # is negative-cached at the fallback bucket (#120) so it never
+        # re-burns a chunk. "one-off-label" itself must not reach the cache.
+        assert result == {"s1": "coding", "s2": "coding"}
+        cached = _classify_cache_get_many(["s1", "s2"])
+        assert cached == result
+        assert "one-off-label" not in cached.values()
+
+    def test_dropped_sessions_do_not_reburn_on_next_run(self, tmp_home: Path):
+        """#120 regression: a validation-dropped session used to get no
+        cache row at all, so every future run re-entered it into `pending`
+        and re-burned a claude -p chunk — forever. Second run must make
+        ZERO LLM calls."""
+        calls = 0
+
+        def mock_run(cmd, *, capture_output, text, timeout, check):
+            nonlocal calls
+            calls += 1
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0,
+                stdout='{"session_id": "s1", "bucket": "one-off-label"}\n',
+                stderr="",
+            )
+
+        items = [("s1", "x", "unique task")]
+        with patch("ccstory.session_summarizer.claude_bin_available",
+                   return_value=True), \
+             patch("ccstory.session_summarizer.subprocess.run",
+                   side_effect=mock_run):
+            first = classify_sessions_by_content(items)
+            second = classify_sessions_by_content(items)
+
+        assert calls == 1  # run 2 is served entirely from the cache
+        assert first == second == {"s1": "coding"}
+
+    def test_model_omissions_stay_uncached_and_retry(self, tmp_home: Path):
+        """The negative cache covers only validation drops — a sid the
+        model failed to answer for is transient and must retry next run."""
+        calls = 0
+
+        # Patch run_claude_p (the logical LLM call), not subprocess.run:
+        # empty stdout at the subprocess layer would trip #99's broken-flag
+        # retry and double-count.
+        def fake_claude(prompt, timeout):
+            nonlocal calls
+            calls += 1
+            return subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="", stderr="",  # no rows
+            )
+
+        items = [("s1", "x", "some task")]
+        with patch("ccstory.session_summarizer.claude_bin_available",
+                   return_value=True), \
+             patch("ccstory.session_summarizer.run_claude_p",
+                   side_effect=fake_claude):
+            classify_sessions_by_content(items)
+            classify_sessions_by_content(items)
+
+        assert calls == 2  # omission is retried, not frozen into the cache
+        assert _classify_cache_get_many(["s1"]) == {}
 
     def test_on_chunk_complete_fires_per_chunk(self, tmp_home: Path):
         """Issue #75: progress callback lets callers update a console.status

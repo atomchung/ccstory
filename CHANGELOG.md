@@ -27,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a cache hit; a whole-hour crossing still regenerates); the prompt the
   LLM sees keeps 0.1h precision. The definition change invalidates
   existing overall aggregates once (a few calls per window).
+- Sessions whose model-proposed bucket is rejected by validation (a
+  one-off name, or the vocabulary cap) no longer re-burn a `claude -p`
+  chunk on every future run (#120). They are now negative-cached at the
+  fallback bucket under the current input fingerprint — bounded cost, and
+  any category-config change rotates the fingerprint and gives them a
+  fresh shot at a real bucket. Model omissions and parse failures stay
+  uncached on purpose: those are transient, and retrying them is correct.
 
 ## [0.5.2] - 2026-07-18
 
