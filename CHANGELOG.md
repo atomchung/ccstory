@@ -37,6 +37,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The overall-period narrative no longer hardcodes "Respond in Traditional
+  Chinese" in its prompt (#116). The rule leaked into `_OVERALL_PROMPT` in
+  v0.5.0 and overrode the resolved language directive (`CCSTORY_LANG` >
+  `config.toml` > `CLAUDE.md` > `settings.json` > locale) for the overall
+  synthesis only — non-Chinese users got a Traditional-Chinese overall
+  narrative above correctly-localized category narratives. Language
+  selection is back to `language_directive()` alone; cached overalls
+  regenerate on the next `--llm-narrative` run via the prompt fingerprint.
 - Upgrading a pre-0.5.1 cache no longer orphans existing content
   classifications (#118). Migration 2 stamped legacy rows with an empty
   fingerprint that no read path matches, so every pre-upgrade
