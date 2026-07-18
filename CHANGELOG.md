@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Two-layer classification, layer 1 of 3 — resolver v2 (#69). The area
+  resolver now checks **exact membership** first (the project's normalized
+  leaf listed verbatim under an area) before the existing token-needle
+  fuzzy tier, so a project explicitly assigned to an area wins over an
+  earlier area that merely matches a token — the section-ordering hacks
+  token matching forced can now be deleted. Both tiers still report as
+  `user_rule`; existing token-needle configs resolve byte-identically
+  (exact membership is always also a token match, so the only behavior
+  change is the intended ordering fix). Adds an optional `[projects]`
+  alias table (`alias_fold` / `project_identity`) to fold variant
+  folder-leaf names onto one canonical project, and a load-time warning
+  when a project is listed under more than one area (first wins).
+  `category set/unset` now preserves the `[projects]` table across
+  re-renders.
 - `get_trend` MCP tool — the fourth and final tool from #35: per-period
   activity series over the last `count` weeks/months (oldest first) with
   active hours, cost, and per-category hours per point. Cache-only under

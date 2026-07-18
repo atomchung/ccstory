@@ -65,6 +65,69 @@ def normalize_project_name(encoded: str) -> str:
     return leaf or "(top-level)"
 
 
+def _extract_aliases(cfg: dict) -> dict[str, str]:
+    """Pull the optional ``[projects]`` alias table out of a loaded config.
+
+    Keys/values are lowercased to match ``normalize_project_name``'s output.
+    Malformed entries (non-string variant or canonical) are skipped.
+    """
+    raw = cfg.get("projects")
+    if not isinstance(raw, dict):
+        return {}
+    aliases: dict[str, str] = {}
+    for variant, canonical in raw.items():
+        if isinstance(variant, str) and isinstance(canonical, str):
+            v = variant.strip().lower()
+            c = canonical.strip().lower()
+            if v and c:
+                aliases[v] = c
+    return aliases
+
+
+def load_project_aliases(config_path: Path | None = None) -> dict[str, str]:
+    """Load the optional ``[projects]`` alias table (variant leaf → canonical).
+
+    Layer-2 (#69) folds variant folder-leaf names onto one canonical project
+    so a repo that surfaces as both ``info_collector`` and ``info-collector``
+    rolls up as a single project. Absent/empty table → ``{}``, which makes
+    ``alias_fold`` a no-op and keeps every existing config's numbers unchanged.
+
+    ``config_path`` resolves to module-level ``CONFIG_PATH`` at call time when
+    omitted, so test monkeypatches take effect.
+    """
+    if config_path is None:
+        config_path = CONFIG_PATH
+    return _extract_aliases(_load_toml(config_path) or {})
+
+
+def alias_fold(leaf: str, aliases: dict[str, str] | None) -> str:
+    """Map a normalized project leaf onto its canonical name via ``[projects]``.
+
+    No-op when ``aliases`` is empty/None or the leaf has no entry — so existing
+    configs (no ``[projects]`` table) fold to the identity and every layer-1
+    number stays byte-identical.
+    """
+    if not aliases:
+        return leaf
+    return aliases.get(leaf, leaf)
+
+
+def project_identity(
+    project_dir: str,
+    aliases: dict[str, str] | None = None,
+    config_path: Path | None = None,
+) -> str:
+    """Layer-2 project identity: ``alias_fold(normalize_project_name(dir))``.
+
+    The single source of truth for a session's project leaf across the rollup
+    and report paths (#69). Pass a pre-loaded ``aliases`` map to avoid
+    re-reading config per session; omit it to load lazily from ``config_path``.
+    """
+    if aliases is None:
+        aliases = load_project_aliases(config_path)
+    return alias_fold(normalize_project_name(project_dir), aliases)
+
+
 # Default 4-bucket rules. Designed to be activity-level, not job-function-
 # level — `data` / `ops` / `research` collapse into either coding (if you
 # wrote code) or writing (if you wrote prose). Users tune via config.toml.
@@ -255,16 +318,82 @@ def classify(
     return fallback
 
 
+def _membership_index(
+    categories: dict,
+) -> tuple[dict[str, str], list[tuple[str, list[str]]]]:
+    """Build the exact-membership lookup from a ``[categories]`` table.
+
+    Returns ``(needle → first area, duplicates)`` where a *duplicate* is a
+    needle listed verbatim under more than one area. Config order defines
+    "first wins": ``tomllib`` preserves table order, so the first area in the
+    file keeps the needle and later ones are recorded for the load-time
+    warning (#69). Needles are lowercased but NOT stripped — identical to the
+    token-needle tier below — so an exact match is always also a token match,
+    which is what keeps layer-1 numbers byte-identical (the only behavior
+    change is that an exact membership now wins over an *earlier* area's fuzzy
+    match, the documented ordering-hack fix).
+
+    Only well-formed ``list[str]`` rules participate — malformed rules are
+    skipped exactly as ``load_rules`` skips them.
+    """
+    index: dict[str, str] = {}
+    seen: dict[str, list[str]] = {}
+    for area, needles in categories.items():
+        if not (isinstance(needles, list) and all(isinstance(n, str) for n in needles)):
+            continue
+        for needle in needles:
+            key = needle.lower()
+            if not key:
+                continue
+            seen.setdefault(key, []).append(str(area))
+            if key not in index:
+                index[key] = str(area)
+    duplicates = [(needle, areas) for needle, areas in seen.items() if len(areas) > 1]
+    return index, duplicates
+
+
+def duplicate_memberships(
+    config_path: Path | None = None,
+) -> list[tuple[str, list[str]]]:
+    """Project names listed under more than one area in ``[categories]`` (#69).
+
+    Each entry is ``(project_name, [areas in config order])``. The resolver
+    keeps the first area (see ``_membership_index``); this surfaces the rest so
+    a run can warn that the config silently shadows a membership. Empty list
+    means the config is unambiguous.
+
+    ``config_path`` resolves to module-level ``CONFIG_PATH`` at call time when
+    omitted, so test monkeypatches take effect.
+    """
+    if config_path is None:
+        config_path = CONFIG_PATH
+    cfg = _load_toml(config_path) or {}
+    cats = cfg.get("categories")
+    if not isinstance(cats, dict):
+        return []
+    _, duplicates = _membership_index(cats)
+    return duplicates
+
+
 def user_rule_match(
     project_dir: str,
     config_path: Path | None = None,
 ) -> str | None:
     """If the project leaf matches a rule defined in `~/.ccstory/config.toml`,
-    return that bucket name. Otherwise None.
+    return that area name. Otherwise None.
 
     Used by hybrid session-level classification (#25) to decide whether the
     user has expressed an *explicit* opinion about this project. If yes, the
     folder rule wins; if no, content-derived bucket takes over.
+
+    Two tiers, both reported as ``user_rule`` upstream (#69):
+      1. **exact membership** — the (alias-folded) project leaf is listed
+         verbatim under an area. Unambiguous by construction, so it wins over
+         the fuzzy match below; this is what lets configs drop the section-
+         ordering hacks token matching forces.
+      2. **token-needle match** — today's fuzzy matching, kept as a compat
+         tier so every existing config keeps working unmodified. Original
+         first-match-wins-in-config-order semantics preserved.
 
     ``config_path`` resolves to module-level ``CONFIG_PATH`` at call time when
     omitted, so test monkeypatches take effect.
@@ -275,6 +404,19 @@ def user_rule_match(
     cats = cfg.get("categories")
     if not isinstance(cats, dict):
         return None
+    # Alias-fold the leaf first so a folded variant matches membership/needles
+    # under its canonical name. Empty [projects] → identity fold → unchanged.
+    leaf = alias_fold(normalize_project_name(project_dir), _extract_aliases(cfg))
+    if not leaf:
+        return None
+
+    # Tier 1: exact membership across all areas (first area in config wins).
+    index, _ = _membership_index(cats)
+    exact = index.get(leaf)
+    if exact:
+        return exact
+
+    # Tier 2: token-needle fuzzy match (compat).
     user_rules: list[CategoryRule] = []
     for name, needles in cats.items():
         if isinstance(needles, list) and all(isinstance(n, str) for n in needles):
@@ -282,9 +424,6 @@ def user_rule_match(
                 CategoryRule(name=str(name), needles=[n.lower() for n in needles])
             )
     if not user_rules:
-        return None
-    leaf = normalize_project_name(project_dir)
-    if not leaf:
         return None
     tokens = leaf.split("-")
     token_set = set(tokens)
@@ -425,11 +564,15 @@ def _render_config(
     default_bucket: str,
     monthly_quota_usd: float,
     language: str | None = None,
+    projects: dict[str, str] | None = None,
 ) -> str:
     """Re-render config.toml from scratch from in-memory state.
 
     Comments and section ordering are stable across writes so successive
-    `category set/unset` commands produce minimal diffs.
+    `category set/unset` commands produce minimal diffs. The optional
+    ``[projects]`` alias table (#69) is preserved verbatim and only emitted
+    when non-empty, so a config that never used aliases renders byte-for-byte
+    as before.
     """
     import json as _json
     lines = [
@@ -450,6 +593,14 @@ def _render_config(
         f'language = {_json.dumps(language)}' if language else '# language = ""',
         "",
     ]
+    if projects:
+        lines.append(
+            "# Fold variant folder-leaf names onto one canonical project (#69)."
+        )
+        lines.append("[projects]")
+        for variant in sorted(projects):
+            lines.append(f'{_json.dumps(variant)} = {_json.dumps(projects[variant])}')
+        lines.append("")
     if categories:
         lines.append("[categories]")
         for bucket in sorted(categories):
@@ -466,15 +617,23 @@ def _render_config(
 
 def _load_state(
     path: Path,
-) -> tuple[dict[str, list[str]], str, float, str | None]:
+) -> tuple[dict[str, list[str]], dict[str, str], str, float, str | None]:
     """Read existing config (or defaults) into
-    ``(categories, default_bucket, quota, language)``."""
+    ``(categories, projects, default_bucket, quota, language)``.
+
+    ``projects`` is the raw ``[projects]`` alias table, preserved so a
+    ``category set/unset`` re-render never silently drops the user's aliases.
+    """
     cfg = _load_toml(path) or {}
     raw_cats = cfg.get("categories") if isinstance(cfg.get("categories"), dict) else {}
     categories: dict[str, list[str]] = {}
     for bucket, kws in raw_cats.items():
         if isinstance(kws, list) and all(isinstance(k, str) for k in kws):
             categories[str(bucket)] = [k for k in kws]
+    raw_projs = cfg.get("projects") if isinstance(cfg.get("projects"), dict) else {}
+    projects: dict[str, str] = {
+        str(k): str(v) for k, v in raw_projs.items() if isinstance(v, str)
+    }
     default_bucket = str(cfg.get("default_bucket", DEFAULT_FALLBACK_BUCKET))
     try:
         quota = float(cfg.get("monthly_quota_usd", DEFAULT_MONTHLY_QUOTA_USD))
@@ -485,7 +644,7 @@ def _load_state(
         lang = None
     else:
         lang = lang.strip()
-    return categories, default_bucket, quota, lang
+    return categories, projects, default_bucket, quota, lang
 
 
 def add_category_keywords(
@@ -512,7 +671,7 @@ def add_category_keywords(
     if not cleaned:
         raise ValueError("at least one non-empty keyword required")
 
-    categories, default_bucket, quota, language = _load_state(path)
+    categories, projects, default_bucket, quota, language = _load_state(path)
     moved: list[tuple[str, str]] = []
     for kw in cleaned:
         for b, kws in list(categories.items()):
@@ -527,7 +686,7 @@ def add_category_keywords(
             target.append(kw)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        _render_config(categories, default_bucket, quota, language),
+        _render_config(categories, default_bucket, quota, language, projects),
         encoding="utf-8",
     )
     return categories, moved
@@ -549,7 +708,7 @@ def remove_category_keywords(
     if not cleaned:
         raise ValueError("at least one non-empty keyword required")
 
-    categories, default_bucket, quota, language = _load_state(path)
+    categories, projects, default_bucket, quota, language = _load_state(path)
     missing: list[str] = []
     target = categories.get(bucket, [])
     for kw in cleaned:
@@ -561,7 +720,7 @@ def remove_category_keywords(
         del categories[bucket]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        _render_config(categories, default_bucket, quota, language),
+        _render_config(categories, default_bucket, quota, language, projects),
         encoding="utf-8",
     )
     return categories, missing
@@ -573,7 +732,7 @@ def list_user_categories(
     """Return the current user `[categories]` mapping (empty if none)."""
     if path is None:
         path = CONFIG_PATH
-    categories, _, _, _ = _load_state(path)
+    categories, _, _, _, _ = _load_state(path)
     return categories
 
 
