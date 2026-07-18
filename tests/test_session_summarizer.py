@@ -391,6 +391,9 @@ class TestCacheSchemaMigrations:
 
         migrated = ss._connect()
         try:
+            # Narrative families keep their rows but are deliberately NOT
+            # adopted: their prompts changed after v0.5.1, so re-synthesis
+            # (a few calls per window) is the intended outcome (#118).
             assert migrated.execute(
                 "SELECT summary, input_fingerprint FROM period_aggregates"
             ).fetchone() == ("aggregate", "")
@@ -398,12 +401,69 @@ class TestCacheSchemaMigrations:
                 "SELECT narrative, input_fingerprint "
                 "FROM comparison_narratives"
             ).fetchone() == ("comparison", "")
-            assert migrated.execute(
-                "SELECT bucket, input_fingerprint "
-                "FROM session_content_buckets"
-            ).fetchone() == ("coding", "")
         finally:
             migrated.close()
+        # The classification family must survive *behaviorally*: adopted
+        # under the current fingerprint and readable through the production
+        # path. Row survival alone certified dead cache as "preserved" (#118).
+        assert ss._classify_cache_get_many(["s1"]) == {"s1": "coding"}
+
+    def test_v2_db_with_orphaned_fingerprints_adopts_classifications(
+        self, tmp_home: Path,
+    ):
+        # An install that already upgraded to 0.5.1: user_version=2 with
+        # rows migration 2 stamped '' (#118). Migration 3 must resurrect
+        # the classification family through the production read path,
+        # while narrative families intentionally stay unstamped.
+        raw = sqlite3.connect(str(ss.DB_PATH))
+        raw.execute("BEGIN")
+        ss._migration_1_baseline(raw)
+        ss._migration_2_cache_fingerprints(raw)
+        raw.execute("PRAGMA user_version = 2")
+        raw.execute(
+            "INSERT INTO session_content_buckets VALUES (?, ?, ?, '')",
+            ("s1", "coding", 1.0),
+        )
+        raw.execute(
+            "INSERT INTO period_aggregates VALUES (?, ?, ?, ?, ?, '')",
+            ("p", "coding", "aggregate", "s1", 1.0),
+        )
+        raw.commit()
+        raw.close()
+
+        assert ss._classify_cache_get_many(["s1"]) == {"s1": "coding"}
+        check = sqlite3.connect(str(ss.DB_PATH))
+        try:
+            assert check.execute("PRAGMA user_version").fetchone()[0] == (
+                ss.CACHE_SCHEMA_VERSION
+            )
+            assert check.execute(
+                "SELECT input_fingerprint FROM period_aggregates"
+            ).fetchone() == ("",)
+        finally:
+            check.close()
+
+    def test_adopted_rows_invalidate_when_config_changes(
+        self, tmp_home: Path,
+    ):
+        # Adoption stamps the *current* fingerprint — a later config/vocab
+        # change must still invalidate adopted rows like any other row.
+        raw = sqlite3.connect(str(ss.DB_PATH))
+        raw.execute("BEGIN")
+        ss._migration_1_baseline(raw)
+        ss._migration_2_cache_fingerprints(raw)
+        raw.execute("PRAGMA user_version = 2")
+        raw.execute(
+            "INSERT INTO session_content_buckets VALUES (?, ?, ?, '')",
+            ("s1", "coding", 1.0),
+        )
+        raw.commit()
+        raw.close()
+
+        assert ss._classify_cache_get_many(["s1"]) == {"s1": "coding"}
+        assert ss._classify_cache_get_many(
+            ["s1"], input_fingerprint="different-config"
+        ) == {}
 
     def test_already_current_db_skips_migrations(
         self, tmp_home: Path, monkeypatch: pytest.MonkeyPatch,

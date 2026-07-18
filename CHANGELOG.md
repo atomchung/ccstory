@@ -37,6 +37,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Upgrading a pre-0.5.1 cache no longer orphans existing content
+  classifications (#118). Migration 2 stamped legacy rows with an empty
+  fingerprint that no read path matches, so every pre-upgrade
+  classification silently stopped resolving: recaps re-burned `claude -p`
+  for sessions that were already classified, and the cache-only trend /
+  compare paths permanently degraded old windows to folder/fallback
+  buckets. Migration 3 adopts those rows under the current fingerprint
+  (the same no-re-burn contract migration 1 applies to `prompt_version`),
+  which also retroactively resurrects caches on installs that already
+  upgraded — the rows were still there, just unreadable. Aggregate and
+  comparison narratives are deliberately re-synthesized instead: their
+  prompts changed after v0.5.1, and that costs a few calls per window,
+  not one per session.
 - The `--llm-narrative` ETA no longer over-states by ~6x (#113). It
   multiplied the session count by a hard-coded 40s — a cold start profiled
   once on one M1 Pro — while a backfill's calls run back-to-back and land
