@@ -59,6 +59,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   measures `claude -p` from the gaps between `auto` rows already in the
   cache. A genuine first run has no history to read and still shows the old
   constant, labeled `first-run estimate` rather than passed off as measured.
+- A corrupt, locked, or newer-schema `~/.ccstory/cache.db` no longer kills
+  the host process (#119). `_connect()` raised `SystemExit` — right for the
+  CLI, fatal for in-process consumers (`build_recap()` library callers, the
+  MCP server), since `except Exception` cannot catch a `BaseException`. It
+  now raises `session_summarizer.CacheUnavailable`; the CLI catches it at
+  the entry point and keeps the exact old behavior (message to stderr,
+  exit 1). A transient `database is locked` is also no longer misreported
+  as corruption with `rm ~/.ccstory/cache.db` advice — it now says another
+  process holds the cache and to retry.
 
 ## [0.5.1] - 2026-07-14
 

@@ -148,6 +148,23 @@ class TestCliShell:
         assert len(reports) == 1
         assert reports[0].read_text(encoding="utf-8") == out
 
+    def test_corrupt_cache_exits_one_with_message_not_death(
+        self, tmp_home, jsonl_factory, capsys,
+    ):
+        # CacheUnavailable is a normal exception since #119; the CLI seam
+        # must translate it back to the old contract: message on stderr,
+        # exit code 1 — no traceback, no SystemExit.
+        _seed_session(jsonl_factory)
+        cache = tmp_home / ".ccstory" / "cache.db"
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_bytes(b"definitely not a sqlite database" * 4)
+
+        rc = cli.main(["week", "--no-artifacts"])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "corrupted" in err
+        assert f"rm {cache}" in err
+
     def test_unknown_window_exits_with_message(self, tmp_home):
         with pytest.raises(SystemExit) as exc:
             cli.main(["bogus-window"])

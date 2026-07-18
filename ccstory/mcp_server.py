@@ -42,6 +42,7 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 from . import recap  # noqa: E402 — module import so recap.CONFIG_PATH reads live (test monkeypatches target the attribute, not a copied value)
 from .categorizer import load_rules, load_settings, normalize_project_name  # noqa: E402
+from .session_summarizer import CacheUnavailable  # noqa: E402
 from .recap import RecapUnavailable, build_recap, parse_window  # noqa: E402
 from .time_tracking import collect_sessions, rollup_by_category  # noqa: E402
 from .token_usage import apply_prices, collect_usage, load_prices_config  # noqa: E402
@@ -63,12 +64,12 @@ Classify = Literal["folder", "content", "hybrid"]
 _DEFAULT_CLASSIFY: Classify = "folder"
 
 # Errors every tool below normalizes into {"ok": False, "error": ...} instead
-# of letting propagate. SystemExit (raised by session_summarizer._connect()
-# on a corrupt cache.db) is the one that matters most: it subclasses
-# BaseException, so FastMCP's own `except Exception` safety net does NOT
-# catch it — an uncaught SystemExit here would kill the whole server
-# process over one bad tool call instead of just failing that call.
-_TOOL_ERRORS = (ValueError, RecapUnavailable, SystemExit)
+# of letting propagate. CacheUnavailable is what _connect() raises on a
+# corrupt/locked/newer cache.db since #119. SystemExit stays as
+# belt-and-braces (it subclasses BaseException, so FastMCP's own `except
+# Exception` safety net does NOT catch it — an uncaught SystemExit here
+# would kill the whole server process over one bad tool call).
+_TOOL_ERRORS = (ValueError, RecapUnavailable, CacheUnavailable, SystemExit)
 
 
 def _normalize_error(e: BaseException) -> dict:
