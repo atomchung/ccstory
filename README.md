@@ -515,20 +515,23 @@ Claude Code's MCP settings — same shape):
 }
 ```
 
-Three read-only tools in v0:
+Four read-only tools:
 
 | Tool | Returns |
 |---|---|
 | `get_recap(window, classify, allow_llm)` | Totals, per-category active hours + narrative, the overall narrative, top 5 sessions, cost. |
 | `compare_to_previous(window, classify)` | Active-hours and cost deltas vs. the immediately preceding same-length window. |
+| `get_trend(period, count, classify)` | Per-period series over the last `count` weeks/months (oldest first): active hours, cost, per-category hours. `count` clamped to 1..24. |
 | `list_categories()` | The bucket rules ccstory classifies sessions into (user + built-in defaults). |
 
-`window` accepts `week` / `month` / `all` / `YYYY-MM`, same as the CLI.
-Default `classify="folder"` and `allow_llm=False` never trigger a fresh
-`claude -p` call — an MCP client may call these tools opportunistically
-mid-conversation, so nothing here should cost you latency or tokens unless
-you explicitly ask for it (`classify="content"` / `"hybrid"`, or
-`allow_llm=True` on `get_recap`).
+`window` accepts `week` / `month` / `all` / `YYYY-MM`, same as the CLI;
+`period` is `week` or `month`. Default `classify="folder"` and
+`allow_llm=False` never trigger a fresh `claude -p` call — an MCP client
+may call these tools opportunistically mid-conversation, so nothing here
+should cost you latency or tokens unless you explicitly ask for it
+(`classify="content"` / `"hybrid"`, or `allow_llm=True` on `get_recap`;
+`compare_to_previous` and `get_trend` stay cache-only under every
+parameter combination).
 
 **This is a third, distinct JSON contract**, not the same shape as either
 of the two above: not `--json` / `RecapResult.to_json()` (which lists
@@ -537,8 +540,6 @@ MCP responses are deliberately compact — top 5 sessions, not the full
 list — so they're cheap for an agent to read into its own context, and
 never include raw transcript text, only summaries.
 
-`get_trend` (multi-period sparkline data) isn't in v0 yet — see
-[#35](https://github.com/atomchung/ccstory/issues/35) for status.
 
 ## Roadmap
 

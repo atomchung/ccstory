@@ -23,6 +23,7 @@ from tests.conftest import make_assistant_msg, make_user_msg  # noqa: E402
 from ccstory.mcp_server import (  # noqa: E402
     compare_to_previous,
     get_recap,
+    get_trend,
     list_categories,
 )
 
@@ -248,6 +249,69 @@ class TestCompareToPrevious:
         assert out["current_cost_usd"] > 0.1
 
 
+class TestGetTrend:
+    def test_happy_path_shape(self, tmp_home, jsonl_factory):
+        _seed_session(jsonl_factory, "-Users-me-proj", "sess-now", hours_ago=2)
+        _seed_session(jsonl_factory, "-Users-me-proj", "sess-old",
+                      hours_ago=9 * 24)
+        out = get_trend(period="week", count=2)
+        assert out["ok"] is True
+        assert out["period"] == "week"
+        assert out["count"] == 2
+        assert len(out["points"]) == 2
+        for p in out["points"]:
+            assert set(p) == {"label", "since", "until", "active_hours",
+                              "cost_usd", "buckets"}
+        # Windows come back oldest first; the seeded sessions put activity
+        # in both of them.
+        assert out["points"][0]["since"] < out["points"][1]["since"]
+        assert out["points"][-1]["active_hours"] > 0
+        assert out["points"][-1]["buckets"][0]["sessions"] >= 1
+
+    def test_count_is_clamped(self, tmp_home):
+        out = get_trend(period="week", count=999)
+        assert out["ok"] is True
+        assert out["count"] == 24
+        assert len(out["points"]) == 24
+        out = get_trend(period="week", count=0)
+        assert out["count"] == 1
+
+    def test_bad_period_normalizes_instead_of_raising(self, tmp_home):
+        out = get_trend(period="day")
+        assert out["ok"] is False
+        assert "unsupported" in out["error"]
+
+    def test_never_fires_llm_even_with_hybrid(
+        self, tmp_home, jsonl_factory, monkeypatch,
+    ):
+        """The docstring guarantee: no parameter combination runs claude -p.
+        Fence off the subprocess chokepoint itself so ANY LLM attempt fails
+        loudly, then ask for the LLM-most classify mode."""
+        _seed_session(jsonl_factory, "-Users-me-unrecognized-x", "sess-1",
+                      hours_ago=2)
+
+        def _boom(*a, **kw):
+            raise AssertionError("get_trend must never invoke claude -p")
+
+        monkeypatch.setattr(ss, "run_claude_p", _boom)
+        out = get_trend(period="week", count=1, classify="hybrid")
+        assert out["ok"] is True
+
+    def test_applies_configured_prices_before_computing_cost(
+        self, tmp_home, jsonl_factory,
+    ):
+        """Same regression fence compare_to_previous carries (#115): cost
+        must reflect the config.toml [prices] override, not global state."""
+        _seed_session(jsonl_factory, "-Users-me-proj", "sess-cur", hours_ago=2)
+        config_path = tmp_home / ".ccstory" / "config.toml"
+        config_path.write_text(
+            "[prices.opus]\ninput = 999.0\noutput = 999.0\n", encoding="utf-8",
+        )
+        out = get_trend(period="week", count=1)
+        assert out["ok"] is True
+        assert out["points"][-1]["cost_usd"] > 0.1
+
+
 class TestListCategories:
     def test_returns_default_rules_shape(self, tmp_home):
         out = list_categories()
@@ -278,6 +342,7 @@ def test_no_stdout_leak_across_tools(tmp_home, jsonl_factory, capsys):
     _seed_session(jsonl_factory, "-Users-me-proj", "sess-prev", hours_ago=9 * 24)
     get_recap(window="week")
     compare_to_previous(window="week")
+    get_trend(period="week", count=2)
     list_categories()
     assert capsys.readouterr().out == ""
 
