@@ -916,7 +916,24 @@ def synthesize_overall_for_period(
         category_summary=cat_hours_line,
         breakdown=breakdown,
     )
-    input_fingerprint = _cache_fingerprint("period-overall", prompt)
+    # The fingerprint hashes a variant with hours coarsened to whole hours
+    # (#121): the primary flow runs ccstory from inside a live Claude Code
+    # session, so the active window's hours creep between any two reruns —
+    # at 0.1h precision the overall cache effectively never hit for the
+    # current week/month, re-burning a ~90s claude -p call per rerun. Sub-
+    # hour drift now stays a hit; the prompt the LLM sees keeps 0.1h.
+    fp_hours_line = ", ".join(
+        f"{cat} {int(round(hrs))}h" for cat, hrs in category_hours if hrs > 0
+    ) or "(none)"
+    input_fingerprint = _cache_fingerprint(
+        "period-overall",
+        _OVERALL_PROMPT.format(
+            language_directive=language_directive(),
+            period=period_key,
+            category_summary=fp_hours_line,
+            breakdown=breakdown,
+        ),
+    )
 
     conn = _connect()
     try:

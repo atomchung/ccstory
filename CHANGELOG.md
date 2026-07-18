@@ -16,6 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same config `[prices]` override as every other cost-reporting entry
   point, and clamps `count` to 1..24.
 
+### Fixed
+
+- The overall-narrative cache no longer misses on every rerun of the
+  active window (#121). Its fingerprint embedded per-category hours at
+  0.1h precision, and the primary flow runs ccstory from inside a live
+  Claude Code session — so the current week/month drifted ~6 minutes
+  between any two runs and re-burned a ~90s `claude -p` call each time.
+  The fingerprint now coarsens hours to whole hours (sub-hour drift stays
+  a cache hit; a whole-hour crossing still regenerates); the prompt the
+  LLM sees keeps 0.1h precision. The definition change invalidates
+  existing overall aggregates once (a few calls per window).
+
 ## [0.5.2] - 2026-07-18
 
 ### Added
