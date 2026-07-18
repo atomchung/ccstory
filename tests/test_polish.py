@@ -47,20 +47,20 @@ class TestMalformedTomlLoudWarn:
 
 
 class TestSqliteCorruptionRecovery:
-    def test_corrupt_db_exits_with_recovery_hint(
-        self, tmp_home: Path, capsys: pytest.CaptureFixture[str],
-    ):
+    def test_corrupt_db_raises_with_recovery_hint(self, tmp_home: Path):
         # Write garbage where the cache db would live, then probe _connect.
+        # Since #119 this is a catchable CacheUnavailable carrying the full
+        # message (the CLI seam turns it into stderr + exit 1), not a
+        # process-killing SystemExit.
         session_summarizer.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         session_summarizer.DB_PATH.write_bytes(b"this is not a sqlite file")
-        with pytest.raises(SystemExit) as excinfo:
+        with pytest.raises(session_summarizer.CacheUnavailable) as excinfo:
             session_summarizer._connect()
-        assert excinfo.value.code == 1
-        captured = capsys.readouterr()
-        assert "corrupted" in captured.err
+        msg = str(excinfo.value)
+        assert "corrupted" in msg
         # Recovery instruction names the path the user should rm
-        assert str(session_summarizer.DB_PATH) in captured.err
-        assert "rm " in captured.err
+        assert str(session_summarizer.DB_PATH) in msg
+        assert "rm " in msg
 
     def test_fresh_db_connects_fine(self, tmp_home: Path):
         # Sanity: no file yet → _connect creates one without issue

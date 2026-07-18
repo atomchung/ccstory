@@ -117,6 +117,25 @@ class TestGetRecap:
         out = get_recap(window="week")
         assert out == {"ok": False, "error": "cache.db is corrupted"}
 
+    def test_cache_unavailable_is_normalized(
+        self, tmp_home, jsonl_factory, monkeypatch,
+    ):
+        """CacheUnavailable is what _connect() actually raises since #119 —
+        the tool must return it as a normal error payload, message intact."""
+        from ccstory.session_summarizer import CacheUnavailable
+
+        _seed_session(jsonl_factory, "-Users-me-proj", "sess-1", hours_ago=2)
+
+        def _boom(*a, **kw):
+            raise CacheUnavailable("ccstory: error: cache at /x is corrupted")
+
+        monkeypatch.setattr(recap, "_classify_cache_get_many", _boom)
+        out = get_recap(window="week")
+        assert out == {
+            "ok": False,
+            "error": "ccstory: error: cache at /x is corrupted",
+        }
+
     def test_allow_llm_false_never_synthesizes_narrative(
         self, tmp_home, jsonl_factory, monkeypatch,
     ):

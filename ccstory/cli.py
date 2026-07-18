@@ -59,6 +59,7 @@ from .report import (
     render_trend_markdown,
 )
 from .session_summarizer import (
+    CacheUnavailable,
     invalidate_comparison_narratives,
     invalidate_period_aggregates,
 )
@@ -415,6 +416,22 @@ def _run_mcp(argv: list[str]) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entry point: `_dispatch` plus the one cross-cutting error trap.
+
+    `CacheUnavailable` can surface from any subcommand — every cache access
+    funnels through `session_summarizer._connect()`. Catching it here keeps
+    the CLI contract (full message to stderr, exit 1) while letting library
+    callers of `build_recap()` catch it as a normal exception instead of
+    dying on a `SystemExit` they cannot intercept (#119).
+    """
+    try:
+        return _dispatch(argv)
+    except CacheUnavailable as e:
+        print(str(e), file=sys.stderr)
+        return 1
+
+
+def _dispatch(argv: list[str] | None = None) -> int:
     raw = list(argv) if argv is not None else sys.argv[1:]
 
     # Manual dispatch for subcommands — keeps default `ccstory week`

@@ -405,6 +405,37 @@ class TestCacheSchemaMigrations:
         finally:
             migrated.close()
 
+    def test_corrupt_db_raises_catchable_error_with_recovery_hint(
+        self, tmp_home: Path,
+    ):
+        ss.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ss.DB_PATH.write_bytes(b"definitely not a sqlite database" * 4)
+
+        with pytest.raises(ss.CacheUnavailable) as exc:
+            ss._connect()
+        msg = str(exc.value)
+        assert "corrupted" in msg
+        assert f"rm {ss.DB_PATH}" in msg
+        # The whole point of #119: a host's plain `except Exception` works.
+        assert isinstance(exc.value, Exception)
+
+    def test_locked_db_is_not_misreported_as_corruption(
+        self, tmp_home: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        # Two processes racing the one-shot migration surface `database is
+        # locked` — a transient condition. Advising `rm` here (the corrupt-
+        # cache hint) would tell the user to destroy a healthy cache (#119).
+        def _locked(_conn: sqlite3.Connection) -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(ss, "_MIGRATIONS", (_locked,))
+        with pytest.raises(ss.CacheUnavailable) as exc:
+            ss._connect()
+        msg = str(exc.value)
+        assert "locked" in msg
+        assert "retry" in msg
+        assert "rm " not in msg
+
     def test_already_current_db_skips_migrations(
         self, tmp_home: Path, monkeypatch: pytest.MonkeyPatch,
     ):
@@ -448,17 +479,16 @@ class TestCacheSchemaMigrations:
         finally:
             check.close()
 
-    def test_newer_schema_is_left_untouched(
-        self, tmp_home: Path, capsys: pytest.CaptureFixture[str],
-    ):
+    def test_newer_schema_is_left_untouched(self, tmp_home: Path):
         raw = sqlite3.connect(str(ss.DB_PATH))
         raw.execute(f"PRAGMA user_version = {ss.CACHE_SCHEMA_VERSION + 1}")
         raw.commit()
         raw.close()
 
-        with pytest.raises(SystemExit):
+        # A catchable exception, not SystemExit: in-process hosts (library
+        # consumers, the MCP server) must survive an incompatible cache (#119).
+        with pytest.raises(ss.CacheUnavailable, match="newer ccstory"):
             ss._connect()
-        assert "newer ccstory" in capsys.readouterr().err
 
         check = sqlite3.connect(str(ss.DB_PATH))
         try:
