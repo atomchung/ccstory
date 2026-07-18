@@ -803,6 +803,53 @@ class TestSynthesizeOverallForPeriod:
         monkeypatch.setattr(ss, "claude_bin_available", boom)
         assert synthesize_overall_for_period(**kwargs) == "cached prose"
 
+    def test_subhour_drift_keeps_cache_warm(self, tmp_home: Path, monkeypatch):
+        """#121: the active window's hours creep between reruns (the
+        running session itself accrues time). Sub-hour drift must stay a
+        cache hit instead of re-burning a 90s claude -p call."""
+        class Result:
+            returncode = 0
+            stdout = "warm prose"
+            stderr = ""
+
+        monkeypatch.setattr(ss, "claude_bin_available", lambda: True)
+        monkeypatch.setattr(ss, "run_claude_p", lambda *_a: Result())
+        base = dict(
+            period_key="2026-07",
+            sessions_by_category={"coding": [("sess-a", "did A")]},
+        )
+        assert synthesize_overall_for_period(
+            category_hours=[("coding", 2.0)], **base) == "warm prose"
+
+        def boom(*_a):
+            raise AssertionError("sub-hour drift must not re-run claude -p")
+
+        monkeypatch.setattr(ss, "run_claude_p", boom)
+        assert synthesize_overall_for_period(
+            category_hours=[("coding", 2.4)], **base) == "warm prose"
+
+    def test_whole_hour_crossing_still_invalidates(
+        self, tmp_home: Path, monkeypatch,
+    ):
+        class Result:
+            returncode = 0
+            stdout = "warm prose"
+            stderr = ""
+
+        monkeypatch.setattr(ss, "claude_bin_available", lambda: True)
+        monkeypatch.setattr(ss, "run_claude_p", lambda *_a: Result())
+        base = dict(
+            period_key="2026-07",
+            sessions_by_category={"coding": [("sess-a", "did A")]},
+        )
+        assert synthesize_overall_for_period(
+            category_hours=[("coding", 2.0)], **base) == "warm prose"
+        # 2.0 → 3.1 crosses a whole hour: must attempt a refresh (claude
+        # stubbed unavailable → None proves the attempt).
+        monkeypatch.setattr(ss, "claude_bin_available", lambda: False)
+        assert synthesize_overall_for_period(
+            category_hours=[("coding", 3.1)], **base) is None
+
     def test_cache_invalidates_when_session_ids_change(self, tmp_home: Path, monkeypatch):
         from ccstory.session_summarizer import _connect
         import time as _time
