@@ -1564,6 +1564,10 @@ def classify_sessions_by_content(
     accepted_buckets = set(preferred_buckets) | set(cached.values())
     used_buckets = set(cached.values())
     bucket_limit = max(MAX_CONTENT_BUCKETS, len(accepted_buckets))
+    # Local import, same reason as _build_category_vocabulary's: avoids a
+    # module-load cycle and keeps CONFIG_PATH monkeypatching effective.
+    from .categorizer import load_settings
+    drop_fallback = load_settings().get("default_bucket", "coding")
 
     for chunk_idx, chunk_start in enumerate(
         range(0, len(pending), batch_size), start=1,
@@ -1590,6 +1594,23 @@ def classify_sessions_by_content(
                 fresh = _validated_chunk_buckets(
                     parsed, chunk_ids, accepted_buckets, bucket_limit,
                 )
+                # Negative-cache validation drops (#120): these sids DID get
+                # an answer from the model, but the bucket was rejected
+                # (one-off name, or the vocabulary cap). Without a cache row
+                # they re-enter `pending` and re-burn a claude -p chunk on
+                # every future run, forever. Caching them at the fallback
+                # bucket bounds the cost; the row carries the current
+                # input_fingerprint, so any config/vocab change rotates the
+                # fingerprint and re-opens their shot at a real bucket.
+                # Model omissions and parse failures stay uncached on
+                # purpose — those are transient, and retrying them is
+                # correct.
+                dropped = [
+                    sid for sid in chunk_ids
+                    if parsed.get(sid) is not None and sid not in fresh
+                ]
+                for sid in dropped:
+                    fresh[sid] = drop_fallback
             else:
                 LOG.warning(
                     "content-classify claude -p failed (chunk %d-%d): %s",
