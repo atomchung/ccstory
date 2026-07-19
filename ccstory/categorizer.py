@@ -313,8 +313,18 @@ def colors_for(buckets: list[str]) -> dict[str, str]:
     list — but the result depends on the *set* of sibling buckets, so pass
     every bucket that will appear in the same render (not a subset), and
     reuse the one returned mapping across that render rather than calling
-    this again with a different subset. Only repeats a color when there
-    are more unique unknown buckets than palette slots.
+    this again with a different subset.
+
+    Two known limits, both inherent to a fixed 6-color budget rather than
+    bugs in the walk itself: (1) known buckets claim their BUCKET_COLORS
+    slot unconditionally, so if all 6 default buckets (coding/investment/
+    writing/research/data/ops) are present, an unknown bucket has nowhere
+    left to walk to and repeats one of their colors — this needs every one
+    of those 6 English names in the same render, which requires deliberate
+    config, not default usage. (2) "other" and "uncategorized" both map to
+    "dim" in BUCKET_COLORS on purpose (they're catch-all buckets meant to
+    read as "not a real category," not to compete for a distinct color) —
+    colors_for() preserves that shared "dim", it does not try to split it.
     """
     assigned: dict[str, str] = {}
     used: set[str] = set()

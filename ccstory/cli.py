@@ -36,7 +36,6 @@ from rich.table import Table
 from . import __version__
 from .categorizer import (
     add_category_keywords,
-    color_for,
     colors_for,
     ensure_default_config,
     list_user_categories,
@@ -252,15 +251,19 @@ def _run_category(argv: list[str], console: Console) -> int:
     try:
         if args.action == "set":
             categories, moved = add_category_keywords(args.bucket, args.keywords)
+            # A moved-from bucket that emptied out is dropped from `categories`
+            # by add_category_keywords — union it back in so colors_for() has
+            # every bucket this command is about to print a color for.
+            colors = colors_for(sorted(set(categories) | {args.bucket} | {p for _, p in moved}))
             kw_render = ", ".join(f"`{k}`" for k in args.keywords)
             console.print(
                 f"[green]✓[/green] Added {kw_render} → "
-                f"[{color_for(args.bucket)}]{args.bucket}[/{color_for(args.bucket)}]"
+                f"[{colors[args.bucket]}]{args.bucket}[/{colors[args.bucket]}]"
             )
             for kw, prev in moved:
                 console.print(
                     f"  [yellow]moved[/yellow] `{kw}` "
-                    f"from [{color_for(prev)}]{prev}[/{color_for(prev)}]"
+                    f"from [{colors[prev]}]{prev}[/{colors[prev]}]"
                 )
         else:  # unset
             categories, missing = remove_category_keywords(
@@ -268,10 +271,13 @@ def _run_category(argv: list[str], console: Console) -> int:
             )
             kept = [k for k in args.keywords if k.lower() not in missing]
             if kept:
+                # args.bucket itself may have emptied out and been dropped
+                # from `categories` — same union as above.
+                colors = colors_for(sorted(set(categories) | {args.bucket}))
                 kw_render = ", ".join(f"`{k}`" for k in kept)
                 console.print(
                     f"[green]✓[/green] Removed {kw_render} from "
-                    f"[{color_for(args.bucket)}]{args.bucket}[/{color_for(args.bucket)}]"
+                    f"[{colors[args.bucket]}]{args.bucket}[/{colors[args.bucket]}]"
                 )
             for kw in missing:
                 console.print(

@@ -64,9 +64,10 @@ def _top_session_text(rollup: CategoryRollup, summaries: dict, max_chars: int = 
 
 
 _BOLD_HEADER_RE = re.compile(r"^\*\*(.+)\*\*$")
+_INNER_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 
 
-def _narrative_headers(narrative: str) -> list[str] | None:
+def _narrative_headers(narrative: str) -> list[str]:
     """Pull the bold thread headers out of a goal-thread overall narrative.
 
     `session_summarizer._OVERALL_PROMPT` (#98) shapes the overall narrative
@@ -78,16 +79,22 @@ def _narrative_headers(narrative: str) -> list[str] | None:
     headers so the card can show the wins compactly; full detail stays one
     line away via the "Full report" footer.
 
-    Returns None if no `**...**`-wrapped lines are found — e.g. an older
+    A header line is allowed to contain its own nested `**emphasis**` (e.g.
+    around a version number) — `_INNER_BOLD_RE` unwraps those too, since the
+    outer match's greedy `.+` would otherwise capture the inner `**` marks
+    verbatim and leak them into the card, reproducing the exact bug this
+    function exists to avoid.
+
+    Returns `[]` if no `**...**`-wrapped lines are found — e.g. an older
     cached narrative from before #98's format, or the LLM drifting off
-    spec — so the caller can fall back to rendering the raw text.
+    spec — so the caller falls back to rendering the raw text.
     """
-    headers = [
-        m.group(1).strip()
-        for line in narrative.splitlines()
-        if (m := _BOLD_HEADER_RE.match(line.strip()))
-    ]
-    return headers or None
+    headers = []
+    for line in narrative.splitlines():
+        m = _BOLD_HEADER_RE.match(line.strip())
+        if m:
+            headers.append(_INNER_BOLD_RE.sub(r"\1", m.group(1)).strip())
+    return headers
 
 
 _YAML_IMPLICIT_NON_STRING = frozenset({
@@ -813,18 +820,15 @@ def _delta_text(current: float, previous: float, unit: str = "h", fmt: str = ".1
     return Text(f"{arrow} {pct:+.0f}%", style=color)
 
 
-def render_comparison_block(
-    cmp: PeriodComparison, colors: dict[str, str] | None = None
-) -> list:
+def render_comparison_block(cmp: PeriodComparison, colors: dict[str, str]) -> list:
     """Renderable Rich elements: title + small comparison table for the panel.
 
     `colors` is the bucket→color map from the enclosing card (see
     render_terminal_card) so a bucket's color here matches its bar in the
-    "Time by category" section above. Computed fresh from just this
-    comparison's own buckets if omitted (e.g. when called standalone).
+    "Time by category" section above — always pass the full-card map, not
+    one computed from just `cmp.deltas`, or a bucket that appears in both
+    places could get two different colors in the same card.
     """
-    if colors is None:
-        colors = colors_for([d.category for d in cmp.deltas])
     parts: list = []
     parts.append(Text(""))
     parts.append(Text(f"vs previous window  ({cmp.previous_label})",

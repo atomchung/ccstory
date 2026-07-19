@@ -40,7 +40,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--help`, in-progress status messages, and docstrings no longer call the
   overall narrative a "3-sentence synthesis" — stale since #98 reshaped it
   into goal threads; left uncorrected everywhere except the terminal card
-  itself until now.
+  itself until now. Also fixed in README.md, which repeated the same stale
+  claim in two places.
+- `_narrative_headers()` no longer leaks a header's own nested `**bold**`
+  (e.g. around a version number) as literal asterisks — the outer
+  `^\*\*(.+)\*\*$` match is greedy, so it captured inner `**...**` marks
+  verbatim before this fix strips them too. Also simplified its return type
+  from `list[str] | None` to plain `list[str]` (`[]` instead of `None`) —
+  the caller only ever checked truthiness, so the distinction was unused.
+- `render_comparison_block`'s `colors` parameter is required now instead of
+  defaulting to `None` with an internal re-derivation — that fallback was
+  unreachable from the only real call site and untested; keeping it invited
+  a bucket to silently get a different color there than in the rest of the
+  card if a future caller ever hit it.
+- `ccstory category set`/`unset` confirmation lines now use the same
+  collision-free `colors_for()` as `category list`, instead of the old
+  per-bucket `color_for()` — previously the same bucket name could render
+  in two different colors depending on which subcommand printed it. Handles
+  the edge case where the bucket being colored was just emptied out and
+  dropped from the config by the same command (the color map is built from
+  the union of the remaining buckets and the one(s) about to be printed,
+  not just what's left in the config).
 
 ## [0.6.0] - 2026-07-18
 

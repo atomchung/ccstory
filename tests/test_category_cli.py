@@ -6,6 +6,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+from rich.console import Console
 
 from ccstory import categorizer, session_summarizer
 from ccstory.categorizer import (
@@ -13,6 +14,7 @@ from ccstory.categorizer import (
     list_user_categories,
     remove_category_keywords,
 )
+from ccstory.cli import _run_category
 from ccstory.session_summarizer import (
     _connect,
     invalidate_comparison_narratives,
@@ -238,3 +240,62 @@ class TestInvalidateComparisonNarratives:
         _seed_caches([])
         deleted = invalidate_comparison_narratives()
         assert deleted == 1
+
+
+class TestRunCategoryColorConsistency:
+    """`_run_category`'s set/unset console output colors every bucket it
+    prints via colors_for(), matching the `list` table instead of the old
+    per-bucket color_for() (which could color the same bucket differently
+    depending on which subcommand printed it).
+    """
+
+    def test_set_does_not_crash_when_moved_from_bucket_empties_out(
+        self, tmp_home: Path,
+    ):
+        # add_category_keywords deletes a moved-from bucket from its
+        # returned `categories` dict once it has no keywords left — the
+        # console still needs to print a color for that now-gone bucket
+        # name via `moved`, so colors_for()'s input must union it back in.
+        add_category_keywords("old-bucket", ["only-keyword"])
+        console = Console(record=True, width=80)
+        rc = _run_category(["set", "new-bucket", "only-keyword"], console)
+        assert rc == 0
+        out = console.export_text()
+        assert "old-bucket" not in categorizer.list_user_categories()
+        assert "moved" in out
+        assert "old-bucket" in out
+
+    def test_unset_does_not_crash_when_bucket_empties_out(self, tmp_home: Path):
+        # remove_category_keywords drops the bucket itself once its last
+        # keyword is removed — args.bucket must still resolve to a color.
+        add_category_keywords("solo-bucket", ["only-keyword"])
+        console = Console(record=True, width=80)
+        rc = _run_category(["unset", "solo-bucket", "only-keyword"], console)
+        assert rc == 0
+        out = console.export_text()
+        assert "solo-bucket" not in categorizer.list_user_categories()
+        assert "Removed" in out
+        assert "solo-bucket" in out
+
+    def test_same_bucket_same_color_across_list_and_set(self, tmp_home: Path):
+        import re
+
+        # Buckets picked to collide under the old per-bucket color_for()
+        # hash (custom names, none matching a BUCKET_COLORS key).
+        add_category_keywords("輸出", ["kw-a"])
+        add_category_keywords("投資", ["kw-b"])
+        add_category_keywords("學習", ["kw-c"])
+
+        list_console = Console(record=True, width=80)
+        _run_category(["list"], list_console)
+        list_ansi = list_console.export_text(styles=True)
+
+        set_console = Console(record=True, width=80)
+        _run_category(["set", "輸出", "kw-d"], set_console)
+        set_ansi = set_console.export_text(styles=True)
+
+        # `list` bolds the whole Bucket column (table style) while `set`'s
+        # confirmation line doesn't — compare the color digit, not weight.
+        list_code = re.search(r"\x1b\[([\d;]+)m輸出", list_ansi).group(1).split(";")[-1]
+        set_code = re.search(r"\x1b\[([\d;]+)m輸出", set_ansi).group(1).split(";")[-1]
+        assert list_code == set_code

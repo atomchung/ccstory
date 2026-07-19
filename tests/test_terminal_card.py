@@ -108,11 +108,21 @@ class TestNarrativeHeaders:
             "ccstory 敘事引擎重寫上線，週報從技術摘要改成有前後對比的故事",
         ]
 
-    def test_returns_none_for_plain_prose(self):
+    def test_returns_empty_for_plain_prose(self):
         # Pre-#98 cached narrative, or the LLM drifting off spec — no line
-        # is fully wrapped in `**...**`.
+        # is fully wrapped in `**...**`. Falsy `[]`, same as the caller's
+        # `if headers:` needs — there's no reachable path back to a
+        # non-empty list here, so the type stays plain `list[str]`.
         narrative = "Focused on ccstory this week, shipping the v0.6 release."
-        assert _narrative_headers(narrative) is None
+        assert _narrative_headers(narrative) == []
+
+    def test_unwraps_nested_bold_inside_a_header(self):
+        # A header emphasizing e.g. a version number with its own **bold**
+        # must not leak the inner ** markers into the extracted text.
+        narrative = "**Shipped **v0.6.0** with two rendering bug fixes**\n"
+        assert _narrative_headers(narrative) == [
+            "Shipped v0.6.0 with two rendering bug fixes",
+        ]
 
 
 class TestWhatYouDidCard:
