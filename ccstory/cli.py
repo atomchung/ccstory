@@ -506,15 +506,16 @@ def _dispatch(argv: list[str] | None = None) -> int:
                              "unless their prompt version is stale. Add "
                              "--refresh to force-regenerate them all.")
     parser.add_argument("--no-aggregate", action="store_true",
-                        help="Skip the 3-sentence overall narrative "
+                        help="Skip the overall goal-thread narrative "
                              "(one claude -p call across all buckets)")
     parser.add_argument("--no-compare", action="store_true",
                         help="Skip the vs-previous-window comparison block")
     parser.add_argument("--narrative", choices=["overall", "per-category", "both"],
                         default="overall",
-                        help="Narrative depth. `overall` (default) = one "
-                             "3-sentence synthesis. `per-category` = 2-3 "
-                             "lines per bucket instead (one claude -p per "
+                        help="Narrative depth. `overall` (default) = 2-4 "
+                             "goal threads (bold header + bullets) across "
+                             "all buckets. `per-category` = a header + "
+                             "bullets per bucket instead (one claude -p per "
                              "bucket, cached until the bucket's session set "
                              "changes). `both` = overall first, then "
                              "per-bucket sections.")

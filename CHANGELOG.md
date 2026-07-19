@@ -24,6 +24,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plain dim text — literal asterisks and all. The card now shows just each
   thread's bold header; full bullets stay in the markdown report, one line
   away via "Full report →".
+- The overall goal-thread narrative no longer pads every thread to the
+  maximum 3 bullets regardless of how much there was to say. Real cached
+  narratives showed zero variance — every single thread across 8+ weekly
+  windows landed on exactly 3 bullets — while the per-category narrative's
+  2-4 range (deliberately widened in #108) already varied naturally with
+  content. `_OVERALL_PROMPT` now explicitly says to use the minimum bullets
+  the thread supports rather than splitting one outcome into parts to hit
+  the cap; a live regeneration against real session summaries now produces
+  2-4 bullets per thread (avg 2.5) instead of a flat 3. `_CATEGORY_PROMPT`
+  is untouched — its own real-data variance (and #108's incident-visibility
+  guarantee) were already healthy. Changing the prompt text invalidates
+  cached overall narratives via the existing content-fingerprint check (no
+  version bump needed); the next run regenerates each window once.
+- `--help`, in-progress status messages, and docstrings no longer call the
+  overall narrative a "3-sentence synthesis" — stale since #98 reshaped it
+  into goal threads; left uncorrected everywhere except the terminal card
+  itself until now.
 
 ## [0.6.0] - 2026-07-18
 

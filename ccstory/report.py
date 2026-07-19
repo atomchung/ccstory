@@ -301,7 +301,7 @@ def render_report(
     if comparison:
         lines.append(render_comparison_markdown(comparison))
 
-    # Overall narrative (3-sentence synthesis across the whole period)
+    # Overall narrative (goal-thread synthesis across the whole period)
     if overall_narrative:
         lines.append("## What you did")
         lines.append("")

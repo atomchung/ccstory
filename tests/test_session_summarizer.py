@@ -771,6 +771,15 @@ class TestDetectSystemLocale:
 
 
 class TestSynthesizeOverallForPeriod:
+    def test_prompt_discourages_padding_bullets_to_the_cap(self):
+        # Regression guard: real cached narratives showed EVERY thread
+        # landing on exactly 3/3 bullets (the max) across 8+ real weekly
+        # windows — the range was being read as a fixed count, not a cap.
+        # A live regen with this wording produced 2-4 bullets (avg 2.5).
+        # Guards against silently dropping the anti-padding instruction.
+        assert "don't pad" in ss._OVERALL_PROMPT
+        assert "1-3 bullet" in ss._OVERALL_PROMPT
+
     def test_empty_input_returns_none(self, tmp_home: Path):
         out = synthesize_overall_for_period(
             period_key="2026-05",

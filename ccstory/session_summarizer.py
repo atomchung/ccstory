@@ -851,7 +851,7 @@ Reframe the period around the user's GOAL THREADS, NOT a category-by-category lo
 
 For EACH thread write a block with TWO parts:
 1) A SHORT bold header (ONE line): the CONCRETE thing achieved this period AND its payoff (what it now enables). Specific enough to identify THIS week alone, NEVER a generic progress arc reusable for any week. BANNED header styles (generic arcs reusable for ANY week): "laid the foundation", "now live", "from firefighting to foundation", "single-fix to platform", "X 從單點修復邁向地基層", "走向平台化", "全面收斂", "全面補強", "紀律收斂", "可信度全面補強", "維運全面收斂". Abstract progress-verbs used AS the payoff — 「收斂」「全面補強」「全面強化」「補強」「(全面)提升」— are BANNED: the payoff must be a concrete capability or result you can point to, never a process word. If a real version shipped (e.g. "ccstory v0.4.2"), name it. NO issue/PR numbers.
-2) Then 1-3 bullet points (each line starts with "- "): one concrete thing done, phrased as an outcome, not a pile of technical nouns.
+2) Then 1-3 bullet points (each line starts with "- "): one concrete thing done, phrased as an outcome, not a pile of technical nouns. Use the minimum that covers the thread — most threads need 1-2 bullets; write a 3rd only when there's a genuinely distinct third outcome, never by splitting one outcome into parts to hit the cap.
 
 Concrete header examples (mirror this specificity in the response language):
 - Good: "fomo-kernel 現金流與多幣別帳本落地，portfolio 首次能算真實成本基礎"
@@ -861,7 +861,7 @@ Concrete header examples (mirror this specificity in the response language):
 
 Rules:
 - 2-4 threads total. Header = the key concrete win + its payoff, specific to THIS week. Bullets carry the supporting detail.
-- 1-3 bullets per thread. NO issue/PR/commit numbers anywhere (no "#162", no "closes #31"); those live in a separate table. Name qualitative outcomes.
+- 1-3 bullets per thread — don't pad to 3 by default; a thread with one clear outcome gets one bullet. NO issue/PR/commit numbers anywhere (no "#162", no "closes #31"); those live in a separate table. Name qualitative outcomes.
 - Ground every claim in the summaries. Never invent a version or outcome. If a thread has no clear "before", just state the concrete win and its payoff; do not fabricate a before/after.
 
 Period: {period}
@@ -882,7 +882,7 @@ def synthesize_overall_for_period(
     force_refresh: bool = False,
     timeout: int = 90,
 ) -> str | None:
-    """Synthesize ONE 3-sentence overall narrative for the whole period.
+    """Synthesize the overall goal-thread narrative for the whole period.
 
     `category_hours` is `[(category, hours), ...]` already sorted from
     largest to smallest. `sessions_by_category` is `{category:
