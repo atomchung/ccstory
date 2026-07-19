@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The recap terminal card no longer assigns two different buckets the same
+  bar color. `color_for()` hashes each bucket independently into a 6-color
+  palette, so a report with several custom `[categories]` aliases (none
+  matching the built-in English bucket names) had good odds of two buckets
+  landing on the same color. A new `colors_for()` resolves the whole set
+  together: each unknown bucket walks forward from its hash slot until it
+  finds a color no sibling bucket in the same render has already claimed.
+- The recap terminal card's "What you did" section no longer prints the
+  overall narrative's raw `**bold**` / `- bullet` markup verbatim, nor its
+  full multi-paragraph length. #98 reshaped the overall narrative into 2-4
+  goal threads (bold header + supporting bullets), but the terminal card's
+  renderer was never updated to match, so it dumped the whole thing as
+  plain dim text — literal asterisks and all. The card now shows just each
+  thread's bold header; full bullets stay in the markdown report, one line
+  away via "Full report →".
+- The overall goal-thread narrative no longer pads every thread to the
+  maximum 3 bullets regardless of how much there was to say. Real cached
+  narratives showed zero variance — every single thread across 8+ weekly
+  windows landed on exactly 3 bullets — while the per-category narrative's
+  2-4 range (deliberately widened in #108) already varied naturally with
+  content. `_OVERALL_PROMPT` now explicitly says to use the minimum bullets
+  the thread supports rather than splitting one outcome into parts to hit
+  the cap; a live regeneration against real session summaries now produces
+  2-4 bullets per thread (avg 2.5) instead of a flat 3. `_CATEGORY_PROMPT`
+  is untouched — its own real-data variance (and #108's incident-visibility
+  guarantee) were already healthy. Changing the prompt text invalidates
+  cached overall narratives via the existing content-fingerprint check (no
+  version bump needed); the next run regenerates each window once.
+- `--help`, in-progress status messages, and docstrings no longer call the
+  overall narrative a "3-sentence synthesis" — stale since #98 reshaped it
+  into goal threads; left uncorrected everywhere except the terminal card
+  itself until now. Also fixed in README.md, which repeated the same stale
+  claim in two places.
+- `_narrative_headers()` no longer leaks a header's own nested `**bold**`
+  (e.g. around a version number) as literal asterisks — the outer
+  `^\*\*(.+)\*\*$` match is greedy, so it captured inner `**...**` marks
+  verbatim before this fix strips them too. Also simplified its return type
+  from `list[str] | None` to plain `list[str]` (`[]` instead of `None`) —
+  the caller only ever checked truthiness, so the distinction was unused.
+- `render_comparison_block`'s `colors` parameter is required now instead of
+  defaulting to `None` with an internal re-derivation — that fallback was
+  unreachable from the only real call site and untested; keeping it invited
+  a bucket to silently get a different color there than in the rest of the
+  card if a future caller ever hit it.
+- `ccstory category set`/`unset` confirmation lines now use the same
+  collision-free `colors_for()` as `category list`, instead of the old
+  per-bucket `color_for()` — previously the same bucket name could render
+  in two different colors depending on which subcommand printed it. Handles
+  the edge case where the bucket being colored was just emptied out and
+  dropped from the config by the same command (the color map is built from
+  the union of the remaining buckets and the one(s) about to be printed,
+  not just what's left in the config).
+
 ## [0.6.0] - 2026-07-18
 
 ### Added

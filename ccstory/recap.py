@@ -204,7 +204,7 @@ def _synthesize_overall(
     summaries: dict,
     console: Console,
 ) -> str | None:
-    """Synthesize ONE 3-sentence overall narrative for the period.
+    """Synthesize the overall goal-thread narrative for the period.
 
     Single `claude -p` call across all categories — replaces the old
     per-bucket aggregate path. Cache-friendly: only re-runs when the set
@@ -224,7 +224,7 @@ def _synthesize_overall(
     category_hours = [(r.category, r.active_min / 60) for r in rollups]
 
     with console.status(
-        "[dim]Synthesizing 3-sentence overall narrative (claude -p)…[/dim]"
+        "[dim]Synthesizing overall narrative (claude -p)…[/dim]"
     ):
         return synthesize_overall_for_period(
             period_key=label,

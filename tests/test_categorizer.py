@@ -13,6 +13,7 @@ from ccstory.categorizer import (
     DEFAULT_FALLBACK_BUCKET,
     classify,
     color_for,
+    colors_for,
     load_rules,
     load_settings,
     normalize_project_name,
@@ -188,3 +189,52 @@ class TestColors:
         for bucket in ("client-a", "client-b", "client-c", "client-d",
                        "client-e", "client-f", "client-g"):
             assert color_for(bucket) in base_ansi
+
+
+class TestColorsFor:
+    def test_resolves_real_collision_from_bug_report(self):
+        # Custom [projects] aliases from a real recap card: color_for()
+        # independently hashed 輸出/投資 to the same "green" and 學習/其他 to
+        # the same "blue" (crc32(x) % 6 collision — none of these are
+        # BUCKET_COLORS keys, so both fell into the 6-slot unknown palette).
+        buckets = ["輸出", "投資", "學習", "其他", "職涯"]
+        assert len({color_for(b) for b in buckets}) < len(buckets)  # bug, pre-fix
+        colors = colors_for(buckets)
+        assert len(set(colors.values())) == len(buckets)
+
+    def test_known_buckets_keep_their_mapped_color(self):
+        colors = colors_for(["coding", "investment", "custom-x"])
+        assert colors["coding"] == BUCKET_COLORS["coding"]
+        assert colors["investment"] == BUCKET_COLORS["investment"]
+
+    def test_unknown_bucket_avoids_a_known_buckets_color(self):
+        # "writing" is magenta; force an unknown bucket whose own crc32 slot
+        # is also magenta and confirm it gets bumped to a free color instead.
+        import zlib
+        palette = ["cyan", "green", "magenta", "yellow", "blue", "red"]
+        collider = next(
+            f"custom-{i}" for i in range(200)
+            if palette[zlib.crc32(f"custom-{i}".encode()) % len(palette)] == "magenta"
+        )
+        colors = colors_for(["writing", collider])
+        assert colors["writing"] == "magenta"
+        assert colors[collider] != "magenta"
+
+    def test_deterministic_for_the_same_bucket_list(self):
+        buckets = ["輸出", "投資", "學習", "其他", "職涯"]
+        assert colors_for(buckets) == colors_for(list(buckets))
+
+    def test_degrades_to_repeats_only_past_palette_size(self):
+        # More unique unknown buckets than the 6-slot palette can hold —
+        # every bucket still gets a valid color, repeats are unavoidable.
+        buckets = [f"custom-{i}" for i in range(9)]
+        colors = colors_for(buckets)
+        assert set(colors) == set(buckets)
+        base_ansi = {"cyan", "green", "magenta", "yellow", "blue", "red"}
+        assert all(c in base_ansi for c in colors.values())
+
+    def test_empty_and_duplicate_input(self):
+        assert colors_for([]) == {}
+        buckets = ["輸出", "輸出", "投資"]
+        colors = colors_for(buckets)
+        assert set(colors) == {"輸出", "投資"}

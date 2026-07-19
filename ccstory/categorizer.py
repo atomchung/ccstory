@@ -274,14 +274,84 @@ BUCKET_COLORS: dict[str, str] = {
 }
 
 
+_UNKNOWN_BUCKET_PALETTE = ["cyan", "green", "magenta", "yellow", "blue", "red"]
+
+
 def color_for(bucket: str) -> str:
-    """Rich color name for a bucket. Unknown buckets cycle through a stable palette."""
+    """Rich color name for a single bucket, independent of any others.
+
+    Unknown buckets hash into a stable 6-color palette — stable across
+    calls and processes, but NOT collision-free against sibling buckets
+    rendered in the same table/panel (two custom bucket names can hash to
+    the same color). When rendering several buckets together, use
+    `colors_for()` instead, which resolves that.
+    """
     if bucket in BUCKET_COLORS:
         return BUCKET_COLORS[bucket]
     # crc32 is stable across processes; Python's built-in hash() is salted by
     # PYTHONHASHSEED so the same bucket would pick a new color every run.
-    palette = ["cyan", "green", "magenta", "yellow", "blue", "red"]
-    return palette[zlib.crc32(bucket.encode("utf-8")) % len(palette)]
+    return _UNKNOWN_BUCKET_PALETTE[
+        zlib.crc32(bucket.encode("utf-8")) % len(_UNKNOWN_BUCKET_PALETTE)
+    ]
+
+
+def colors_for(buckets: list[str]) -> dict[str, str]:
+    """Collision-avoiding Rich color assignment for buckets shown together.
+
+    `color_for()` picks each bucket's color in isolation from a 6-color
+    base-ANSI palette (kept small deliberately — see BUCKET_COLORS comment
+    — so it can't just grow to dodge collisions). With only 6 slots, a
+    report with several custom `[categories]` buckets that don't match any
+    BUCKET_COLORS key regularly hashes two of them onto the same color —
+    e.g. two different buckets both landing on "green" in the same bar
+    chart.
+
+    This resolves that for one render: known buckets keep their
+    BUCKET_COLORS mapping first, then each remaining bucket walks forward
+    from its own crc32 slot until it finds a color no earlier bucket in
+    `buckets` has claimed yet. Still deterministic given the same input
+    list — but the result depends on the *set* of sibling buckets, so pass
+    every bucket that will appear in the same render (not a subset), and
+    reuse the one returned mapping across that render rather than calling
+    this again with a different subset.
+
+    Two known limits, both inherent to a fixed 6-color budget rather than
+    bugs in the walk itself: (1) known buckets claim their BUCKET_COLORS
+    slot unconditionally, so if all 6 default buckets (coding/investment/
+    writing/research/data/ops) are present, an unknown bucket has nowhere
+    left to walk to and repeats one of their colors — this needs every one
+    of those 6 English names in the same render, which requires deliberate
+    config, not default usage. (2) "other" and "uncategorized" both map to
+    "dim" in BUCKET_COLORS on purpose (they're catch-all buckets meant to
+    read as "not a real category," not to compete for a distinct color) —
+    colors_for() preserves that shared "dim", it does not try to split it.
+    """
+    assigned: dict[str, str] = {}
+    used: set[str] = set()
+    unknown: list[str] = []
+    for bucket in buckets:
+        if bucket in assigned:
+            continue
+        if bucket in BUCKET_COLORS:
+            color = BUCKET_COLORS[bucket]
+            assigned[bucket] = color
+            used.add(color)
+        else:
+            unknown.append(bucket)
+    palette = _UNKNOWN_BUCKET_PALETTE
+    for bucket in unknown:
+        if bucket in assigned:
+            continue
+        start = zlib.crc32(bucket.encode("utf-8")) % len(palette)
+        chosen = palette[start]
+        for offset in range(len(palette)):
+            candidate = palette[(start + offset) % len(palette)]
+            if candidate not in used:
+                chosen = candidate
+                break
+        assigned[bucket] = chosen
+        used.add(chosen)
+    return assigned
 
 
 def classify(

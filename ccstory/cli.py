@@ -36,7 +36,7 @@ from rich.table import Table
 from . import __version__
 from .categorizer import (
     add_category_keywords,
-    color_for,
+    colors_for,
     ensure_default_config,
     list_user_categories,
     load_settings,
@@ -238,8 +238,9 @@ def _run_category(argv: list[str], console: Console) -> int:
         )
         table.add_column("Bucket", style="bold")
         table.add_column("Keywords", style="dim")
+        colors = colors_for(sorted(cats))
         for bucket in sorted(cats):
-            color = color_for(bucket)
+            color = colors[bucket]
             table.add_row(
                 f"[{color}]{bucket}[/{color}]",
                 ", ".join(cats[bucket]),
@@ -250,15 +251,19 @@ def _run_category(argv: list[str], console: Console) -> int:
     try:
         if args.action == "set":
             categories, moved = add_category_keywords(args.bucket, args.keywords)
+            # A moved-from bucket that emptied out is dropped from `categories`
+            # by add_category_keywords — union it back in so colors_for() has
+            # every bucket this command is about to print a color for.
+            colors = colors_for(sorted(set(categories) | {args.bucket} | {p for _, p in moved}))
             kw_render = ", ".join(f"`{k}`" for k in args.keywords)
             console.print(
                 f"[green]✓[/green] Added {kw_render} → "
-                f"[{color_for(args.bucket)}]{args.bucket}[/{color_for(args.bucket)}]"
+                f"[{colors[args.bucket]}]{args.bucket}[/{colors[args.bucket]}]"
             )
             for kw, prev in moved:
                 console.print(
                     f"  [yellow]moved[/yellow] `{kw}` "
-                    f"from [{color_for(prev)}]{prev}[/{color_for(prev)}]"
+                    f"from [{colors[prev]}]{prev}[/{colors[prev]}]"
                 )
         else:  # unset
             categories, missing = remove_category_keywords(
@@ -266,10 +271,13 @@ def _run_category(argv: list[str], console: Console) -> int:
             )
             kept = [k for k in args.keywords if k.lower() not in missing]
             if kept:
+                # args.bucket itself may have emptied out and been dropped
+                # from `categories` — same union as above.
+                colors = colors_for(sorted(set(categories) | {args.bucket}))
                 kw_render = ", ".join(f"`{k}`" for k in kept)
                 console.print(
                     f"[green]✓[/green] Removed {kw_render} from "
-                    f"[{color_for(args.bucket)}]{args.bucket}[/{color_for(args.bucket)}]"
+                    f"[{colors[args.bucket]}]{args.bucket}[/{colors[args.bucket]}]"
                 )
             for kw in missing:
                 console.print(
@@ -504,15 +512,16 @@ def _dispatch(argv: list[str] | None = None) -> int:
                              "unless their prompt version is stale. Add "
                              "--refresh to force-regenerate them all.")
     parser.add_argument("--no-aggregate", action="store_true",
-                        help="Skip the 3-sentence overall narrative "
+                        help="Skip the overall goal-thread narrative "
                              "(one claude -p call across all buckets)")
     parser.add_argument("--no-compare", action="store_true",
                         help="Skip the vs-previous-window comparison block")
     parser.add_argument("--narrative", choices=["overall", "per-category", "both"],
                         default="overall",
-                        help="Narrative depth. `overall` (default) = one "
-                             "3-sentence synthesis. `per-category` = 2-3 "
-                             "lines per bucket instead (one claude -p per "
+                        help="Narrative depth. `overall` (default) = 2-4 "
+                             "goal threads (bold header + bullets) across "
+                             "all buckets. `per-category` = a header + "
+                             "bullets per bucket instead (one claude -p per "
                              "bucket, cached until the bucket's session set "
                              "changes). `both` = overall first, then "
                              "per-bucket sections.")

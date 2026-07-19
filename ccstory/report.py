@@ -8,6 +8,7 @@ when the CLI finishes.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 
 from rich.console import Console, Group
@@ -16,7 +17,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .artifacts import ArtifactsReport
-from .categorizer import color_for, load_settings, normalize_project_name
+from .categorizer import colors_for, load_settings, normalize_project_name
 from .session_summarizer import SessionSummary
 from .time_tracking import CategoryRollup, SessionStat
 from .token_usage import (
@@ -60,6 +61,40 @@ def _top_session_text(rollup: CategoryRollup, summaries: dict, max_chars: int = 
     if len(text) > max_chars:
         text = text[: max_chars - 1].rstrip() + "…"
     return text
+
+
+_BOLD_HEADER_RE = re.compile(r"^\*\*(.+)\*\*$")
+_INNER_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+
+
+def _narrative_headers(narrative: str) -> list[str]:
+    """Pull the bold thread headers out of a goal-thread overall narrative.
+
+    `session_summarizer._OVERALL_PROMPT` (#98) shapes the overall narrative
+    as 2-4 blocks, each a `**bold header**` line (the concrete win) followed
+    by 1-3 `- bullet` supporting lines. That's right for the full markdown
+    report, but dumping the whole thing verbatim into the terminal card (a
+    "screenshot-friendly summary" per this module's docstring) prints the
+    literal `**`/`-` markup and runs many lines long. This extracts just the
+    headers so the card can show the wins compactly; full detail stays one
+    line away via the "Full report" footer.
+
+    A header line is allowed to contain its own nested `**emphasis**` (e.g.
+    around a version number) — `_INNER_BOLD_RE` unwraps those too, since the
+    outer match's greedy `.+` would otherwise capture the inner `**` marks
+    verbatim and leak them into the card, reproducing the exact bug this
+    function exists to avoid.
+
+    Returns `[]` if no `**...**`-wrapped lines are found — e.g. an older
+    cached narrative from before #98's format, or the LLM drifting off
+    spec — so the caller falls back to rendering the raw text.
+    """
+    headers = []
+    for line in narrative.splitlines():
+        m = _BOLD_HEADER_RE.match(line.strip())
+        if m:
+            headers.append(_INNER_BOLD_RE.sub(r"\1", m.group(1)).strip())
+    return headers
 
 
 _YAML_IMPLICIT_NON_STRING = frozenset({
@@ -273,7 +308,7 @@ def render_report(
     if comparison:
         lines.append(render_comparison_markdown(comparison))
 
-    # Overall narrative (3-sentence synthesis across the whole period)
+    # Overall narrative (goal-thread synthesis across the whole period)
     if overall_narrative:
         lines.append("## What you did")
         lines.append("")
@@ -611,11 +646,20 @@ def render_terminal_card(
     total_min = sum(r.active_min for r in rollups)
     total_h = total_min / 60
 
+    # One collision-free color map for every bucket shown anywhere in this
+    # card (bars, by-project table, comparison deltas) — colors_for() avoids
+    # two different buckets landing on the same color, which color_for()
+    # can't since it resolves each bucket independently.
+    all_categories = [r.category for r in rollups]
+    if comparison:
+        all_categories += [d.category for d in comparison.deltas]
+    colors = colors_for(all_categories)
+
     # --- Highlight row: biggest bucket + top session in it ---
     highlight_block: list = []
     if rollups:
         top_r = rollups[0]
-        top_color = color_for(top_r.category)
+        top_color = colors[top_r.category]
         top_pct = (top_r.active_min / total_min * 100) if total_min else 0
         headline = Text()
         headline.append("★ Top focus  ", style="bold")
@@ -656,7 +700,7 @@ def render_terminal_card(
     if total_min > 0:
         for r in rollups:
             pct = r.active_min / total_min
-            color = color_for(r.category)
+            color = colors[r.category]
             bars.add_row(
                 Text(r.category, style=f"bold {color}"),
                 _colored_bar(pct, color),
@@ -675,7 +719,7 @@ def render_terminal_card(
         proj_table.add_column(width=12, no_wrap=True, overflow="ellipsis")
         proj_table.add_column(no_wrap=True, overflow="ellipsis", width=52)
         for r in split_areas:
-            color = color_for(r.category)
+            color = colors[r.category]
             top3 = r.projects[:3]
             summary = " · ".join(
                 f"{p.project} {p.active_min/60:.1f}h" for p in top3
@@ -702,7 +746,21 @@ def render_terminal_card(
     if overall_narrative:
         parts.append(Text(""))
         parts.append(Text("What you did", style="bold underline"))
-        parts.append(Text(overall_narrative, style="dim"))
+        headers = _narrative_headers(overall_narrative)
+        if headers:
+            # Goal-thread narrative (#98): show each thread's bold header
+            # (the concrete win) only — supporting bullets are one line away
+            # via the "Full report" footer. Table.grid gives wrapped headers
+            # a hanging indent instead of restarting at column 0.
+            did_table = Table.grid(padding=(0, 1))
+            did_table.add_column(width=2)
+            did_table.add_column()
+            for h in headers:
+                did_table.add_row(Text("•", style="dim"), Text(h, style="bold"))
+            parts.append(did_table)
+        else:
+            # Pre-#98 cached narrative (plain prose) — render as before.
+            parts.append(Text(overall_narrative, style="dim"))
 
     if artifacts and artifacts.repos:
         parts.append(Text(""))
@@ -719,7 +777,7 @@ def render_terminal_card(
         parts.append(shipped)
 
     if comparison:
-        parts.extend(render_comparison_block(comparison))
+        parts.extend(render_comparison_block(comparison, colors))
 
     if report_path:
         parts.append(Text(""))
@@ -762,8 +820,15 @@ def _delta_text(current: float, previous: float, unit: str = "h", fmt: str = ".1
     return Text(f"{arrow} {pct:+.0f}%", style=color)
 
 
-def render_comparison_block(cmp: PeriodComparison) -> list:
-    """Renderable Rich elements: title + small comparison table for the panel."""
+def render_comparison_block(cmp: PeriodComparison, colors: dict[str, str]) -> list:
+    """Renderable Rich elements: title + small comparison table for the panel.
+
+    `colors` is the bucket→color map from the enclosing card (see
+    render_terminal_card) so a bucket's color here matches its bar in the
+    "Time by category" section above — always pass the full-card map, not
+    one computed from just `cmp.deltas`, or a bucket that appears in both
+    places could get two different colors in the same card.
+    """
     parts: list = []
     parts.append(Text(""))
     parts.append(Text(f"vs previous window  ({cmp.previous_label})",
@@ -786,7 +851,7 @@ def render_comparison_block(cmp: PeriodComparison) -> list:
         _delta_text(cmp.current_total_h, cmp.previous_total_h),
     )
     for d in cmp.deltas:
-        color = color_for(d.category)
+        color = colors[d.category]
         table.add_row(
             Text(d.category, style=color),
             Text(f"{d.current_min/60:.1f}h"),
@@ -862,6 +927,7 @@ def render_trend_card(points: list[PeriodPoint], period: str) -> Panel:
         return Panel(Text("No data in window."), title="ccstory trend")
 
     cat_series = trend_by_category(points)
+    colors = colors_for(list(cat_series.keys()))
     total_series = [p.total_h for p in points]
     output_series = [p.output_tokens / 1_000_000 for p in points]
     cost_series = [p.cost_usd for p in points]
@@ -882,7 +948,7 @@ def render_trend_card(points: list[PeriodPoint], period: str) -> Panel:
         _delta_text(total_series[-1], total_series[-2] if len(total_series) > 1 else 0),
     )
     for cat, series in cat_series.items():
-        color = color_for(cat)
+        color = colors[cat]
         prev = series[-2] if len(series) > 1 else 0
         table.add_row(
             Text(cat, style=color),

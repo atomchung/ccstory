@@ -59,7 +59,7 @@ the normal narrative flow, which may invoke your installed Claude Code CLI.
 ╰────────────────────────────── ccstory ───────────────────────────────╯
 ```
 
-The markdown report adds a **2–3 sentence synthesis per bucket** plus
+The markdown report adds a **header + 2-4 bullet points per bucket** plus
 per-session one-liners. Run with `--llm-narrative` to upgrade per-session
 lines from the instant first/last-message fallback to claude-polished prose:
 
@@ -275,11 +275,11 @@ pypi = ["my-package"]      # extra packages beyond auto-detection
 
 ## Narrative depth
 
-`## What you did` is one 3-sentence synthesis by default. For real
-retrospectives, `--narrative` goes deeper:
+`## What you did` is 2-4 goal threads (bold header + bullets) by default. For
+real retrospectives, `--narrative` goes deeper:
 
 ```bash
-ccstory week --narrative per-category   # 2-3 lines per bucket instead
+ccstory week --narrative per-category   # header + bullets per bucket instead
 ccstory week --narrative both           # overall first, then per-bucket
 ```
 
