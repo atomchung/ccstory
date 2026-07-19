@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The recap terminal card no longer assigns two different buckets the same
+  bar color. `color_for()` hashes each bucket independently into a 6-color
+  palette, so a report with several custom `[categories]` aliases (none
+  matching the built-in English bucket names) had good odds of two buckets
+  landing on the same color. A new `colors_for()` resolves the whole set
+  together: each unknown bucket walks forward from its hash slot until it
+  finds a color no sibling bucket in the same render has already claimed.
+- The recap terminal card's "What you did" section no longer prints the
+  overall narrative's raw `**bold**` / `- bullet` markup verbatim, nor its
+  full multi-paragraph length. #98 reshaped the overall narrative into 2-4
+  goal threads (bold header + supporting bullets), but the terminal card's
+  renderer was never updated to match, so it dumped the whole thing as
+  plain dim text — literal asterisks and all. The card now shows just each
+  thread's bold header; full bullets stay in the markdown report, one line
+  away via "Full report →".
+
 ## [0.6.0] - 2026-07-18
 
 ### Added

@@ -37,6 +37,7 @@ from . import __version__
 from .categorizer import (
     add_category_keywords,
     color_for,
+    colors_for,
     ensure_default_config,
     list_user_categories,
     load_settings,
@@ -238,8 +239,9 @@ def _run_category(argv: list[str], console: Console) -> int:
         )
         table.add_column("Bucket", style="bold")
         table.add_column("Keywords", style="dim")
+        colors = colors_for(sorted(cats))
         for bucket in sorted(cats):
-            color = color_for(bucket)
+            color = colors[bucket]
             table.add_row(
                 f"[{color}]{bucket}[/{color}]",
                 ", ".join(cats[bucket]),

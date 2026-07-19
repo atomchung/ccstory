@@ -35,7 +35,7 @@ from rich.table import Table
 
 from .categorizer import (
     CONFIG_PATH,
-    color_for,
+    colors_for,
     ensure_default_config,
     normalize_project_name,
 )
@@ -193,8 +193,10 @@ def _render_proposal(console: Console, proposal: dict[str, list[str]]) -> None:
     table.add_column("Bucket", style="bold")
     table.add_column("Count", justify="right")
     table.add_column("Projects", style="dim")
-    for bucket, projects in sorted(proposal.items(), key=lambda kv: -len(kv[1])):
-        color = color_for(bucket)
+    ordered = sorted(proposal.items(), key=lambda kv: -len(kv[1]))
+    colors = colors_for([bucket for bucket, _ in ordered])
+    for bucket, projects in ordered:
+        color = colors[bucket]
         table.add_row(
             f"[{color}]{bucket}[/{color}]",
             str(len(projects)),
