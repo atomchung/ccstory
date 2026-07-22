@@ -714,7 +714,7 @@ def render_terminal_card(
         Text("Cost",    style="dim"),  Text(f"${usage.total_cost_usd:,.0f}", style="bold green"),
     )
 
-    # --- Coding Agents summary row ---
+    # --- Coding Agents summary table (at the bottom) ---
     agent_stats: dict[str, dict] = {}
     for s in sessions:
         ag = getattr(s, "agent", "claude")
@@ -723,16 +723,25 @@ def render_terminal_card(
         agent_stats[ag]["sessions"] += 1
         agent_stats[ag]["active_sec"] += s.active_sec
 
-    agent_line: Text | None = None
+    agent_table: Table | None = None
     if len(agent_stats) > 1 or "antigravity" in agent_stats or "codex" in agent_stats:
-        agent_line = Text()
-        agent_line.append("Agents   ", style="dim")
-        bits = []
+        agent_table = Table.grid(padding=(0, 2))
+        for _ in range(6):
+            agent_table.add_column()
+        row_items = []
         for ag, st in sorted(agent_stats.items(), key=lambda x: -x[1]["active_sec"]):
             ag_name = "Antigravity" if ag == "antigravity" else ("Codex" if ag == "codex" else "Claude Code")
             h = st["active_sec"] / 3600
-            bits.append(f"{ag_name} {h:.1f}h ({st['sessions']} sess)")
-        agent_line.append(" · ".join(bits), style="bold cyan")
+            row_items.extend([
+                Text(ag_name, style="dim"),
+                Text(f"{h:.1f}h", style="bold")
+            ])
+        while row_items:
+            chunk = row_items[:6]
+            row_items = row_items[6:]
+            while len(chunk) < 6:
+                chunk.extend([Text(""), Text("")])
+            agent_table.add_row(*chunk)
 
     # --- Bar chart, colored per bucket ---
     bars = Table.grid(padding=(0, 1))
@@ -774,8 +783,6 @@ def render_terminal_card(
     parts: list = []
     parts.extend(highlight_block)
     parts.append(metrics)
-    if agent_line is not None:
-        parts.append(agent_line)
     parts.append(Text(""))
     parts.append(Text("Time by category", style="bold underline"))
     parts.append(bars)
@@ -820,6 +827,11 @@ def render_terminal_card(
 
     if comparison:
         parts.extend(render_comparison_block(comparison, colors))
+
+    if agent_table is not None:
+        parts.append(Text(""))
+        parts.append(Text("Coding Agents", style="bold underline"))
+        parts.append(agent_table)
 
     if report_path:
         parts.append(Text(""))
