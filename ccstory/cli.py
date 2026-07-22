@@ -580,6 +580,10 @@ def _dispatch(argv: list[str] | None = None) -> int:
                              "~/.claude/settings.json `language`, and system "
                              "locale. Persist the choice by setting "
                              "`language = \"...\"` in ~/.ccstory/config.toml.")
+    parser.add_argument("--agent", choices=["all", "claude", "antigravity"],
+                        default="all",
+                        help="Which AI agent sessions to include: `all` (default), "
+                             "`claude`, or `antigravity`.")
     parser.add_argument("--version", action="version",
                         version=f"ccstory {__version__}")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -608,9 +612,10 @@ def _dispatch(argv: list[str] | None = None) -> int:
         format="%(levelname)s %(name)s: %(message)s",
     )
 
-    if not CLAUDE_PROJECTS.exists():
-        sys.exit(f"No Claude Code data at {CLAUDE_PROJECTS}. "
-                 "Have you used Claude Code yet?")
+    antigravity_brain = Path.home() / ".gemini" / "antigravity" / "brain"
+    if not CLAUDE_PROJECTS.exists() and not antigravity_brain.exists():
+        sys.exit(f"No session data at {CLAUDE_PROJECTS} or {antigravity_brain}. "
+                 "Have you used Claude Code or Antigravity yet?")
 
     _print_first_run_preview(console)
 
@@ -629,6 +634,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
             refresh_all=args.refresh_all,
             flavor=args.flavor,
             lang=args.lang,
+            agent=args.agent,
             reports_dir=args.reports_dir,
             console=console,
         )

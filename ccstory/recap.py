@@ -443,20 +443,24 @@ def _backfill_summaries(
         task = progress.add_task(progress_desc, total=len(todo))
         for sid in todo:
             sess = by_id[sid]
-            jsonl_path = SUMMARIZER_PROJECTS_DIR / sess.project / f"{sid}.jsonl"
+            if getattr(sess, "agent", "claude") == "antigravity":
+                jsonl_path = Path.home() / ".gemini" / "antigravity" / "brain" / sid / ".system_generated" / "logs" / "transcript.jsonl"
+            else:
+                jsonl_path = SUMMARIZER_PROJECTS_DIR / sess.project / f"{sid}.jsonl"
+                if not jsonl_path.exists():
+                    matches = list(SUMMARIZER_PROJECTS_DIR.rglob(f"{sid}.jsonl"))
+                    if matches:
+                        jsonl_path = matches[0]
+
             if not jsonl_path.exists():
-                matches = list(SUMMARIZER_PROJECTS_DIR.rglob(f"{sid}.jsonl"))
-                if matches:
-                    jsonl_path = matches[0]
-                else:
-                    # Don't clobber a cached summary when the jsonl has since
-                    # gone missing; only record a skip for never-seen ids.
-                    if existing.get(sid) is None:
-                        upsert(sid, "(jsonl not found)", "skipped",
-                               project=sess.project)
-                    counts["skipped"] += 1
-                    progress.advance(task)
-                    continue
+                # Don't clobber a cached summary when the jsonl has since
+                # gone missing; only record a skip for never-seen ids.
+                if existing.get(sid) is None:
+                    upsert(sid, "(jsonl not found)", "skipped",
+                           project=sess.project)
+                counts["skipped"] += 1
+                progress.advance(task)
+                continue
             result = summarize_session(sid, jsonl_path, use_llm=use_llm,
                                        force=force)
             if result and result.source == "auto":
@@ -486,69 +490,28 @@ def build_recap(
     refresh_all: bool = False,
     flavor: str = "plain",
     lang: str | None = None,
+    agent: str = "all",
     reports_dir: Path | None = None,
     write_report: bool = True,
     console: Console | None = None,
 ) -> RecapResult:
-    """Run the full recap pipeline for one window and return the result.
-
-    This is the one-call library entry point (#110): everything the CLI's
-    default flow does — session collection, summary backfill, bucket
-    resolution, narrative synthesis, previous-window comparison, artifact
-    collection, markdown render — behind a single function. Parameters
-    mirror the CLI flags one-to-one:
-
-      window            week | month | all | YYYY-MM   (positional arg)
-      minimal           --minimal        skip the narrative pipeline entirely
-      llm_narrative     --llm-narrative  polish per-session summaries via
-                                         `claude -p` (slow, ETA warning)
-      narrative         --narrative      overall | per-category | both
-      aggregate         --no-aggregate   False skips the overall synthesis
-      compare           --no-compare     False skips the vs-previous block
-      compare_narrative --no-compare-narrative
-      artifacts         --no-artifacts   False skips the What-shipped scan
-      classify          --classify       folder | content | hybrid
-      refresh           --refresh        wipe this window's caches first
-      refresh_all       --refresh-all    wipe ALL classification caches
-      flavor            --for            plain | obsidian markdown variant
-      lang              --lang           narrative language override
-      reports_dir       --reports-dir    None → ~/.ccstory/reports
-      write_report      (CLI always writes)  False skips the report file
-
-    `console` controls progress output: pass a Rich Console to see status
-    lines / progress bars (the CLI passes its own; scripts typically pass
-    ``Console(stderr=True)``), or leave None for silence.
-
-    Side effects: writes the markdown report (unless ``write_report=False``)
-    and updates ccstory's own caches (summaries, classifications, period
-    aggregates) in ``~/.ccstory/cache.db`` — same as a CLI run.
-
-    Raises ``ValueError`` for an unrecognized window,
-    ``RecapUnavailable`` when there is no Claude Code data / no engaged
-    sessions in the window, and ``session_summarizer.CacheUnavailable``
-    when ``~/.ccstory/cache.db`` cannot be opened (corrupt, locked, or
-    written by a newer ccstory) — all normal exceptions a host process
-    can catch (#119).
-    """
+    """Run the full recap pipeline for one window and return the result."""
     if console is None:
         console = Console(quiet=True)
 
     apply_lang_override(lang)
 
-    if not CLAUDE_PROJECTS.exists():
+    antigravity_brain = Path.home() / ".gemini" / "antigravity" / "brain"
+    if not CLAUDE_PROJECTS.exists() and not antigravity_brain.exists():
         raise RecapUnavailable(
-            f"No Claude Code data at {CLAUDE_PROJECTS}. "
-            "Have you used Claude Code yet?"
+            f"No Claude Code data or Antigravity data at {CLAUDE_PROJECTS} or {antigravity_brain}. "
+            "Have you used Claude Code or Antigravity yet?"
         )
 
     # Load user price overrides (config [prices] table). No-op if absent.
     prices, snapshot = load_prices_config(CONFIG_PATH)
     apply_prices(prices, snapshot)
 
-    # Config validation (#69): a project listed under two areas is ambiguous.
-    # The resolver keeps the first (exact-membership, config order); surface
-    # the shadowed ones once so the user can clean up rather than silently
-    # losing a membership.
     for needle, areas in duplicate_memberships(CONFIG_PATH):
         console.print(
             f"[yellow]![/yellow] [dim]config: project '{needle}' is listed "
@@ -563,7 +526,7 @@ def build_recap(
     )
 
     with console.status("[dim]Parsing sessions and token usage…[/dim]"):
-        sessions = collect_sessions(since, until)
+        sessions = collect_sessions(since, until, agent=agent)
         if not sessions:
             raise RecapUnavailable("No engaged sessions in this window.")
         # since/until are tz-aware local; collect_usage normalizes to UTC.
