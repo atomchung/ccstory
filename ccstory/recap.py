@@ -55,6 +55,7 @@ from .session_summarizer import (
     invalidate_period_aggregates,
     language_directive,
     recent_auto_timestamps,
+    resolve_transcript_path,
     summarize_session,
     synthesize_category_for_period,
     synthesize_comparison,
@@ -443,19 +444,9 @@ def _backfill_summaries(
         task = progress.add_task(progress_desc, total=len(todo))
         for sid in todo:
             sess = by_id[sid]
-            if getattr(sess, "agent", "claude") == "antigravity":
-                jsonl_path = Path.home() / ".gemini" / "antigravity" / "brain" / sid / ".system_generated" / "logs" / "transcript.jsonl"
-            elif getattr(sess, "agent", "claude") == "codex":
-                matches = list((Path.home() / ".codex").rglob(f"*{sid}*.jsonl"))
-                jsonl_path = matches[0] if matches else (Path.home() / ".codex" / "sessions" / f"{sid}.jsonl")
-            else:
-                jsonl_path = SUMMARIZER_PROJECTS_DIR / sess.project / f"{sid}.jsonl"
-                if not jsonl_path.exists():
-                    matches = list(SUMMARIZER_PROJECTS_DIR.rglob(f"{sid}.jsonl"))
-                    if matches:
-                        jsonl_path = matches[0]
+            jsonl_path = resolve_transcript_path(sess)
 
-            if not jsonl_path.exists():
+            if not jsonl_path or not jsonl_path.exists():
                 # Don't clobber a cached summary when the jsonl has since
                 # gone missing; only record a skip for never-seen ids.
                 if existing.get(sid) is None:

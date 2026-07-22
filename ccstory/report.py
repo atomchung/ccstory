@@ -844,10 +844,13 @@ def render_terminal_card(
     if pricing_warning:
         parts.append(Text(f"⚠️ {pricing_warning}", style="yellow"))
 
+    has_other_agents = any(getattr(s, "agent", "claude") in ("antigravity", "codex") for s in sessions)
+    recap_title = "AI Coding Recap" if has_other_agents else "Claude Code Recap"
+
     title_range = _format_date_range(since, until)
     return Panel(
         Group(*parts),
-        title=f"[bold]Claude Code Recap[/bold] [dim]·[/dim] [cyan]{title_range}[/cyan]",
+        title=f"[bold]{recap_title}[/bold] [dim]·[/dim] [cyan]{title_range}[/cyan]",
         subtitle="[dim]ccstory[/dim]",
         border_style="cyan",
         padding=(1, 2),

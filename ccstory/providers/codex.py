@@ -122,6 +122,7 @@ class CodexProvider(BaseAgentProvider):
             cwd=cwd,
             timestamps=[t.timestamp() for t in timestamps],
             agent=self.agent_name,
+            path=jsonl_path,
         )
 
     def collect_sessions(

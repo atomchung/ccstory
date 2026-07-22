@@ -29,12 +29,12 @@ def extract_workspace_cwd(content: str) -> str:
     """Extract working directory path from system context in user input content."""
     if not isinstance(content, str):
         return ""
-    m1 = re.search(r"The user has \d+ active workspaces.*?\n\s*(/[^\s]+)\s*->", content)
+    m1 = re.search(r"The user has \d+ active workspaces.*?\n\s*(/.+?)\s*->", content)
     if m1:
-        return m1.group(1)
-    m2 = re.search(r"Code relating to the user.*?written in the locations listed above:?\s*(/[^\s]+)", content)
+        return m1.group(1).strip()
+    m2 = re.search(r"Code relating to the user.*?written in the locations listed above:?\s*(/.+)", content)
     if m2:
-        return m2.group(1)
+        return m2.group(1).strip()
     return ""
 
 
@@ -132,6 +132,7 @@ class AntigravityProvider(BaseAgentProvider):
             cwd=cwd,
             timestamps=[t.timestamp() for t in timestamps],
             agent=self.agent_name,
+            path=jsonl_path,
         )
 
     def collect_sessions(

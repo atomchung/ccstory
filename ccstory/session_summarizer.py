@@ -592,17 +592,63 @@ def missing_ids(session_ids: list[str]) -> list[str]:
     return [sid for sid in session_ids if sid not in have]
 
 
+def _sanitize_antigravity_text(raw: str) -> str:
+    if not isinstance(raw, str):
+        return ""
+    match = re.search(r"<USER_REQUEST>\s*(.*?)\s*(?:</USER_REQUEST>|$)", raw, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    cleaned = re.sub(
+        r"<(user_information|skills|identity|guidelines|web_application_development|conversation_transcript|artifacts|slash_commands|planning_mode|planning_mode_artifacts|subagents|messaging)>.*?</\1>",
+        "",
+        raw,
+        flags=re.DOTALL,
+    )
+    cleaned = re.sub(r"<SYSTEM_MESSAGE>.*?</SYSTEM_MESSAGE>", "", cleaned, flags=re.DOTALL)
+    return cleaned.strip()
+
+
+def resolve_transcript_path(sess: SessionStat) -> Path | None:
+    """Locate transcript JSONL file for any SessionStat across agent providers."""
+    if getattr(sess, "path", None) and sess.path.exists():
+        return sess.path
+    sid = sess.session_id
+    agent = getattr(sess, "agent", "claude")
+    if agent == "antigravity":
+        p = Path.home() / ".gemini" / "antigravity" / "brain" / sid / ".system_generated" / "logs" / "transcript.jsonl"
+        return p if p.exists() else None
+    elif agent == "codex":
+        matches = list((Path.home() / ".codex").rglob(f"*{sid}*.jsonl"))
+        if matches:
+            return matches[0]
+        p = Path.home() / ".codex" / "sessions" / f"{sid}.jsonl"
+        return p if p.exists() else None
+    else:
+        p = PROJECTS_DIR / sess.project / f"{sid}.jsonl"
+        if p.exists():
+            return p
+        matches = list(PROJECTS_DIR.rglob(f"{sid}.jsonl"))
+        return matches[0] if matches else None
+
+
 def _extract_excerpt(jsonl_path: Path) -> tuple[str, str]:
     """Extract user-facing text excerpt for summarization. Returns (project, excerpt)."""
     user_msgs: list[str] = []
     assistant_msgs: list[str] = []
+    detected_cwd = ""
     try:
         project = jsonl_path.relative_to(PROJECTS_DIR).parts[0]
     except ValueError:
-        project = jsonl_path.parent.name
+        parent_name = jsonl_path.parent.name
+        if parent_name == "logs" and "antigravity" in str(jsonl_path):
+            project = "antigravity"
+        elif "codex" in str(jsonl_path):
+            project = "codex"
+        else:
+            project = parent_name
 
     try:
-        with jsonl_path.open(encoding="utf-8") as f:
+        with jsonl_path.open(encoding="utf-8", errors="ignore") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -611,20 +657,66 @@ def _extract_excerpt(jsonl_path: Path) -> tuple[str, str]:
                     d = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                role = d.get("type")
+
+                role = None
+                text = ""
+
+                # Antigravity format
+                if d.get("type") in ("USER_INPUT", "PLANNER_RESPONSE"):
+                    step_type = d.get("type")
+                    if step_type == "USER_INPUT":
+                        role = "user"
+                        raw = d.get("content", "")
+                        if not detected_cwd and isinstance(raw, str):
+                            from .providers.antigravity import extract_workspace_cwd
+                            cw = extract_workspace_cwd(raw)
+                            if cw:
+                                detected_cwd = cw
+                        text = _sanitize_antigravity_text(raw)
+                    elif step_type == "PLANNER_RESPONSE":
+                        role = "assistant"
+                        raw_content = d.get("content")
+                        text = str(raw_content).strip() if raw_content is not None else ""
+
+                # Codex format
+                elif "payload" in d and isinstance(d.get("payload"), dict):
+                    payload = d["payload"]
+                    if not detected_cwd and payload.get("cwd"):
+                        detected_cwd = payload["cwd"]
+                    r = payload.get("role") or payload.get("type")
+                    if r in ("user", "user_message"):
+                        role = "user"
+                        c = payload.get("content", "")
+                        if isinstance(c, str):
+                            text = c
+                        elif isinstance(c, list):
+                            text = "\n".join([p["text"] for p in c if isinstance(p, dict) and isinstance(p.get("text"), str)])
+                    elif r in ("assistant", "response_item"):
+                        role = "assistant"
+                        c = payload.get("content", "")
+                        if isinstance(c, str):
+                            text = c
+                        elif isinstance(c, list):
+                            text = "\n".join([p["text"] for p in c if isinstance(p, dict) and isinstance(p.get("text"), str)])
+
+                # Claude Code format
+                else:
+                    role = d.get("type")
+                    if role in ("user", "assistant"):
+                        msg = d.get("message")
+                        content = msg.get("content", "") if isinstance(msg, dict) else ""
+                        if isinstance(content, str):
+                            text = content
+                        elif isinstance(content, list):
+                            parts = []
+                            for c in content:
+                                if isinstance(c, dict) and c.get("type") == "text":
+                                    parts.append(c.get("text", ""))
+                            text = "\n".join(parts)
+
                 if role not in ("user", "assistant"):
                     continue
-                content = d.get("message", {}).get("content", "")
-                if isinstance(content, str):
-                    text = content
-                elif isinstance(content, list):
-                    parts = []
-                    for c in content:
-                        if isinstance(c, dict) and c.get("type") == "text":
-                            parts.append(c.get("text", ""))
-                    text = "\n".join(parts)
-                else:
-                    text = ""
+
                 text = text.strip()
                 if (
                     not text
@@ -640,15 +732,22 @@ def _extract_excerpt(jsonl_path: Path) -> tuple[str, str]:
     except OSError:
         return project, ""
 
+    if detected_cwd and Path(detected_cwd).name:
+        project = Path(detected_cwd).name
+
     parts: list[str] = []
-    head_set = set(user_msgs[:N_USER_HEAD])
-    for i, m in enumerate(user_msgs[:N_USER_HEAD]):
+    head_msgs = user_msgs[:N_USER_HEAD]
+    for i, m in enumerate(head_msgs):
         parts.append(f"[USER {i+1}]\n{m}")
+
     if len(user_msgs) > N_USER_HEAD + N_USER_TAIL:
         parts.append("...")
-    for m in user_msgs[-N_USER_TAIL:]:
-        if m not in head_set:
+        for m in user_msgs[-N_USER_TAIL:]:
             parts.append(f"[USER LATE]\n{m}")
+    elif len(user_msgs) > N_USER_HEAD:
+        for m in user_msgs[N_USER_HEAD:]:
+            parts.append(f"[USER LATE]\n{m}")
+
     for m in assistant_msgs[-N_ASSISTANT_TAIL:]:
         parts.append(f"[ASSISTANT END]\n{m[:300]}")
 
@@ -657,7 +756,7 @@ def _extract_excerpt(jsonl_path: Path) -> tuple[str, str]:
 
 _PROMPT_TEMPLATE = """{language_directive}
 
-Below is an excerpt of a Claude Code conversation (first/last user + assistant messages).
+Below is an excerpt of an AI coding conversation (first/last user + assistant messages).
 
 Write ONE sentence (max 18 words) summarizing what this session ACTUALLY DID — focus on outcomes, not process.
 
@@ -1658,19 +1757,14 @@ def backfill_for_sessions(
     summarized = fallback = skipped = 0
     for i, sid in enumerate(todo):
         sess = by_id[sid]
-        jsonl_path = PROJECTS_DIR / sess.project / f"{sid}.jsonl"
-        if not jsonl_path.exists():
-            matches = list(PROJECTS_DIR.rglob(f"{sid}.jsonl"))
-            if not matches:
-                # Only record a "not found" skip when nothing is cached;
-                # otherwise keep the existing summary rather than clobber it.
-                if existing.get(sid) is None:
-                    upsert(sid, "(jsonl not found)", "skipped", project=sess.project)
-                skipped += 1
-                if on_progress:
-                    on_progress(i + 1, len(todo), sid, "skipped")
-                continue
-            jsonl_path = matches[0]
+        jsonl_path = resolve_transcript_path(sess)
+        if not jsonl_path or not jsonl_path.exists():
+            if existing.get(sid) is None:
+                upsert(sid, "(jsonl not found)", "skipped", project=sess.project)
+            skipped += 1
+            if on_progress:
+                on_progress(i + 1, len(todo), sid, "skipped")
+            continue
         result = summarize_session(sid, jsonl_path, use_llm=use_llm, force=force)
         if result and result.source == "auto":
             summarized += 1

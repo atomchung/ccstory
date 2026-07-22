@@ -32,6 +32,13 @@ PROJECTS_DIR = Path.home() / ".claude" / "projects"
 PRICES_SNAPSHOT_DATE = "2026-07"
 PRICING_SNAPSHOT_STALE_DAYS = 90
 
+LITELLM_PRICES_URL = (
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+)
+CACHE_DIR = Path.home() / ".ccstory" / "cache"
+PRICING_CACHE_FILE = CACHE_DIR / "model_prices.json"
+DEFAULT_PRICING_CACHE_TTL_DAYS = 7
+
 DEFAULT_PRICES: dict[str, dict[str, float]] = {
     "fable":  dict(inp=10.00, out=50.00, cw=12.50, cr=1.00),
     "mythos": dict(inp=10.00, out=50.00, cw=12.50, cr=1.00),
@@ -48,10 +55,16 @@ _active_snapshot_date: str = PRICES_SNAPSHOT_DATE
 
 
 def _price_for(model: str) -> dict | None:
-    m = (model or "").lower()
-    for key, p in _active_prices.items():
-        if key in m:
-            return p
+    m = (model or "").lower().strip()
+    if not m:
+        return None
+    if m in _active_prices:
+        return _active_prices[m]
+
+    for key in sorted(_active_prices.keys(), key=len, reverse=True):
+        k = key.lower()
+        if k in m or (len(m) >= 3 and m in k):
+            return _active_prices[key]
     return None
 
 
@@ -72,6 +85,8 @@ def pricing_snapshot_age_days(
     snapshot. This is deliberately date-only: no live pricing lookup happens.
     """
     raw = snapshot_date.strip() if isinstance(snapshot_date, str) else ""
+    if raw.startswith("litellm-"):
+        raw = raw[len("litellm-") :]
     if len(raw) == 7:
         raw = f"{raw}-01"
     try:
@@ -111,43 +126,143 @@ _CONFIG_KEY_MAP = {
 }
 
 
-def load_prices_config(config_path: Path) -> tuple[dict[str, dict[str, float]], str]:
+def _parse_litellm_json(raw_data: dict) -> dict[str, dict[str, float]]:
+    parsed: dict[str, dict[str, float]] = {}
+    if not isinstance(raw_data, dict):
+        return parsed
+    for model_name, info in raw_data.items():
+        if not isinstance(info, dict) or not isinstance(model_name, str):
+            continue
+        inp = info.get("input_cost_per_token")
+        out = info.get("output_cost_per_token")
+        if inp is None or out is None:
+            continue
+        try:
+            inp_f = float(inp) * 1_000_000
+            out_f = float(out) * 1_000_000
+            cw = info.get("cache_creation_input_token_cost")
+            cr = info.get("cache_read_input_token_cost")
+            cw_f = float(cw) * 1_000_000 if cw is not None else inp_f * 1.25
+            cr_f = float(cr) * 1_000_000 if cr is not None else inp_f * 0.1
+            parsed[model_name.lower()] = {
+                "inp": inp_f,
+                "out": out_f,
+                "cw": cw_f,
+                "cr": cr_f,
+            }
+        except (TypeError, ValueError):
+            continue
+    return parsed
+
+
+def sync_litellm_prices(
+    cache_file: Path = PRICING_CACHE_FILE,
+    url: str = LITELLM_PRICES_URL,
+    timeout: float = 2.0,
+    max_age_days: int = DEFAULT_PRICING_CACHE_TTL_DAYS,
+) -> tuple[dict[str, dict[str, float]], str] | None:
+    """Fetch or load cached LiteLLM pricing model registry.
+
+    Returns `(prices_dict, snapshot_date)` or `None` on failure/timeout.
+    Prices are converted to USD per 1M tokens.
+    """
+    import time
+    import urllib.request
+
+    now = time.time()
+    cache_data = None
+    cache_mtime = 0.0
+
+    if cache_file.exists():
+        try:
+            stat = cache_file.stat()
+            cache_mtime = stat.st_mtime
+            with cache_file.open("r", encoding="utf-8") as f:
+                content = json.load(f)
+                if isinstance(content, dict) and "prices" in content:
+                    prices = _parse_litellm_json(content["prices"])
+                    snap = content.get("snapshot_date", "litellm-cached")
+                    if prices:
+                        cache_data = (prices, snap)
+        except Exception as e:
+            LOG.debug("failed to read pricing cache %s: %s", cache_file, e)
+
+    if cache_data and (now - cache_mtime) < max_age_days * 86400:
+        return cache_data
+
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "ccstory-pricing-sync/1.0"}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw_bytes = resp.read()
+            raw_data = json.loads(raw_bytes.decode("utf-8"))
+            parsed_prices = _parse_litellm_json(raw_data)
+            if parsed_prices:
+                today_str = date.today().isoformat()
+                snap_date = f"litellm-{today_str[:7]}"
+                try:
+                    cache_file.parent.mkdir(parents=True, exist_ok=True)
+                    with cache_file.open("w", encoding="utf-8") as f:
+                        json.dump(
+                            {
+                                "snapshot_date": snap_date,
+                                "fetched_at": today_str,
+                                "prices": raw_data,
+                            },
+                            f,
+                        )
+                except Exception as e:
+                    LOG.debug("failed to write pricing cache %s: %s", cache_file, e)
+                return parsed_prices, snap_date
+    except Exception as e:
+        LOG.debug("failed to fetch LiteLLM prices from %s: %s", url, e)
+
+    if cache_data:
+        return cache_data
+
+    return None
+
+
+def load_prices_config(
+    config_path: Path,
+    sync_remote: bool = True,
+) -> tuple[dict[str, dict[str, float]], str]:
     """Read `[prices]` table from config.toml; merge with defaults.
 
     Returns `(prices_dict, snapshot_date)`. Returns defaults if file or
     `[prices]` block is absent or malformed.
-
-    Expected config shape:
-
-        [prices]
-        snapshot_date = "2026-03"   # optional; appears in report footer
-
-        [prices.opus]
-        input = 15.0
-        output = 75.0
-        cache_write = 18.75
-        cache_read = 1.5
     """
     from .categorizer import _load_toml  # categorizer doesn't import from us
-    cfg = _load_toml(config_path) or {}
-    block = cfg.get("prices")
-    if not isinstance(block, dict):
-        return {k: dict(v) for k, v in DEFAULT_PRICES.items()}, PRICES_SNAPSHOT_DATE
-
-    snapshot = block.get("snapshot_date", PRICES_SNAPSHOT_DATE)
-    if not isinstance(snapshot, str):
-        snapshot = PRICES_SNAPSHOT_DATE
 
     merged: dict[str, dict[str, float]] = {
         k: dict(v) for k, v in DEFAULT_PRICES.items()
     }
+    effective_snapshot = PRICES_SNAPSHOT_DATE
+
+    if sync_remote:
+        litellm_res = sync_litellm_prices()
+        if litellm_res:
+            litellm_prices, litellm_snap = litellm_res
+            merged.update(litellm_prices)
+            effective_snapshot = litellm_snap
+
+    cfg = _load_toml(config_path) or {}
+    block = cfg.get("prices")
+    if not isinstance(block, dict):
+        return merged, effective_snapshot
+
+    snapshot = block.get("snapshot_date", effective_snapshot)
+    if not isinstance(snapshot, str):
+        snapshot = effective_snapshot
+
     for model_key, override in block.items():
         if model_key == "snapshot_date":
             continue
         if not isinstance(override, dict):
             LOG.warning("ignoring malformed [prices.%s] (must be a table)", model_key)
             continue
-        target = merged.setdefault(model_key, {})
+        target = merged.setdefault(model_key.lower(), {})
         for cfg_key, internal_key in _CONFIG_KEY_MAP.items():
             if cfg_key in override:
                 try:

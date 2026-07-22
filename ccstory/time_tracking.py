@@ -54,6 +54,7 @@ class SessionStat:
     # categorizer.resolve_session_bucket() before consuming `.category`.
     category_source: str = ""
     agent: str = "claude"
+    path: Path | None = None
 
     @property
     def active_min(self) -> float:

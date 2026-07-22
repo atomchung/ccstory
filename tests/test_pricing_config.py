@@ -104,14 +104,14 @@ class TestSnapshotStaleness:
 
 class TestLoadPricesConfig:
     def test_missing_config_returns_defaults(self, tmp_path: Path):
-        prices, snapshot = load_prices_config(tmp_path / "nope.toml")
+        prices, snapshot = load_prices_config(tmp_path / "nope.toml", sync_remote=False)
         assert prices == DEFAULT_PRICES
         assert snapshot == PRICES_SNAPSHOT_DATE
 
     def test_config_without_prices_block_returns_defaults(self, tmp_path: Path):
         cfg = tmp_path / "config.toml"
         cfg.write_text('default_bucket = "writing"\n', encoding="utf-8")
-        prices, snapshot = load_prices_config(cfg)
+        prices, snapshot = load_prices_config(cfg, sync_remote=False)
         assert prices == DEFAULT_PRICES
         assert snapshot == PRICES_SNAPSHOT_DATE
 
