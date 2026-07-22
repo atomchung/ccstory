@@ -305,28 +305,6 @@ def render_report(
         )
     lines.append("")
 
-    # Coding Agents Breakdown
-    agent_stats: dict[str, dict] = {}
-    for s in sessions:
-        ag = getattr(s, "agent", "claude")
-        if ag not in agent_stats:
-            agent_stats[ag] = {"sessions": 0, "active_sec": 0, "msgs": 0}
-        agent_stats[ag]["sessions"] += 1
-        agent_stats[ag]["active_sec"] += s.active_sec
-        agent_stats[ag]["msgs"] += s.msg_count
-
-    has_multi_agents = len(agent_stats) > 1 or "antigravity" in agent_stats
-    if has_multi_agents:
-        lines.append("## Coding Agents Breakdown")
-        lines.append("")
-        lines.append("| Agent | Time | Sessions | Messages |")
-        lines.append("|---|---:|---:|---:|")
-        for ag, st in sorted(agent_stats.items(), key=lambda x: -x[1]["active_sec"]):
-            ag_name = "Google Antigravity" if ag == "antigravity" else "Claude Code"
-            h_m = f"{int(st['active_sec'] // 3600)}h {int((st['active_sec'] % 3600) // 60):02d}m"
-            lines.append(f"| {ag_name} (`{ag}`) | {h_m} | {st['sessions']} | {st['msgs']:,} |")
-        lines.append("")
-
     if comparison:
         lines.append(render_comparison_markdown(comparison))
 
@@ -422,6 +400,29 @@ def render_report(
         f"(cache saved ${usage.cache_savings_usd:,.2f})"
     )
     lines.append("")
+
+    # Coding Agents Breakdown at the very end
+    agent_stats: dict[str, dict] = {}
+    for s in sessions:
+        ag = getattr(s, "agent", "claude")
+        if ag not in agent_stats:
+            agent_stats[ag] = {"sessions": 0, "active_sec": 0, "msgs": 0}
+        agent_stats[ag]["sessions"] += 1
+        agent_stats[ag]["active_sec"] += s.active_sec
+        agent_stats[ag]["msgs"] += s.msg_count
+
+    has_multi_agents = len(agent_stats) > 1 or "antigravity" in agent_stats or "codex" in agent_stats
+    if has_multi_agents:
+        lines.append("## Coding Agents Breakdown")
+        lines.append("")
+        lines.append("| Agent | Time | Sessions | Messages |")
+        lines.append("|---|---:|---:|---:|")
+        for ag, st in sorted(agent_stats.items(), key=lambda x: -x[1]["active_sec"]):
+            ag_name = "Google Antigravity" if ag == "antigravity" else ("OpenAI Codex" if ag == "codex" else "Claude Code")
+            h_m = f"{int(st['active_sec'] // 3600)}h {int((st['active_sec'] % 3600) // 60):02d}m"
+            lines.append(f"| {ag_name} (`{ag}`) | {h_m} | {st['sessions']} | {st['msgs']:,} |")
+        lines.append("")
+
     lines.append(
         "> For exact cost / billing-window breakdowns, pair with "
         "[ccusage](https://github.com/ryoppippi/ccusage). ccstory tells the story; "
