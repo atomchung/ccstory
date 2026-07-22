@@ -580,10 +580,10 @@ def _dispatch(argv: list[str] | None = None) -> int:
                              "~/.claude/settings.json `language`, and system "
                              "locale. Persist the choice by setting "
                              "`language = \"...\"` in ~/.ccstory/config.toml.")
-    parser.add_argument("--agent", choices=["all", "claude", "antigravity"],
+    parser.add_argument("--agent", choices=["all", "claude", "antigravity", "codex"],
                         default="all",
                         help="Which AI agent sessions to include: `all` (default), "
-                             "`claude`, or `antigravity`.")
+                             "`claude`, `antigravity`, or `codex`.")
     parser.add_argument("--version", action="version",
                         version=f"ccstory {__version__}")
     parser.add_argument("-v", "--verbose", action="store_true")

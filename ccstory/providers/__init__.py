@@ -9,10 +9,12 @@ from ..time_tracking import SessionStat
 from .antigravity import AntigravityProvider
 from .base import BaseAgentProvider
 from .claude import ClaudeCodeProvider
+from .codex import CodexProvider
 
 _PROVIDERS: dict[str, type[BaseAgentProvider]] = {
     "claude": ClaudeCodeProvider,
     "antigravity": AntigravityProvider,
+    "codex": CodexProvider,
 }
 
 

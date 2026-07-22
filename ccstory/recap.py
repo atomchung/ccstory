@@ -445,6 +445,9 @@ def _backfill_summaries(
             sess = by_id[sid]
             if getattr(sess, "agent", "claude") == "antigravity":
                 jsonl_path = Path.home() / ".gemini" / "antigravity" / "brain" / sid / ".system_generated" / "logs" / "transcript.jsonl"
+            elif getattr(sess, "agent", "claude") == "codex":
+                matches = list((Path.home() / ".codex").rglob(f"*{sid}*.jsonl"))
+                jsonl_path = matches[0] if matches else (Path.home() / ".codex" / "sessions" / f"{sid}.jsonl")
             else:
                 jsonl_path = SUMMARIZER_PROJECTS_DIR / sess.project / f"{sid}.jsonl"
                 if not jsonl_path.exists():
