@@ -377,18 +377,16 @@ def render_report(
             text = summ.summary if summ else s.first_user_text[:100]
             time_str = s.start.strftime("%Y-%m-%d %H:%M")
             mins = int(s.active_sec // 60)
-            ag = getattr(s, "agent", "claude")
-            ag_tag = f"`[{ag}]` " if has_multi_agents else ""
             if flavor == "obsidian":
                 leaf = normalize_project_name(s.project) or s.project
                 leaf = _obsidian_wikilink_target(leaf)
                 lines.append(
-                    f"- **{time_str}** · {mins}m · {s.msg_count} msg · {ag_tag}"
+                    f"- **{time_str}** · {mins}m · {s.msg_count} msg · "
                     f"[[{leaf}]] — {text}"
                 )
             else:
                 lines.append(
-                    f"- **{time_str}** · {mins}m · {s.msg_count} msg · {ag_tag}— {text}"
+                    f"- **{time_str}** · {mins}m · {s.msg_count} msg — {text}"
                 )
         lines.append("")
 
