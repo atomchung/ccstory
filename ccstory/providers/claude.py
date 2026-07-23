@@ -1,0 +1,183 @@
+"""Claude Code session provider (``~/.claude/projects/**/*.jsonl``).
+
+Lifted verbatim out of `time_tracking.parse_session` / `collect_sessions` when
+the multi-agent split landed — the parsing rules and their comments are
+unchanged, only their home is.
+"""
+
+from __future__ import annotations
+
+import glob
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+from ..time_tracking import (
+    GAP_CAP_SEC,
+    SessionStat,
+    _extract_first_user_text,
+    _is_subagent_path,
+    _parse_ts,
+)
+from .base import BaseAgentProvider
+
+
+class ClaudeCodeProvider(BaseAgentProvider):
+    """Session provider for Claude Code."""
+
+    def __init__(self, projects_dir: Path | None = None) -> None:
+        self._projects_dir = projects_dir
+
+    @property
+    def projects_dir(self) -> Path:
+        # Resolved at call time, never captured at import: tests monkeypatch
+        # $HOME to redirect every path away from the real user's data
+        # (tests/test_test_isolation.py guards exactly this).
+        if self._projects_dir is not None:
+            return self._projects_dir
+        return Path.home() / ".claude" / "projects"
+
+    @property
+    def agent_name(self) -> str:
+        return "claude"
+
+    def parse_session(self, jsonl_path: Path) -> SessionStat | None:
+        """Compute active time + metadata for one session file."""
+        timestamps: list[datetime] = []
+        msg_count = 0
+        user_msg_count = 0
+        first_user_text = ""
+        is_scheduled = False
+        first_raw_user_seen = False
+        cwd = ""
+
+        try:
+            with jsonl_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        d = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    role = d.get("type")
+                    if role not in ("user", "assistant"):
+                        continue
+                    if not cwd and isinstance(d.get("cwd"), str):
+                        cwd = d["cwd"]
+                    msg_count += 1
+                    ts = _parse_ts(d.get("timestamp"))
+                    if ts:
+                        timestamps.append(ts)
+                    if role == "user":
+                        content = d.get("message", {}).get("content", "")
+                        text = _extract_first_user_text(content).strip()
+                        if not first_raw_user_seen and text:
+                            first_raw_user_seen = True
+                            if text.startswith("<scheduled-task"):
+                                is_scheduled = True
+                        is_real_user = (
+                            text
+                            and not text.startswith("<")
+                            and "tool_use_id" not in text
+                        )
+                        if is_real_user:
+                            user_msg_count += 1
+                            if not first_user_text:
+                                first_user_text = text[:200]
+        except OSError:
+            return None
+
+        if not timestamps:
+            return None
+
+        timestamps.sort()
+        active_sec = 0
+        for prev, curr in zip(timestamps, timestamps[1:]):
+            gap = (curr - prev).total_seconds()
+            active_sec += min(gap, GAP_CAP_SEC)
+
+        try:
+            proj_dir = jsonl_path.relative_to(self.projects_dir).parts[0]
+        except ValueError:
+            proj_dir = jsonl_path.parent.name
+
+        return SessionStat(
+            project=proj_dir,
+            # Left empty on purpose — categorizer.resolve_session_bucket() is
+            # the single point where every classification path (current
+            # window, prev window, trend, refresh) converges. Filling category
+            # here would let callers that forget to run the resolver silently
+            # use folder-only buckets, which is exactly the bug #61 root cause.
+            category="",
+            session_id=jsonl_path.stem,
+            start=timestamps[0],
+            end=timestamps[-1],
+            active_sec=int(active_sec),
+            msg_count=msg_count,
+            user_msg_count=user_msg_count,
+            first_user_text=first_user_text,
+            is_scheduled=is_scheduled,
+            cwd=cwd,
+            timestamps=[t.timestamp() for t in timestamps],
+            agent=self.agent_name,
+            path=jsonl_path,
+        )
+
+    def collect_sessions(
+        self,
+        since: datetime,
+        until: datetime | None = None,
+        engaged_only: bool = True,
+    ) -> list[SessionStat]:
+        """All Claude Code sessions overlapping [since, until)."""
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+        if until is not None and until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+
+        stats: list[SessionStat] = []
+        since_ts = since.timestamp()
+
+        for path_str in glob.glob(
+            str(self.projects_dir / "**" / "*.jsonl"), recursive=True
+        ):
+            path = Path(path_str)
+            # Skip nested subagent traces (double-count guard)
+            if _is_subagent_path(path):
+                continue
+            try:
+                if path.stat().st_mtime < since_ts:
+                    continue
+            except OSError:
+                continue
+
+            s = self.parse_session(path)
+            if not s:
+                continue
+            if s.end < since:
+                continue
+            if until is not None and s.start >= until:
+                continue
+            if engaged_only and not s.engaged:
+                continue
+            stats.append(s)
+        return stats
+
+    def transcript_path(self, sess: SessionStat) -> Path | None:
+        """Session id → transcript, for stats rebuilt from cache (no `.path`)."""
+        found = super().transcript_path(sess)
+        if found is not None:
+            return found
+        direct = self.projects_dir / sess.project / f"{sess.session_id}.jsonl"
+        if direct.exists():
+            return direct
+        # The project folder can differ from where the file actually sits
+        # (renamed repo, moved worktree). One targeted glob on a filename we
+        # know, not a whole-tree walk.
+        matches = glob.glob(
+            str(self.projects_dir / "**" / f"{sess.session_id}.jsonl"),
+            recursive=True,
+        )
+        return Path(matches[0]) if matches else None

@@ -96,8 +96,28 @@ class TestBuildRecap:
 
     def test_missing_projects_dir_raises(self, tmp_home, monkeypatch):
         monkeypatch.setattr(recap, "CLAUDE_PROJECTS", tmp_home / "nope")
-        with pytest.raises(RecapUnavailable, match="No Claude Code data"):
+        with pytest.raises(RecapUnavailable, match="No session data"):
             build_recap("week")
+
+    def test_missing_data_message_names_only_the_selected_agent(
+        self, tmp_home, monkeypatch
+    ):
+        """`--agent claude` must not blame a missing Codex install."""
+        monkeypatch.setattr(recap, "CLAUDE_PROJECTS", tmp_home / "nope")
+        with pytest.raises(RecapUnavailable) as excinfo:
+            build_recap("week", agent="claude")
+        assert "Codex" not in str(excinfo.value)
+
+    def test_unknown_agent_raises_value_error(self, tmp_home):
+        with pytest.raises(ValueError, match="Unsupported agent filter"):
+            build_recap("week", agent="antigravity")
+
+    def test_every_registered_provider_has_a_data_root(self):
+        """Registering a provider without a root here would report "no session
+        data ()" to a user whose transcripts are sitting right there."""
+        from ccstory.providers import list_providers
+
+        assert set(list_providers()) <= set(recap._DATA_ROOTS)
 
     def test_bad_window_raises_value_error(self, tmp_home):
         with pytest.raises(ValueError, match="unrecognized window"):

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime
 
 from rich.console import Console, Group
@@ -18,8 +19,9 @@ from rich.text import Text
 
 from .artifacts import ArtifactsReport
 from .categorizer import colors_for, load_settings, normalize_project_name
+from .providers import agent_label
 from .session_summarizer import SessionSummary
-from .time_tracking import CategoryRollup, SessionStat
+from .time_tracking import CategoryRollup, SessionStat, wall_clock_active_sec
 from .token_usage import (
     UsageReport,
     fmt_tokens,
@@ -30,6 +32,110 @@ from .trends import PeriodComparison, PeriodPoint, sparkline, trend_by_category
 
 # Supported markdown flavors for render_report().
 VALID_FLAVORS = ("plain", "obsidian")
+
+# ----- Multi-agent breakdown (#133) -------------------------------------------
+#
+# Deliberately shares-only. Agents run *concurrently* — a Codex review and a
+# Claude Code session can occupy the same ten minutes — so per-agent hours are
+# not additive and printing them next to the card's single Total invites the
+# reader to add numbers that describe overlapping intervals. Measured on real
+# data: raw per-agent time summed to 163h over a week whose deduplicated wall
+# clock was 64.5h — 2.5× over. The one duration ccstory reports stays
+# `wall_clock_active_sec` over all sessions; agents get a relative share of raw
+# interaction time instead, which is meaningful precisely because it does not
+# claim to be a duration.
+
+
+@dataclass
+class AgentShare:
+    """One agent's slice of a window. Shares are fractions in [0, 1]."""
+    agent: str
+    label: str
+    sessions: int
+    messages: int
+    time_share: float
+    session_share: float
+
+
+def agent_breakdown(sessions: list[SessionStat]) -> list[AgentShare]:
+    """Per-agent share of raw interaction time and of session count.
+
+    Sorted by time share, biggest first. The two shares routinely disagree —
+    many short Codex reviews against fewer long Claude Code sessions — and the
+    disagreement is the point, so both are reported.
+    """
+    raw_by_agent: dict[str, int] = {}
+    sessions_by_agent: dict[str, int] = {}
+    msgs_by_agent: dict[str, int] = {}
+    for s in sessions:
+        name = getattr(s, "agent", "claude") or "claude"
+        raw_by_agent[name] = raw_by_agent.get(name, 0) + s.active_sec
+        sessions_by_agent[name] = sessions_by_agent.get(name, 0) + 1
+        msgs_by_agent[name] = msgs_by_agent.get(name, 0) + s.msg_count
+
+    raw_total = sum(raw_by_agent.values())
+    n_total = len(sessions)
+    out = [
+        AgentShare(
+            agent=name,
+            label=agent_label(name),
+            sessions=sessions_by_agent[name],
+            messages=msgs_by_agent[name],
+            time_share=(raw / raw_total) if raw_total else 0.0,
+            session_share=(sessions_by_agent[name] / n_total) if n_total else 0.0,
+        )
+        for name, raw in raw_by_agent.items()
+    ]
+    out.sort(key=lambda a: (-a.time_share, a.agent))
+    return out
+
+
+def render_agent_breakdown_markdown(sessions: list[SessionStat]) -> list[str]:
+    """The "Coding agents" section, or [] when only one agent is in play.
+
+    A single-agent window has nothing to compare, and a 100% row would be pure
+    noise for the Claude-Code-only user who is still ccstory's default reader.
+    """
+    shares = agent_breakdown(sessions)
+    if len(shares) < 2:
+        return []
+
+    lines = ["## Coding agents", ""]
+    lines.append("| Agent | Time share | Sessions | Messages |")
+    lines.append("|---|---:|---:|---:|")
+    for a in shares:
+        lines.append(
+            f"| {_md_cell(a.label)} (`{a.agent}`) | {a.time_share*100:.0f}% | "
+            f"{a.sessions} ({a.session_share*100:.0f}%) | {a.messages:,} |"
+        )
+    lines.append("")
+    wall_h = wall_clock_active_sec(sessions) / 3600
+    raw_h = sum(s.active_sec for s in sessions) / 3600
+    lines.append(
+        f"**{wall_h:.1f}h** wall-clock across all agents · "
+        f"**{parallelism_factor(sessions):.1f}× parallel** "
+        f"(raw per-agent time sums to {raw_h:.1f}h)."
+    )
+    lines.append("")
+    lines.append(
+        "> Share = each agent's raw interaction time relative to the others'. "
+        "Agents run in parallel, so a share is **not** a duration and the "
+        "shares do not add up to the total active time above."
+    )
+    lines.append("")
+    return lines
+
+
+def parallelism_factor(sessions: list[SessionStat]) -> float:
+    """How much agent time overlapped: raw summed time ÷ wall-clock time.
+
+    1.0 means strictly sequential work; 2.8 means the raw per-agent totals
+    describe 2.8× more time than actually elapsed.
+    """
+    wall = wall_clock_active_sec(sessions)
+    if wall <= 0:
+        return 1.0
+    return sum(s.active_sec for s in sessions) / wall
 
 
 def _format_date_range(since: datetime, until: datetime) -> str:
@@ -305,6 +411,8 @@ def render_report(
         )
     lines.append("")
 
+    lines.extend(render_agent_breakdown_markdown(sessions))
+
     if comparison:
         lines.append(render_comparison_markdown(comparison))
 
@@ -400,6 +508,16 @@ def render_report(
         f"(cache saved ${usage.cache_savings_usd:,.2f})"
     )
     lines.append("")
+    others = [a.label for a in agent_breakdown(sessions) if a.agent != "claude"]
+    if others:
+        # Time now spans every agent; token accounting still reads Claude Code
+        # transcripts only. Say so rather than letting the reader divide a
+        # multi-agent hour count into a single-agent cost.
+        lines.append(
+            f"> ⚠️ Token and cost figures cover Claude Code only — "
+            f"{', '.join(others)} usage is in the time breakdown above but not "
+            "in these numbers."
+        )
     lines.append(
         "> For exact cost / billing-window breakdowns, pair with "
         "[ccusage](https://github.com/ryoppippi/ccusage). ccstory tells the story; "
@@ -507,6 +625,9 @@ def build_report_json(
                 "id": s.session_id,
                 "project": normalize_project_name(s.project) or s.project,
                 "bucket": s.category,
+                # Additive (#133): which coding agent produced this session.
+                # "claude" for every pre-multi-agent consumer's data.
+                "agent": getattr(s, "agent", "claude") or "claude",
                 "start": s.start.isoformat(),
                 "end": s.end.isoformat(),
                 "active_min": s.active_min,
@@ -523,6 +644,22 @@ def build_report_json(
             }
             for s in sorted(sessions, key=lambda x: x.start)
         ],
+        # Additive (#133). `time_share` is a relative weight of raw
+        # interaction time, NOT hours: agents run concurrently, so per-agent
+        # durations would double-count the overlap. `parallelism` is how many
+        # times over the raw sum exceeds `totals.active_hours`.
+        "agents": [
+            {
+                "agent": a.agent,
+                "label": a.label,
+                "sessions": a.sessions,
+                "messages": a.messages,
+                "time_share": round(a.time_share, 4),
+                "session_share": round(a.session_share, 4),
+            }
+            for a in agent_breakdown(sessions)
+        ],
+        "parallelism": round(parallelism_factor(sessions), 2),
         "by_model": [
             {
                 "model": model,
@@ -743,6 +880,33 @@ def render_terminal_card(
         parts.append(Text("By project", style="bold underline"))
         parts.append(proj_table)
 
+    # --- Multi-agent shares (#133) --- no hours here on purpose; see the
+    # module-level note above agent_breakdown().
+    shares = agent_breakdown(sessions)
+    if len(shares) >= 2:
+        agent_table = Table.grid(padding=(0, 1))
+        agent_table.add_column(width=14, no_wrap=True, overflow="ellipsis")
+        agent_table.add_column(no_wrap=True)
+        for a in shares:
+            agent_table.add_row(
+                Text(a.label, style="bold"),
+                Text(
+                    f"{a.time_share*100:.0f}% of agent time · "
+                    f"{a.sessions} sessions ({a.session_share*100:.0f}%)",
+                    style="dim",
+                ),
+            )
+        parts.append(Text(""))
+        parts.append(Text("Coding agents", style="bold underline"))
+        parts.append(agent_table)
+        note = Text()
+        note.append(f"{parallelism_factor(sessions):.1f}× parallel", style="bold")
+        note.append("  shares are weights, not hours", style="dim")
+        parts.append(note)
+        parts.append(
+            Text("Tokens / cost above are Claude Code only.", style="dim yellow")
+        )
+
     if overall_narrative:
         parts.append(Text(""))
         parts.append(Text("What you did", style="bold underline"))
@@ -791,9 +955,12 @@ def render_terminal_card(
         parts.append(Text(f"⚠️ {pricing_warning}", style="yellow"))
 
     title_range = _format_date_range(since, until)
+    # Only rebrand the card when the window genuinely spans several agents —
+    # a Claude-Code-only user should keep seeing the name they installed.
+    card_title = "AI Coding Recap" if len(shares) >= 2 else "Claude Code Recap"
     return Panel(
         Group(*parts),
-        title=f"[bold]Claude Code Recap[/bold] [dim]·[/dim] [cyan]{title_range}[/cyan]",
+        title=f"[bold]{card_title}[/bold] [dim]·[/dim] [cyan]{title_range}[/cyan]",
         subtitle="[dim]ccstory[/dim]",
         border_style="cyan",
         padding=(1, 2),

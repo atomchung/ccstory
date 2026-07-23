@@ -125,6 +125,18 @@ flow after the live debug session on Wednesday.
 | `--no-compare` | Skip the entire block |
 | `--no-compare-narrative` | Keep numeric deltas, drop the prose |
 
+**Coding agent**
+
+| Flag | What it does |
+|---|---|
+| `--agent all` (default) | Every agent ccstory can read |
+| `--agent claude` | Claude Code only (`~/.claude/projects`) |
+| `--agent codex` | OpenAI Codex only (`~/.codex/sessions`) |
+
+Also accepted by `ccstory trend`, so a trend line and a week over the same range
+describe the same population. See [Multiple coding agents](#multiple-coding-agents)
+for what the numbers mean once more than one agent is in the window.
+
 **Session classification mode**
 
 | Flag | What it does |
@@ -234,6 +246,36 @@ re-buckets sessions by what they were actually about. An override changes a
 session's *area* only — its project is the physical fact of which folder the
 work happened in, never reassigned. Results cache in `~/.ccstory/cache.db` so
 reruns are free.
+
+## Multiple coding agents
+
+ccstory reads Claude Code (`~/.claude/projects`) and OpenAI Codex
+(`~/.codex/sessions`, plus `archived_sessions`) by default. Codex sessions are
+attributed to a project from the `cwd` the transcript records, folded through
+the same rules Claude Code project folders get — including git worktrees, so a
+detached checkout counts toward the repo it came from rather than becoming its
+own one-off project.
+
+**Time is reported once, not per agent.** Agents run concurrently: a Codex
+review and a Claude Code session routinely occupy the same ten minutes. Summing
+their active time double-counts that overlap — on a real week here, raw
+per-agent time added up to 177h against a deduplicated wall clock of 64h. So:
+
+- **Total active time** is the wall clock across every session, deduplicated —
+  the same number ccstory has always reported, now spanning all agents.
+- **The `Coding agents` block reports shares, not hours.** Each agent's share is
+  its raw interaction time relative to the others'. Shares are not durations and
+  do not add up to the total.
+- **Session share is shown next to time share, and they disagree on purpose.**
+  Many short Codex reviews against fewer long Claude Code sessions shows up as
+  75% / 25% of time but 51% / 49% of sessions — that gap is the finding.
+- **`N× parallel`** is raw agent time ÷ wall clock: how much of the work
+  overlapped.
+
+Token counts and costs still cover Claude Code only — Codex usage appears in the
+time breakdown but not in the cost numbers, and the report says so inline.
+
+Use `--agent claude` to get the pre-multi-agent numbers back.
 
 ## What shipped
 

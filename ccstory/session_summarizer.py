@@ -592,17 +592,95 @@ def missing_ids(session_ids: list[str]) -> list[str]:
     return [sid for sid in session_ids if sid not in have]
 
 
+def resolve_transcript_path(sess) -> Path | None:
+    """Locate the transcript backing a ``SessionStat``, whatever agent wrote it.
+
+    Delegates to the session's provider, so this stays agent-agnostic — the
+    on-disk layout of each agent lives in ``ccstory/providers/`` and nowhere
+    else. Returns None when the transcript is gone (deleted, pruned worktree),
+    which callers must treat as "skip", never as "empty conversation".
+
+    One-shot convenience wrapper. Loops over many sessions should hold a
+    ``providers.TranscriptResolver`` instead so provider indexes are built once.
+    """
+    from .providers import TranscriptResolver
+
+    return TranscriptResolver().path_for(sess)
+
+
+def _claude_record_text(d: dict) -> tuple[str | None, str]:
+    """(role, text) for one Claude Code transcript record."""
+    role = d.get("type")
+    if role not in ("user", "assistant"):
+        return None, ""
+    msg = d.get("message")
+    content = msg.get("content", "") if isinstance(msg, dict) else ""
+    if isinstance(content, str):
+        return role, content
+    if isinstance(content, list):
+        return role, "\n".join(
+            c.get("text", "")
+            for c in content
+            if isinstance(c, dict) and c.get("type") == "text"
+        )
+    return role, ""
+
+
+def _codex_record_text(payload: dict, kind: str | None) -> tuple[str | None, str]:
+    """(role, text) for one Codex rollout record.
+
+    User text is read from the ``event_msg`` / ``user_message`` record only:
+    the parallel ``response_item`` user records repeat the same turn wrapped in
+    everything the harness injected (plugin lists, environment context, skill
+    bodies), so preferring them means summarizing the harness, not the work.
+    Assistant text is the mirror image — ``response_item`` carries the final
+    message, ``event_msg`` / ``agent_message`` merely duplicates it.
+    """
+    from .providers.codex import strip_task_wrapper
+
+    ptype = payload.get("type")
+    if kind == "event_msg" and ptype == "user_message":
+        return "user", strip_task_wrapper(_codex_content_text(payload.get("message", "")))
+    if (
+        kind == "response_item"
+        and ptype == "message"
+        and payload.get("role") == "assistant"
+    ):
+        return "assistant", _codex_content_text(payload.get("content", ""))
+    return None, ""
+
+
+def _codex_content_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            part["text"]
+            for part in content
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
+        )
+    return ""
+
+
 def _extract_excerpt(jsonl_path: Path) -> tuple[str, str]:
-    """Extract user-facing text excerpt for summarization. Returns (project, excerpt)."""
+    """Extract user-facing text excerpt for summarization. Returns (project, excerpt).
+
+    Handles every agent's transcript format (#133): a record carrying a dict
+    ``payload`` is Codex, anything else is Claude Code. Format sniffing per
+    record rather than per file keeps this working for a caller that only has
+    a path — `summarize_session` is reached from cache-repair paths that have
+    no `SessionStat` to ask.
+    """
     user_msgs: list[str] = []
     assistant_msgs: list[str] = []
+    detected_cwd = ""
     try:
         project = jsonl_path.relative_to(PROJECTS_DIR).parts[0]
     except ValueError:
         project = jsonl_path.parent.name
 
     try:
-        with jsonl_path.open(encoding="utf-8") as f:
+        with jsonl_path.open(encoding="utf-8", errors="ignore") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -611,20 +689,17 @@ def _extract_excerpt(jsonl_path: Path) -> tuple[str, str]:
                     d = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                role = d.get("type")
+
+                payload = d.get("payload")
+                if isinstance(payload, dict):
+                    if not detected_cwd and isinstance(payload.get("cwd"), str):
+                        detected_cwd = payload["cwd"]
+                    role, text = _codex_record_text(payload, d.get("type"))
+                else:
+                    role, text = _claude_record_text(d)
+
                 if role not in ("user", "assistant"):
                     continue
-                content = d.get("message", {}).get("content", "")
-                if isinstance(content, str):
-                    text = content
-                elif isinstance(content, list):
-                    parts = []
-                    for c in content:
-                        if isinstance(c, dict) and c.get("type") == "text":
-                            parts.append(c.get("text", ""))
-                    text = "\n".join(parts)
-                else:
-                    text = ""
                 text = text.strip()
                 if (
                     not text
@@ -639,6 +714,15 @@ def _extract_excerpt(jsonl_path: Path) -> tuple[str, str]:
                     assistant_msgs.append(text[:500])
     except OSError:
         return project, ""
+
+    if detected_cwd:
+        # Codex transcripts live in a date tree, not a project folder, so the
+        # cache row's project has to come from the recorded cwd — encoded the
+        # way the Claude provider names project dirs so both agents' rows land
+        # under the same project.
+        from .providers.codex import _encode_project_dir, _worktree_origin
+
+        project = _encode_project_dir(_worktree_origin(detected_cwd)) or project
 
     parts: list[str] = []
     head_set = set(user_msgs[:N_USER_HEAD])
@@ -1656,21 +1740,21 @@ def backfill_for_sessions(
         todo = [sid for sid in ids if existing.get(sid) is None]
     regenerated = sum(1 for sid in todo if existing.get(sid) is not None)
     summarized = fallback = skipped = 0
+    from .providers import TranscriptResolver
+
+    resolver = TranscriptResolver()
     for i, sid in enumerate(todo):
         sess = by_id[sid]
-        jsonl_path = PROJECTS_DIR / sess.project / f"{sid}.jsonl"
-        if not jsonl_path.exists():
-            matches = list(PROJECTS_DIR.rglob(f"{sid}.jsonl"))
-            if not matches:
-                # Only record a "not found" skip when nothing is cached;
-                # otherwise keep the existing summary rather than clobber it.
-                if existing.get(sid) is None:
-                    upsert(sid, "(jsonl not found)", "skipped", project=sess.project)
-                skipped += 1
-                if on_progress:
-                    on_progress(i + 1, len(todo), sid, "skipped")
-                continue
-            jsonl_path = matches[0]
+        jsonl_path = resolver.path_for(sess)
+        if jsonl_path is None:
+            # Only record a "not found" skip when nothing is cached;
+            # otherwise keep the existing summary rather than clobber it.
+            if existing.get(sid) is None:
+                upsert(sid, "(jsonl not found)", "skipped", project=sess.project)
+            skipped += 1
+            if on_progress:
+                on_progress(i + 1, len(todo), sid, "skipped")
+            continue
         result = summarize_session(sid, jsonl_path, use_llm=use_llm, force=force)
         if result and result.source == "auto":
             summarized += 1

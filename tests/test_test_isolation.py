@@ -12,6 +12,8 @@ from ccstory import (
     time_tracking,
     token_usage,
 )
+from ccstory.providers.claude import ClaudeCodeProvider
+from ccstory.providers.codex import CodexProvider
 
 
 def test_autouse_fake_home_redirects_all_home_bound_paths():
@@ -34,9 +36,13 @@ def test_autouse_fake_home_redirects_all_home_bound_paths():
     assert categorizer.CONFIG_PATH == config
     assert artifacts.DB_PATH == cache
 
+    # Providers resolve their roots at call time, so $HOME alone covers them —
+    # that is the contract, and this asserts it stays true.
+    assert ClaudeCodeProvider().projects_dir == projects
+    assert CodexProvider().codex_dir == home / ".codex"
+
     # These modules import the constants by value and need their own patches.
     assert recap.CLAUDE_PROJECTS == projects
-    assert recap.SUMMARIZER_PROJECTS_DIR == projects
     assert recap.CONFIG_PATH == config
     assert recap.REPORTS_DIR == ccstory_dir / "reports"
     assert cli.CLAUDE_PROJECTS == projects

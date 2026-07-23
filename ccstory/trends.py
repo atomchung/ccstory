@@ -122,6 +122,7 @@ def compare_to_previous(
     until: datetime,
     mode: str = "hybrid",
     fallback: str = "coding",
+    agent: str = "all",
 ) -> PeriodComparison | None:
     """Build a comparison record against the previous same-length window.
 
@@ -131,13 +132,14 @@ def compare_to_previous(
     ``fallback`` rather than firing fresh LLM calls — comparison mode must
     not surprise the user with token spend.
 
-    ``mode`` and ``fallback`` should mirror the caller's main-flow settings so
-    current and previous windows resolve to the same vocabulary.
+    ``mode``, ``fallback`` and ``agent`` should mirror the caller's main-flow
+    settings so current and previous windows resolve to the same vocabulary —
+    and, under an ``--agent`` filter, cover the same set of agents.
     """
     from .time_tracking import collect_sessions  # local to avoid cycle hassle
 
     prev_since, prev_until = previous_window(since, until)
-    prev_sessions = collect_sessions(prev_since, prev_until)
+    prev_sessions = collect_sessions(prev_since, prev_until, agent=agent)
     if not prev_sessions:
         return None
     _resolve_sessions_from_cache(prev_sessions, mode=mode, fallback=fallback)
@@ -235,6 +237,7 @@ def collect_trend(
     now: datetime | None = None,
     mode: str = "hybrid",
     fallback: str = "coding",
+    agent: str = "all",
 ) -> list[PeriodPoint]:
     """Compute per-period rollups for trend analysis.
 
@@ -242,6 +245,10 @@ def collect_trend(
     in-memory rather than re-scanning per window. Resolves every session's
     bucket through the same priority chain as ``ccstory week`` (cache-only;
     no fresh LLM in trend mode), then groups by window.
+
+    ``agent`` mirrors the recap's ``--agent`` filter so a trend and a week over
+    the same range describe the same population — without it, a Claude-only
+    week would sit next to an every-agent trend line.
     """
     from .time_tracking import collect_sessions
 
@@ -256,7 +263,7 @@ def collect_trend(
         raise ValueError(f"unsupported trend period: {period}")
 
     earliest = min(s for _, s, _ in windows)
-    all_sessions = collect_sessions(earliest, now)
+    all_sessions = collect_sessions(earliest, now, agent=agent)
     # Bulk-resolve every session once via cache lookup. Avoids N×M behaviour
     # of resolving per-window — single SQL query covers all 8 windows.
     _resolve_sessions_from_cache(all_sessions, mode=mode, fallback=fallback)

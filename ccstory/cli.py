@@ -34,6 +34,7 @@ from rich.console import Console
 from rich.table import Table
 
 from . import __version__
+from .providers import list_providers
 from .categorizer import (
     add_category_keywords,
     colors_for,
@@ -327,6 +328,10 @@ def _run_trend(argv: list[str]) -> int:
                    help="Bucket resolution mode — must match what `ccstory "
                         "week` is using to keep vocabulary aligned across "
                         "trend, week, and vs-previous views.")
+    p.add_argument("--agent", choices=["all", *list_providers()], default="all",
+                   help="Which coding agent's sessions to include — mirror "
+                        "what `ccstory week` uses so the trend line and the "
+                        "week describe the same population.")
     p.add_argument("--reports-dir", type=Path, default=REPORTS_DIR)
     p.add_argument("--format", dest="output_format",
                    choices=VALID_OUTPUT_FORMATS, default="auto",
@@ -356,7 +361,7 @@ def _run_trend(argv: list[str]) -> int:
     ):
         points = collect_trend(
             period=period, count=count,
-            mode=args.classify, fallback=fallback_bucket,
+            mode=args.classify, fallback=fallback_bucket, agent=args.agent,
         )
     if not any(p.total_h for p in points):
         sys.exit("No engaged sessions across the trend window.")
@@ -580,6 +585,10 @@ def _dispatch(argv: list[str] | None = None) -> int:
                              "~/.claude/settings.json `language`, and system "
                              "locale. Persist the choice by setting "
                              "`language = \"...\"` in ~/.ccstory/config.toml.")
+    parser.add_argument("--agent", choices=["all", *list_providers()],
+                        default="all",
+                        help="Which coding agent's sessions to include: "
+                             "`all` (default), `claude`, or `codex`.")
     parser.add_argument("--version", action="version",
                         version=f"ccstory {__version__}")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -608,9 +617,12 @@ def _dispatch(argv: list[str] | None = None) -> int:
         format="%(levelname)s %(name)s: %(message)s",
     )
 
-    if not CLAUDE_PROJECTS.exists():
-        sys.exit(f"No Claude Code data at {CLAUDE_PROJECTS}. "
-                 "Have you used Claude Code yet?")
+    # `build_recap` re-checks this per --agent; the early exit here is only so
+    # a first-time user with no data at all gets the message before the
+    # first-run preview prints.
+    if not CLAUDE_PROJECTS.exists() and not (Path.home() / ".codex").exists():
+        sys.exit(f"No session data at {CLAUDE_PROJECTS}. "
+                 "Have you used Claude Code or Codex yet?")
 
     _print_first_run_preview(console)
 
@@ -629,6 +641,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
             refresh_all=args.refresh_all,
             flavor=args.flavor,
             lang=args.lang,
+            agent=args.agent,
             reports_dir=args.reports_dir,
             console=console,
         )
