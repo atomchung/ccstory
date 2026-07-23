@@ -131,7 +131,13 @@ class ClaudeCodeProvider(BaseAgentProvider):
         until: datetime,
         by_model: dict,
     ) -> int:
-        """Scan all Claude Code jsonl files and aggregate token usage in [since, until]."""
+        """Scan all Claude Code jsonl files and aggregate token usage in [since, until].
+
+        Note: Session time tracking (collect_sessions/parse_session) excludes subagent
+        paths to avoid double-counting active work hours. Token usage and cost
+        aggregation (collect_usage) deliberately includes subagents because subagent
+        tokens represent real API cost expenditures.
+        """
         from ..token_usage import ModelUsage
 
         assistant_turns = 0
@@ -141,8 +147,6 @@ class ClaudeCodeProvider(BaseAgentProvider):
             str(self.projects_dir / "**" / "*.jsonl"), recursive=True
         ):
             fp = Path(path_str)
-            if _is_subagent_path(fp):
-                continue
             try:
                 with fp.open() as f:
                     for line in f:

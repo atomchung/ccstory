@@ -205,6 +205,24 @@ class TestCollectUsage:
         )
         assert rep.cache_hit_ratio == 0.9
 
+    def test_claude_subagent_usage_included(self, jsonl_factory):
+        records = [
+            make_user_msg("hello subagent", _ts(2026, 5, 10, 10, 0, 0)),
+            make_assistant_msg(
+                "subagent response", _ts(2026, 5, 10, 10, 0, 5), "msg_sub1",
+                model="claude-sonnet-4-6",
+                input_tokens=300, output_tokens=150,
+            ),
+        ]
+        jsonl_factory("myproj/subagents", "subagent-session", records)
+        rep = collect_usage(
+            datetime(2026, 5, 1, tzinfo=timezone.utc),
+            datetime(2026, 5, 31, tzinfo=timezone.utc),
+            agent="claude",
+        )
+        assert rep.assistant_turns == 1
+        assert rep.total_input == 300
+        assert rep.total_output == 150
 
 def make_codex_token_count(
     ts: str,
@@ -386,4 +404,40 @@ class TestCodexTokenUsage:
         assert mu.cache_read == 1000
         assert mu.output_tokens == 300
         assert mu.cost_usd == 0.0
+
+    def test_codex_subagent_usage_included(self, codex_factory):
+        records = [
+            {
+                "timestamp": "2026-07-22T12:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "session_id": "sub-1",
+                    "parent_thread_id": "parent-123",
+                    "source": {"subagent": "task-runner"},
+                    "cwd": "/Users/test/app",
+                },
+            },
+            {
+                "timestamp": "2026-07-22T12:01:00Z",
+                "type": "turn_context",
+                "payload": {"model": "gpt-5.6-sol"},
+            },
+            make_codex_token_count(
+                "2026-07-22T12:02:00Z",
+                input_tokens=2000,
+                cached_input_tokens=500,
+                output_tokens=400,
+            ),
+        ]
+        codex_factory("sub-1", records)
+        rep = collect_usage(
+            datetime(2026, 7, 1, tzinfo=timezone.utc),
+            datetime(2026, 7, 31, tzinfo=timezone.utc),
+            agent="codex",
+        )
+        assert "gpt-5.6-sol" in rep.by_model
+        mu = rep.by_model["gpt-5.6-sol"]
+        assert mu.input_tokens == 1500
+        assert mu.cache_read == 500
+        assert mu.output_tokens == 400
 
