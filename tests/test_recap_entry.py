@@ -112,6 +112,13 @@ class TestBuildRecap:
         with pytest.raises(ValueError, match="Unsupported agent filter"):
             build_recap("week", agent="antigravity")
 
+    def test_every_registered_provider_has_a_data_root(self):
+        """Registering a provider without a root here would report "no session
+        data ()" to a user whose transcripts are sitting right there."""
+        from ccstory.providers import list_providers
+
+        assert set(list_providers()) <= set(recap._DATA_ROOTS)
+
     def test_bad_window_raises_value_error(self, tmp_home):
         with pytest.raises(ValueError, match="unrecognized window"):
             build_recap("2026-13-99")

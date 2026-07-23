@@ -18,6 +18,7 @@ import os
 import re
 import sqlite3
 import statistics
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -470,23 +471,35 @@ def _backfill_summaries(
     return counts
 
 
-def _agent_data_roots(agent: str) -> list[tuple[str, Path]]:
-    """(agent, transcript root) pairs for the selected ``--agent`` filter.
+# Where each provider's transcripts live, for the "have you used it yet?" check
+# only — collection itself goes through the provider. Callables, not values, so
+# the path is resolved per call and a patched ``$HOME`` (tests) or a moved home
+# directory is honoured. `claude` reads this module's alias because that is the
+# name conftest and the library's callers patch.
+_DATA_ROOTS: dict[str, Callable[[], Path]] = {
+    "claude": lambda: CLAUDE_PROJECTS,
+    "codex": lambda: Path.home() / ".codex" / "sessions",
+}
 
-    Roots are resolved at call time, never captured at import, so a patched
-    ``$HOME`` (tests) or a moved home directory is honoured.
-    """
+
+def _agent_data_roots(agent: str) -> list[tuple[str, Path]]:
+    """(agent, transcript root) pairs for the selected ``--agent`` filter."""
     if agent not in ("all", *list_providers()):
         raise ValueError(
             f"Unsupported agent filter '{agent}'. "
             f"Expected 'all' or one of {list_providers()}"
         )
-    roots: list[tuple[str, Path]] = []
-    if agent in ("all", "claude"):
-        roots.append(("claude", CLAUDE_PROJECTS))
-    if agent in ("all", "codex"):
-        roots.append(("codex", Path.home() / ".codex" / "sessions"))
-    return roots
+    wanted = list_providers() if agent == "all" else [agent]
+    missing = [name for name in wanted if name not in _DATA_ROOTS]
+    if missing:
+        # A provider was registered without telling this check where to look.
+        # Fail loudly here rather than reporting "no session data ()" to a user
+        # whose data is sitting right there.
+        raise ValueError(
+            f"Provider(s) {missing} have no entry in recap._DATA_ROOTS; "
+            "add one when registering a provider."
+        )
+    return [(name, _DATA_ROOTS[name]()) for name in wanted]
 
 
 def build_recap(
