@@ -401,8 +401,9 @@ so any name Claude can parse (`"Traditional Chinese"`, `"日本語"`,
 
 Default API list prices snapshot to `2026-07`. Every human-readable report
 shows the snapshot date and warns once it is over 90 days old relative to the
-report window end. This is a date-only reminder, not a live pricing lookup.
-Override per-model in `~/.ccstory/config.toml`:
+report window end. ccstory makes no pricing network requests at runtime; model rates ship with each release and come from the LiteLLM registry.
+
+Override per-model rates in `~/.ccstory/config.toml`:
 
 ```toml
 [prices]
@@ -448,6 +449,7 @@ What-shipped metadata providers. There is no ccstory telemetry or account.
 - **Narratives and classification**: subprocess-call your locally installed
   `claude -p`. The Claude CLI contacts Anthropic using your signed-in session
   and plan quota; ccstory does not use your API key or operate a proxy.
+- **Pricing**: ccstory makes no pricing network requests. Model prices ship with each release and come from the LiteLLM registry.
 - **What shipped**: local git supplies commit counts. By default, `gh` may send
   a repo slug and request recent PR/release timestamps plus the current star
   count from GitHub; ccstory filters timestamps to the report window locally.

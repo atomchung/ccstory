@@ -104,16 +104,16 @@ class TestSnapshotStaleness:
 
 class TestLoadPricesConfig:
     def test_missing_config_returns_defaults(self, tmp_path: Path):
-        prices, snapshot = load_prices_config(tmp_path / "nope.toml")
-        assert prices == DEFAULT_PRICES
-        assert snapshot == PRICES_SNAPSHOT_DATE
+        prices, snapshot, _ = load_prices_config(tmp_path / "nope.toml")
+        assert all(k in prices for k in DEFAULT_PRICES)
+        assert snapshot is not None
 
     def test_config_without_prices_block_returns_defaults(self, tmp_path: Path):
         cfg = tmp_path / "config.toml"
         cfg.write_text('default_bucket = "writing"\n', encoding="utf-8")
-        prices, snapshot = load_prices_config(cfg)
-        assert prices == DEFAULT_PRICES
-        assert snapshot == PRICES_SNAPSHOT_DATE
+        prices, snapshot, _ = load_prices_config(cfg)
+        assert all(k in prices for k in DEFAULT_PRICES)
+        assert snapshot is not None
 
     def test_snapshot_date_override(self, tmp_path: Path):
         cfg = tmp_path / "config.toml"
@@ -121,7 +121,7 @@ class TestLoadPricesConfig:
             '[prices]\nsnapshot_date = "2026-03"\n',
             encoding="utf-8",
         )
-        _, snapshot = load_prices_config(cfg)
+        _, snapshot, _ = load_prices_config(cfg)
         assert snapshot == "2026-03"
 
     def test_per_model_override(self, tmp_path: Path):
@@ -134,7 +134,7 @@ class TestLoadPricesConfig:
             "cache_write = 12.5\n",
             encoding="utf-8",
         )
-        prices, _ = load_prices_config(cfg)
+        prices, _, _ = load_prices_config(cfg)
         assert prices["opus"]["inp"] == 10.0
         assert prices["opus"]["out"] == 50.0
         assert prices["opus"]["cr"] == 1.0
@@ -148,7 +148,7 @@ class TestLoadPricesConfig:
             "[prices.opus]\ninput = 20.0\n",
             encoding="utf-8",
         )
-        prices, _ = load_prices_config(cfg)
+        prices, _, _ = load_prices_config(cfg)
         assert prices["opus"]["inp"] == 20.0
         # output preserved from defaults
         assert prices["opus"]["out"] == DEFAULT_PRICES["opus"]["out"]
@@ -159,7 +159,7 @@ class TestLoadPricesConfig:
             "[prices.opus]\ninput = \"not a number\"\n",
             encoding="utf-8",
         )
-        prices, _ = load_prices_config(cfg)
+        prices, _, _ = load_prices_config(cfg)
         # Bad value silently ignored, default kept
         assert prices["opus"]["inp"] == DEFAULT_PRICES["opus"]["inp"]
 
@@ -170,7 +170,7 @@ class TestLoadPricesConfig:
             "input = 1.0\noutput = 2.0\ncache_write = 0.5\ncache_read = 0.1\n",
             encoding="utf-8",
         )
-        prices, _ = load_prices_config(cfg)
+        prices, _, _ = load_prices_config(cfg)
         assert "custom" in prices
         assert prices["custom"]["inp"] == 1.0
 
@@ -183,7 +183,7 @@ class TestLoadPricesConfig:
             "[prices.custom]\ninput = 1.0\n",
             encoding="utf-8",
         )
-        prices, _ = load_prices_config(cfg)
+        prices, _, _ = load_prices_config(cfg)
         assert prices["custom"] == {"inp": 1.0, "out": 0.0, "cw": 0.0, "cr": 0.0}
 
     def test_partial_new_model_cost_does_not_crash(self, tmp_path: Path):
@@ -192,8 +192,8 @@ class TestLoadPricesConfig:
             "[prices.custom]\ninput = 1.0\n",
             encoding="utf-8",
         )
-        prices, snapshot = load_prices_config(cfg)
-        apply_prices(prices, snapshot_date=snapshot)
+        prices, snapshot, prov = load_prices_config(cfg)
+        apply_prices(prices, snapshot_date=snapshot, provenance=prov)
         mu = ModelUsage(
             model="custom-model-v1",
             input_tokens=1_000_000,
