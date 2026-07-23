@@ -1435,7 +1435,13 @@ _DEFAULT_VOCAB_BLOCK = (
 )
 _DEFAULT_BUCKET_NAMES = frozenset({"coding", "investment", "writing", "other"})
 MAX_CONTENT_BUCKETS = 6
-CONTENT_CLASSIFIER_POLICY_VERSION = 2
+# Maximum number of new proposed content bucket names accepted per run.
+# Solves issue #120 leak 2: when a user already has >= 6 configured categories,
+# per-run headroom still allows inventing new names with sufficient evidence.
+# MAX_CONTENT_BUCKETS remains the floor shared by all users; headroom is growth
+# space added above it.
+NEW_BUCKET_HEADROOM = 2
+CONTENT_CLASSIFIER_POLICY_VERSION = 3
 
 
 def _normalize_bucket_name(raw: object) -> str | None:
@@ -1568,13 +1574,16 @@ def _validated_chunk_buckets(
     chunk_ids: list[str],
     accepted_buckets: set[str],
     bucket_limit: int,
+    proposed_bucket_counts: dict[str, int] | None = None,
 ) -> dict[str, str]:
     """Accept only requested rows and enforce the run-wide vocabulary cap."""
     requested = set(chunk_ids)
-    new_bucket_counts: dict[str, int] = {}
+    if proposed_bucket_counts is None:
+        proposed_bucket_counts = {}
+
     for sid, bucket in parsed.items():
         if sid in requested and bucket not in accepted_buckets:
-            new_bucket_counts[bucket] = new_bucket_counts.get(bucket, 0) + 1
+            proposed_bucket_counts[bucket] = proposed_bucket_counts.get(bucket, 0) + 1
 
     fresh: dict[str, str] = {}
     for sid in chunk_ids:
@@ -1582,7 +1591,12 @@ def _validated_chunk_buckets(
         if bucket is None:
             continue
         if bucket not in accepted_buckets:
-            if new_bucket_counts.get(bucket, 0) < 2:
+            # Issue #120 Leak 3: proposed_bucket_counts is accumulated across
+            # chunks by the caller (classify_sessions_by_content). A bucket
+            # proposed across multiple chunks eventually reaches threshold 2
+            # in later chunks. Note: we deliberately do not perform a second
+            # pass to retroactively rescue rows dropped in earlier chunks.
+            if proposed_bucket_counts.get(bucket, 0) < 2:
                 LOG.warning(
                     "dropping one-off content bucket %r for %s", bucket, sid,
                 )
@@ -1648,7 +1662,8 @@ def classify_sessions_by_content(
     # a partial-cache run keeps the same vocabulary as its earlier sessions.
     accepted_buckets = set(preferred_buckets) | set(cached.values())
     used_buckets = set(cached.values())
-    bucket_limit = max(MAX_CONTENT_BUCKETS, len(accepted_buckets))
+    bucket_limit = max(MAX_CONTENT_BUCKETS, len(accepted_buckets) + NEW_BUCKET_HEADROOM)
+    proposed_bucket_counts: dict[str, int] = {}
     # Local import, same reason as _build_category_vocabulary's: avoids a
     # module-load cycle and keeps CONFIG_PATH monkeypatching effective.
     from .categorizer import load_settings
@@ -1677,7 +1692,7 @@ def classify_sessions_by_content(
                 # Validate ids and vocabulary before anything reaches SQLite.
                 chunk_ids = [sid for sid, _, _ in chunk]
                 fresh = _validated_chunk_buckets(
-                    parsed, chunk_ids, accepted_buckets, bucket_limit,
+                    parsed, chunk_ids, accepted_buckets, bucket_limit, proposed_bucket_counts,
                 )
                 # Negative-cache validation drops (#120): these sids DID get
                 # an answer from the model, but the bucket was rejected
