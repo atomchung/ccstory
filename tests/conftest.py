@@ -80,7 +80,6 @@ def tmp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # recap.py / cli.py / init_categories.py import path constants by value,
     # so patching their source modules does not update these aliases.
     monkeypatch.setattr(recap, "CLAUDE_PROJECTS", projects)
-    monkeypatch.setattr(recap, "SUMMARIZER_PROJECTS_DIR", projects)
     monkeypatch.setattr(recap, "CONFIG_PATH", ccstory_dir / "config.toml")
     monkeypatch.setattr(recap, "REPORTS_DIR", reports_dir)
     monkeypatch.setattr(cli, "CLAUDE_PROJECTS", projects)

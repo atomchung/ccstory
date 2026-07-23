@@ -122,6 +122,7 @@ def compare_to_previous(
     until: datetime,
     mode: str = "hybrid",
     fallback: str = "coding",
+    agent: str = "all",
 ) -> PeriodComparison | None:
     """Build a comparison record against the previous same-length window.
 
@@ -131,13 +132,14 @@ def compare_to_previous(
     ``fallback`` rather than firing fresh LLM calls — comparison mode must
     not surprise the user with token spend.
 
-    ``mode`` and ``fallback`` should mirror the caller's main-flow settings so
-    current and previous windows resolve to the same vocabulary.
+    ``mode``, ``fallback`` and ``agent`` should mirror the caller's main-flow
+    settings so current and previous windows resolve to the same vocabulary —
+    and, under an ``--agent`` filter, cover the same set of agents.
     """
     from .time_tracking import collect_sessions  # local to avoid cycle hassle
 
     prev_since, prev_until = previous_window(since, until)
-    prev_sessions = collect_sessions(prev_since, prev_until)
+    prev_sessions = collect_sessions(prev_since, prev_until, agent=agent)
     if not prev_sessions:
         return None
     _resolve_sessions_from_cache(prev_sessions, mode=mode, fallback=fallback)

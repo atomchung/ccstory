@@ -40,10 +40,10 @@ from .categorizer import (
     normalize_project_name,
     resolve_session_bucket,
 )
+from .providers import TranscriptResolver, agent_label, list_providers
 from .report import build_report_json, render_report
 from .session_summarizer import (
     CCSTORY_LANG_ENV,
-    PROJECTS_DIR as SUMMARIZER_PROJECTS_DIR,
     _classify_cache_get_many,
     _needs_llm,
     claude_bin_available,
@@ -441,22 +441,21 @@ def _backfill_summaries(
         transient=False,
     ) as progress:
         task = progress.add_task(progress_desc, total=len(todo))
+        # One resolver for the whole loop: each provider builds whatever index
+        # it needs once, not once per session.
+        resolver = TranscriptResolver()
         for sid in todo:
             sess = by_id[sid]
-            jsonl_path = SUMMARIZER_PROJECTS_DIR / sess.project / f"{sid}.jsonl"
-            if not jsonl_path.exists():
-                matches = list(SUMMARIZER_PROJECTS_DIR.rglob(f"{sid}.jsonl"))
-                if matches:
-                    jsonl_path = matches[0]
-                else:
-                    # Don't clobber a cached summary when the jsonl has since
-                    # gone missing; only record a skip for never-seen ids.
-                    if existing.get(sid) is None:
-                        upsert(sid, "(jsonl not found)", "skipped",
-                               project=sess.project)
-                    counts["skipped"] += 1
-                    progress.advance(task)
-                    continue
+            jsonl_path = resolver.path_for(sess)
+            if jsonl_path is None:
+                # Don't clobber a cached summary when the jsonl has since
+                # gone missing; only record a skip for never-seen ids.
+                if existing.get(sid) is None:
+                    upsert(sid, "(jsonl not found)", "skipped",
+                           project=sess.project)
+                counts["skipped"] += 1
+                progress.advance(task)
+                continue
             result = summarize_session(sid, jsonl_path, use_llm=use_llm,
                                        force=force)
             if result and result.source == "auto":
@@ -469,6 +468,25 @@ def _backfill_summaries(
                 counts["skipped"] += 1
             progress.advance(task)
     return counts
+
+
+def _agent_data_roots(agent: str) -> list[tuple[str, Path]]:
+    """(agent, transcript root) pairs for the selected ``--agent`` filter.
+
+    Roots are resolved at call time, never captured at import, so a patched
+    ``$HOME`` (tests) or a moved home directory is honoured.
+    """
+    if agent not in ("all", *list_providers()):
+        raise ValueError(
+            f"Unsupported agent filter '{agent}'. "
+            f"Expected 'all' or one of {list_providers()}"
+        )
+    roots: list[tuple[str, Path]] = []
+    if agent in ("all", "claude"):
+        roots.append(("claude", CLAUDE_PROJECTS))
+    if agent in ("all", "codex"):
+        roots.append(("codex", Path.home() / ".codex" / "sessions"))
+    return roots
 
 
 def build_recap(
@@ -486,6 +504,7 @@ def build_recap(
     refresh_all: bool = False,
     flavor: str = "plain",
     lang: str | None = None,
+    agent: str = "all",
     reports_dir: Path | None = None,
     write_report: bool = True,
     console: Console | None = None,
@@ -512,6 +531,8 @@ def build_recap(
       refresh_all       --refresh-all    wipe ALL classification caches
       flavor            --for            plain | obsidian markdown variant
       lang              --lang           narrative language override
+      agent             --agent          all | claude | codex — which coding
+                                         agent's sessions to include (#133)
       reports_dir       --reports-dir    None → ~/.ccstory/reports
       write_report      (CLI always writes)  False skips the report file
 
@@ -523,8 +544,8 @@ def build_recap(
     and updates ccstory's own caches (summaries, classifications, period
     aggregates) in ``~/.ccstory/cache.db`` — same as a CLI run.
 
-    Raises ``ValueError`` for an unrecognized window,
-    ``RecapUnavailable`` when there is no Claude Code data / no engaged
+    Raises ``ValueError`` for an unrecognized window or an unknown ``agent``,
+    ``RecapUnavailable`` when there is no session data / no engaged
     sessions in the window, and ``session_summarizer.CacheUnavailable``
     when ``~/.ccstory/cache.db`` cannot be opened (corrupt, locked, or
     written by a newer ccstory) — all normal exceptions a host process
@@ -535,11 +556,10 @@ def build_recap(
 
     apply_lang_override(lang)
 
-    if not CLAUDE_PROJECTS.exists():
-        raise RecapUnavailable(
-            f"No Claude Code data at {CLAUDE_PROJECTS}. "
-            "Have you used Claude Code yet?"
-        )
+    roots = _agent_data_roots(agent)
+    if not any(root.exists() for _, root in roots):
+        where = " or ".join(f"{agent_label(name)} at {root}" for name, root in roots)
+        raise RecapUnavailable(f"No session data ({where}). Have you used it yet?")
 
     # Load user price overrides (config [prices] table). No-op if absent.
     prices, snapshot = load_prices_config(CONFIG_PATH)
@@ -563,7 +583,7 @@ def build_recap(
     )
 
     with console.status("[dim]Parsing sessions and token usage…[/dim]"):
-        sessions = collect_sessions(since, until)
+        sessions = collect_sessions(since, until, agent=agent)
         if not sessions:
             raise RecapUnavailable("No engaged sessions in this window.")
         # since/until are tz-aware local; collect_usage normalizes to UTC.
@@ -685,6 +705,7 @@ def build_recap(
                 until=until,
                 mode=classify,
                 fallback=fallback_bucket,
+                agent=agent,
             )
         if comparison and compare_narrative and summaries:
             prev_summaries = get_many(comparison.previous_session_ids)
