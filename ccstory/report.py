@@ -39,8 +39,8 @@ VALID_FLAVORS = ("plain", "obsidian")
 # Claude Code session can occupy the same ten minutes — so per-agent hours are
 # not additive and printing them next to the card's single Total invites the
 # reader to add numbers that describe overlapping intervals. Measured on real
-# data: raw per-agent time summed to 172.6h over a week whose deduplicated
-# wall clock was 62.1h. The one duration ccstory reports stays
+# data: raw per-agent time summed to 163h over a week whose deduplicated wall
+# clock was 64.5h — 2.5× over. The one duration ccstory reports stays
 # `wall_clock_active_sec` over all sessions; agents get a relative share of raw
 # interaction time instead, which is meaningful precisely because it does not
 # claim to be a duration.
@@ -110,11 +110,11 @@ def render_agent_breakdown_markdown(sessions: list[SessionStat]) -> list[str]:
         )
     lines.append("")
     wall_h = wall_clock_active_sec(sessions) / 3600
-    factor = parallelism_factor(sessions)
+    raw_h = sum(s.active_sec for s in sessions) / 3600
     lines.append(
         f"**{wall_h:.1f}h** wall-clock across all agents · "
-        f"**{factor:.1f}× parallel** "
-        f"(raw per-agent time sums to {factor*wall_h:.1f}h)."
+        f"**{parallelism_factor(sessions):.1f}× parallel** "
+        f"(raw per-agent time sums to {raw_h:.1f}h)."
     )
     lines.append("")
     lines.append(
