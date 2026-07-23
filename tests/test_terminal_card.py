@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from rich.console import Console
 
 from ccstory.report import _narrative_headers, render_terminal_card
-from ccstory.time_tracking import CategoryRollup, ProjectRollup
+from ccstory.time_tracking import CategoryRollup, ProjectRollup, SessionStat
 from ccstory.token_usage import ModelUsage, UsageReport
 
 SINCE = datetime(2026, 7, 1, tzinfo=timezone.utc)
@@ -91,6 +91,34 @@ class TestBarColorsDoNotCollide:
             for m in re.finditer(r"\x1b\[([\d;]+)m投資", ansi)
         }
         assert len(color_digits) == 1, color_digits
+
+
+class TestAgentScopedTitle:
+    def test_codex_only_card_is_not_labeled_claude(self):
+        session = SessionStat(
+            project="demo",
+            category="coding",
+            session_id="codex-1",
+            start=SINCE,
+            end=UNTIL,
+            active_sec=60,
+            msg_count=2,
+            agent="codex",
+        )
+        console = Console(width=72, record=True)
+        console.print(
+            render_terminal_card(
+                since=SINCE,
+                until=UNTIL,
+                sessions=[session],
+                rollups=_rollups([("coding", 1.0)]),
+                usage=_usage(),
+                agent="codex",
+            )
+        )
+        text = console.export_text()
+        assert "OpenAI Codex Recap" in text
+        assert "Claude Code Recap" not in text
 
 
 class TestNarrativeHeaders:
@@ -196,4 +224,3 @@ class TestUnpricedModelCaveatTerminalCard:
         )
         text = console.export_text()
         assert "Cost excludes gpt-5.7-super (missing from price table)." in text
-

@@ -48,6 +48,43 @@ def _seed_session(jsonl_factory, project: str, sid: str, hours_ago: float) -> No
     jsonl_factory(project, sid, records)
 
 
+def _seed_codex_session(codex_factory, sid: str, hours_ago: float) -> None:
+    codex_factory(
+        sid,
+        [
+            {
+                "timestamp": _recent_ts(hours_ago),
+                "type": "session_meta",
+                "payload": {
+                    "session_id": sid,
+                    "id": sid,
+                    "cwd": "/Users/me/codex-proj",
+                },
+            },
+            {
+                "timestamp": _recent_ts(hours_ago - 0.05),
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "Fix Codex"},
+            },
+            {
+                "timestamp": _recent_ts(hours_ago - 0.1),
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "Working"},
+            },
+            {
+                "timestamp": _recent_ts(hours_ago - 0.15),
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "Add tests"},
+            },
+            {
+                "timestamp": _recent_ts(hours_ago - 0.2),
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "Done"},
+            },
+        ],
+    )
+
+
 @pytest.fixture(autouse=True)
 def _no_llm(monkeypatch):
     monkeypatch.setattr(ss, "claude_bin_available", lambda: False)
@@ -63,8 +100,10 @@ class TestGetRecap:
         assert {"name", "active_hours", "narrative"} <= out["categories"][0].keys()
         assert len(out["top_sessions"]) == 1
         top = out["top_sessions"][0]
-        assert {"id", "project", "active_hours", "summary"} <= top.keys()
+        assert {"id", "agent", "project", "active_hours", "summary"} <= top.keys()
         assert top["summary"]  # instant fallback summary, never empty here
+        assert out["agent"] == "all"
+        assert out["agents"][0]["agent"] == "claude"
         assert out["cost_usd"] >= 0
         # Compact, not the full --json envelope: no per-session id list
         # beyond top_sessions, no raw transcript text anywhere in the shape.
@@ -79,7 +118,11 @@ class TestGetRecap:
 
     def test_empty_window_normalizes_instead_of_raising(self, tmp_home):
         out = get_recap(window="week")
-        assert out == {"ok": False, "error": "No engaged sessions in this window."}
+        assert out == {
+            "ok": False,
+            "agent": "all",
+            "error": "No engaged sessions in this window.",
+        }
 
     def test_bad_window_normalizes_instead_of_raising(self, tmp_home):
         out = get_recap(window="not-a-real-window")
@@ -116,7 +159,11 @@ class TestGetRecap:
 
         monkeypatch.setattr(recap, "_classify_cache_get_many", _boom)
         out = get_recap(window="week")
-        assert out == {"ok": False, "error": "cache.db is corrupted"}
+        assert out == {
+            "ok": False,
+            "agent": "all",
+            "error": "cache.db is corrupted",
+        }
 
     def test_cache_unavailable_is_normalized(
         self, tmp_home, jsonl_factory, monkeypatch,
@@ -134,6 +181,7 @@ class TestGetRecap:
         out = get_recap(window="week")
         assert out == {
             "ok": False,
+            "agent": "all",
             "error": "ccstory: error: cache at /x is corrupted",
         }
 
@@ -179,6 +227,26 @@ class TestGetRecap:
         assert out["top_focus"] == "fake overall narrative"
         assert out["categories"][0]["narrative"] == "fake category narrative"
 
+    def test_agent_filters_and_breakdown_cover_all_providers(
+        self, tmp_home, jsonl_factory, codex_factory,
+    ):
+        _seed_session(jsonl_factory, "-Users-me-proj", "claude-1", hours_ago=2)
+        _seed_codex_session(codex_factory, "codex-1", hours_ago=3)
+
+        combined = get_recap(window="week", agent="all")
+        assert combined["agent"] == "all"
+        assert {a["agent"] for a in combined["agents"]} == {"claude", "codex"}
+        assert {s["agent"] for s in combined["top_sessions"]} == {
+            "claude", "codex",
+        }
+
+        claude = get_recap(window="week", agent="claude")
+        codex = get_recap(window="week", agent="codex")
+        assert claude["agent"] == "claude"
+        assert {s["agent"] for s in claude["top_sessions"]} == {"claude"}
+        assert codex["agent"] == "codex"
+        assert {s["agent"] for s in codex["top_sessions"]} == {"codex"}
+
 
 class TestCompareToPrevious:
     def test_happy_path_shape(self, tmp_home, jsonl_factory):
@@ -204,13 +272,18 @@ class TestCompareToPrevious:
 
     def test_no_current_sessions_normalizes(self, tmp_home):
         out = compare_to_previous(window="week")
-        assert out == {"ok": False, "error": "No engaged sessions in this window."}
+        assert out == {
+            "ok": False,
+            "agent": "all",
+            "error": "No engaged sessions in this window.",
+        }
 
     def test_no_previous_sessions_normalizes(self, tmp_home, jsonl_factory):
         _seed_session(jsonl_factory, "-Users-me-proj", "sess-cur", hours_ago=2)
         out = compare_to_previous(window="week")
         assert out == {
             "ok": False,
+            "agent": "all",
             "error": "No sessions in the previous window to compare.",
         }
 
@@ -247,6 +320,21 @@ class TestCompareToPrevious:
         # is ~$0.004; the extreme override must move the number well past
         # that without needing an exact-value assertion.
         assert out["current_cost_usd"] > 0.1
+
+    def test_agent_filter_reaches_both_windows(
+        self, tmp_home, jsonl_factory, codex_factory,
+    ):
+        _seed_session(jsonl_factory, "-Users-me-proj", "claude-cur", hours_ago=2)
+        _seed_session(
+            jsonl_factory, "-Users-me-proj", "claude-prev", hours_ago=9 * 24,
+        )
+        _seed_codex_session(codex_factory, "codex-cur", hours_ago=3)
+        _seed_codex_session(codex_factory, "codex-prev", hours_ago=9 * 24)
+
+        claude = compare_to_previous(window="week", agent="claude")
+        codex = compare_to_previous(window="week", agent="codex")
+        assert claude["ok"] is True and claude["agent"] == "claude"
+        assert codex["ok"] is True and codex["agent"] == "codex"
 
 
 class TestGetTrend:
@@ -310,6 +398,16 @@ class TestGetTrend:
         out = get_trend(period="week", count=1)
         assert out["ok"] is True
         assert out["points"][-1]["cost_usd"] > 0.1
+
+    def test_agent_filter_is_forwarded(self, tmp_home, jsonl_factory, codex_factory):
+        _seed_session(jsonl_factory, "-Users-me-proj", "claude-now", hours_ago=2)
+        _seed_codex_session(codex_factory, "codex-now", hours_ago=3)
+        codex = get_trend(period="week", count=1, agent="codex")
+        claude = get_trend(period="week", count=1, agent="claude")
+        assert codex["ok"] is True and codex["agent"] == "codex"
+        assert claude["ok"] is True and claude["agent"] == "claude"
+        assert codex["points"][-1]["active_hours"] > 0
+        assert claude["points"][-1]["active_hours"] > 0
 
 
 class TestListCategories:

@@ -34,7 +34,7 @@ from rich.console import Console
 from rich.table import Table
 
 from . import __version__
-from .providers import list_providers
+from .providers import agent_label, list_providers
 from .categorizer import (
     add_category_keywords,
     colors_for,
@@ -49,6 +49,7 @@ from .recap import (
     CONFIG_PATH,
     REPORTS_DIR,
     RecapUnavailable,
+    _agent_data_roots,
     apply_lang_override,
     build_recap,
 )
@@ -311,8 +312,6 @@ def _run_category(argv: list[str], console: Console) -> int:
 
 
 def _run_trend(argv: list[str]) -> int:
-    if not CLAUDE_PROJECTS.exists():
-        sys.exit(f"No Claude Code data at {CLAUDE_PROJECTS}.")
     p = argparse.ArgumentParser(
         prog="ccstory trend",
         description="Show per-bucket sparklines over N periods.",
@@ -343,6 +342,13 @@ def _run_trend(argv: list[str]) -> int:
                         "settings.json, and system locale.")
     args = p.parse_args(argv)
 
+    roots = _agent_data_roots(args.agent)
+    if not any(root.exists() for _, root in roots):
+        where = " or ".join(
+            f"{agent_label(name)} at {root}" for name, root in roots
+        )
+        sys.exit(f"No session data ({where}). Have you used it yet?")
+
     # Load prices after parsing so any pricing-related flag is readable here.
     prices, snapshot, provenance = load_prices_config(CONFIG_PATH)
     apply_prices(prices, snapshot, provenance)
@@ -369,12 +375,13 @@ def _run_trend(argv: list[str]) -> int:
         sys.exit("No engaged sessions across the trend window.")
 
     args.reports_dir.mkdir(parents=True, exist_ok=True)
-    out_path = args.reports_dir / f"trend-{period}-{count}.md"
-    md = render_trend_markdown(points, period)
+    agent_suffix = "" if args.agent == "all" else f"-{args.agent}"
+    out_path = args.reports_dir / f"trend-{period}-{count}{agent_suffix}.md"
+    md = render_trend_markdown(points, period, agent=args.agent)
     out_path.write_text(md, encoding="utf-8")
 
     if output_format == "json":
-        payload = build_trend_json(points, period)
+        payload = build_trend_json(points, period, agent=args.agent)
         sys.stdout.write(_json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
         console.print(f"[dim]Full report → {out_path}[/dim]")
         console.print(f"[dim]Prices as of {get_snapshot_date()}[/dim]")
@@ -385,7 +392,7 @@ def _run_trend(argv: list[str]) -> int:
         console.print(f"[dim]Full report → {out_path}[/dim]")
         console.print(f"[dim]Prices as of {get_snapshot_date()}[/dim]")
     else:
-        console.print(render_trend_card(points, period))
+        console.print(render_trend_card(points, period, agent=args.agent))
         console.print(f"[dim]Full report → {out_path}[/dim]")
         console.print(f"[dim]Prices as of {get_snapshot_date()}[/dim]")
     return 0
@@ -683,6 +690,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
             report_path=str(out_path),
             comparison=result.comparison,
             artifacts=result.artifacts,
+            agent=result.agent,
             console=console,
         )
         console.print(f"[dim]Prices as of {get_snapshot_date()}[/dim]")

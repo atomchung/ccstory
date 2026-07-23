@@ -276,35 +276,42 @@ class CodexProvider(BaseAgentProvider):
     ) -> int:
         """Scan all Codex jsonl files and aggregate token usage in [since, until].
 
-        Codex total_token_usage in a rollout file is cumulative across the entire
-        thread root. Multiple rollout files (such as subagent spawns, resumes, or forks)
-        belong to the same thread root and each carries total cumulative token usage from
-        the thread's beginning. Summing token usage across all rollout files causes
-        massive inflation (e.g. 7.3x overcounting).
+        Each rollout id is a cumulative counter branch. Spawned subagents have
+        their own branches and therefore their own real token cost, but a child
+        can begin at a cumulative baseline copied from an ancestor. Interleaving
+        all branches by their shared root ``session_id`` loses divergent child
+        deltas; summing each branch's full final total counts that inherited
+        baseline repeatedly.
 
-        Filtering out subagent rollouts (via is_subagent_meta, which checks for
-        parent_thread_id) provides exact 1-to-1 deduplication for threads. This filter is
-        a deduplication step rather than an exclusion of costs, as subagent usage is
-        already accumulated inside the parent thread's rollout.
+        This collector reconstructs each branch independently, removes the
+        longest leading snapshot sequence copied from an ancestor, then
+        attributes positive adjacent deltas in the requested window. Subagent
+        rollouts remain excluded from SessionStat/time collection, but their
+        branch-local token usage is included exactly once here.
         """
         from ..token_usage import ModelUsage
 
         assistant_turns = 0
-        since_ts = since.timestamp()
+        fields = (
+            "input_tokens",
+            "cached_input_tokens",
+            "cache_write_input_tokens",
+            "output_tokens",
+        )
+        branch_parents: dict[str, str | None] = {}
+        snapshots_by_branch: dict[
+            str, list[tuple[datetime, dict, str]]
+        ] = {}
 
         for pattern in self._transcript_globs():
             for path_str in glob.glob(pattern, recursive=True):
                 jsonl_path = Path(path_str)
-                try:
-                    if jsonl_path.stat().st_mtime < since_ts:
-                        continue
-                except OSError:
-                    continue
 
-                is_subagent = False
                 current_model = "unknown"
-                last_token_count_record: tuple[datetime, dict, str] | None = None
-                tc_count = 0
+                branch_id = str(jsonl_path)
+                parent_id: str | None = None
+                identity_seen = False
+                snapshots: list[tuple[datetime, dict, str]] = []
 
                 try:
                     with jsonl_path.open("r", encoding="utf-8", errors="ignore") as f:
@@ -325,9 +332,21 @@ class CodexProvider(BaseAgentProvider):
                             )
 
                             if kind == "session_meta":
-                                if is_subagent_meta(payload):
-                                    is_subagent = True
-                                    break
+                                # Forked rollouts can carry copied ancestor
+                                # session_meta records after their own. The
+                                # first one is the identity of this file.
+                                if not identity_seen:
+                                    rollout_id = payload.get("id")
+                                    if isinstance(rollout_id, str) and rollout_id:
+                                        branch_id = rollout_id
+                                    else:
+                                        root_id = payload.get("session_id")
+                                        if isinstance(root_id, str) and root_id:
+                                            branch_id = root_id
+                                    parent = payload.get("parent_thread_id")
+                                    if isinstance(parent, str) and parent:
+                                        parent_id = parent
+                                    identity_seen = True
                             elif kind == "turn_context":
                                 m = payload.get("model")
                                 if isinstance(m, str) and m:
@@ -350,36 +369,130 @@ class CodexProvider(BaseAgentProvider):
                                 if ts_raw and isinstance(ttu, dict):
                                     ts = _parse_ts(ts_raw)
                                     if ts:
-                                        last_token_count_record = (
-                                            ts,
-                                            ttu,
-                                            current_model,
-                                        )
-                                        tc_count += 1
+                                        snapshots.append((ts, ttu, current_model))
                 except OSError:
                     continue
 
-                if is_subagent or last_token_count_record is None:
+                if not snapshots:
+                    continue
+                snapshots_by_branch.setdefault(branch_id, []).extend(snapshots)
+                if branch_id not in branch_parents or parent_id is not None:
+                    branch_parents[branch_id] = parent_id
+
+        ordered_by_branch: dict[
+            str, list[tuple[datetime, dict, str]]
+        ] = {}
+        for branch_id, snapshots in snapshots_by_branch.items():
+            # Resumed rollouts can copy the last snapshot from their parent.
+            # Deduplicate the exact cumulative point, preferring a known model
+            # when one copy appeared before its turn_context was restored.
+            unique: dict[tuple, tuple[datetime, dict, str]] = {}
+            for ts, totals, model in snapshots:
+                key = (
+                    ts,
+                    tuple(int(totals.get(field, 0) or 0) for field in fields),
+                )
+                existing = unique.get(key)
+                if existing is None or (
+                    existing[2] == "unknown" and model != "unknown"
+                ):
+                    unique[key] = (ts, totals, model)
+            ordered = sorted(
+                unique.values(),
+                key=lambda item: (
+                    item[0],
+                    tuple(int(item[1].get(field, 0) or 0) for field in fields),
+                ),
+            )
+            ordered_by_branch[branch_id] = ordered
+
+        def _totals_key(snapshot: tuple[datetime, dict, str]) -> tuple[int, ...]:
+            return tuple(
+                max(0, int(snapshot[1].get(field, 0) or 0))
+                for field in fields
+            )
+
+        def _inherited_prefix_len(
+            branch_id: str,
+            snapshots: list[tuple[datetime, dict, str]],
+        ) -> int:
+            """Longest leading child sequence copied from an ancestor.
+
+            Parent logs can retain repeated no-change snapshots that a copied
+            child prefix omits, so equality must be order-preserving rather
+            than strictly contiguous. The first child value not found later in
+            the ancestor marks the start of branch-local usage.
+            """
+            if not snapshots:
+                return 0
+            child_values = [_totals_key(snapshot) for snapshot in snapshots]
+            best = 0
+            ancestor_id = branch_parents.get(branch_id)
+            visited = {branch_id}
+            while ancestor_id and ancestor_id not in visited:
+                visited.add(ancestor_id)
+                ancestor = ordered_by_branch.get(ancestor_id, [])
+                ancestor_values = [
+                    _totals_key(snapshot) for snapshot in ancestor
+                ]
+                cursor = 0
+                matched = 0
+                for child_value in child_values:
+                    found = next(
+                        (
+                            index
+                            for index in range(cursor, len(ancestor_values))
+                            if ancestor_values[index] == child_value
+                        ),
+                        None,
+                    )
+                    if found is None:
+                        break
+                    matched += 1
+                    cursor = found + 1
+                best = max(best, matched)
+                ancestor_id = branch_parents.get(ancestor_id)
+            return best
+
+        for branch_id, ordered in ordered_by_branch.items():
+            inherited = _inherited_prefix_len(branch_id, ordered)
+            previous = {field: 0 for field in fields}
+            for index, (ts, totals, model) in enumerate(ordered):
+                current = {
+                    field: max(0, int(totals.get(field, 0) or 0))
+                    for field in fields
+                }
+                delta = {
+                    field: max(0, current[field] - previous[field])
+                    for field in fields
+                }
+                previous = current
+
+                if index < inherited:
                     continue
 
-                ts, ttu, model = last_token_count_record
-                if ts < since or ts > until:
+                # The snapshot timestamp owns the increment since the previous
+                # cumulative snapshot. Keeping the baseline even when it is
+                # before ``since`` is what excludes pre-window usage; continuing
+                # through snapshots after ``until`` does not erase increments
+                # that already landed inside the window.
+                if ts < since or ts > until or not any(delta.values()):
                     continue
 
-                inp = ttu.get("input_tokens", 0) or 0
-                cached_inp = ttu.get("cached_input_tokens", 0) or 0
-                cw = ttu.get("cache_write_input_tokens", 0) or 0
-                out = ttu.get("output_tokens", 0) or 0
+                inp = delta["input_tokens"]
+                cached_inp = delta["cached_input_tokens"]
+                cw = delta["cache_write_input_tokens"]
+                out = delta["output_tokens"]
 
                 uncached_inp = max(0, inp - cached_inp)
 
                 mu = by_model.setdefault(model, ModelUsage(model=model))
-                mu.turns += tc_count
+                mu.turns += 1
                 mu.input_tokens += uncached_inp
                 mu.cache_read += cached_inp
                 mu.cache_creation += cw
                 mu.output_tokens += out
-                assistant_turns += tc_count
+                assistant_turns += 1
 
         return assistant_turns
 

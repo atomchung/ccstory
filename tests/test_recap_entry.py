@@ -41,12 +41,47 @@ def _seed_session(jsonl_factory, project: str = "-Users-me-proj",
     return jsonl_factory(project, sid, records)
 
 
+def _seed_codex_session(codex_factory, sid: str = "codex-recap-1"):
+    records = [
+        {
+            "timestamp": _recent_ts(2.6),
+            "type": "session_meta",
+            "payload": {"session_id": sid, "id": sid, "cwd": "/Users/me/proj"},
+        },
+        {
+            "timestamp": _recent_ts(2.5),
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "Fix the Codex bug"},
+        },
+        {
+            "timestamp": _recent_ts(2.4),
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "Working on it"},
+        },
+        {
+            "timestamp": _recent_ts(2.3),
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "Add a test too"},
+        },
+        {
+            "timestamp": _recent_ts(2.2),
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "Done"},
+        },
+    ]
+    return codex_factory(sid, records)
+
+
 @pytest.fixture(autouse=True)
 def _no_llm(monkeypatch):
     monkeypatch.setattr(ss, "claude_bin_available", lambda: False)
 
 
 class TestBuildRecap:
+    def test_agent_field_does_not_shift_existing_positional_fields(self):
+        fields = list(recap.RecapResult.__dataclass_fields__)
+        assert fields[-3:] == ["report_path", "counts", "agent"]
+
     def test_end_to_end_result_shape(self, tmp_home, jsonl_factory):
         _seed_session(jsonl_factory)
         result = build_recap("week")
@@ -89,6 +124,28 @@ class TestBuildRecap:
         result = build_recap("week", reports_dir=custom)
         assert result.report_path is not None
         assert result.report_path.parent == custom
+
+    def test_filtered_report_paths_do_not_collide(
+        self, tmp_home, jsonl_factory, codex_factory,
+    ):
+        _seed_session(jsonl_factory)
+        _seed_codex_session(codex_factory)
+        all_result = build_recap("week", agent="all", artifacts=False)
+        claude_result = build_recap("week", agent="claude", artifacts=False)
+        codex_result = build_recap("week", agent="codex", artifacts=False)
+
+        assert all_result.report_path.name == f"recap-{all_result.label}.md"
+        assert claude_result.report_path.name == (
+            f"recap-{claude_result.label}-claude.md"
+        )
+        assert codex_result.report_path.name == (
+            f"recap-{codex_result.label}-codex.md"
+        )
+        assert len({all_result.report_path, claude_result.report_path,
+                    codex_result.report_path}) == 3
+        assert all_result.to_json()["agent"] == "all"
+        assert claude_result.to_json()["agent"] == "claude"
+        assert codex_result.to_json()["agent"] == "codex"
 
     def test_no_sessions_raises_recap_unavailable(self, tmp_home):
         with pytest.raises(RecapUnavailable, match="No engaged sessions"):

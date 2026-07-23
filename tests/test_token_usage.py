@@ -6,7 +6,8 @@ fmt_tokens output shape.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ccstory.token_usage import (
@@ -253,7 +254,7 @@ def make_codex_token_count(
 
 
 class TestCodexTokenUsage:
-    def test_cumulative_semantics_uses_last_token_count_record(self, codex_factory):
+    def test_cumulative_semantics_differences_adjacent_records(self, codex_factory):
         records = [
             {
                 "timestamp": "2026-07-22T12:00:00Z",
@@ -338,6 +339,183 @@ class TestCodexTokenUsage:
         mu = rep.by_model["gpt-5.6-luna"]
         assert mu.output_tokens == 236
 
+    def test_window_uses_pre_window_snapshot_as_baseline(self, codex_factory):
+        records = [
+            {
+                "timestamp": "2026-07-01T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"session_id": "spanning", "cwd": "/Users/test/app"},
+            },
+            {
+                "timestamp": "2026-07-01T00:01:00Z",
+                "type": "turn_context",
+                "payload": {"model": "gpt-5.6-sol"},
+            },
+            make_codex_token_count(
+                "2026-07-09T23:59:00Z", input_tokens=1000,
+                cached_input_tokens=200, cache_write_input_tokens=50,
+                output_tokens=100,
+            ),
+            make_codex_token_count(
+                "2026-07-10T00:01:00Z", input_tokens=1600,
+                cached_input_tokens=500, cache_write_input_tokens=90,
+                output_tokens=180,
+            ),
+        ]
+        codex_factory("spanning", records)
+        rep = collect_usage(
+            datetime(2026, 7, 10, tzinfo=timezone.utc),
+            datetime(2026, 7, 20, tzinfo=timezone.utc),
+            agent="codex",
+        )
+        mu = rep.by_model["gpt-5.6-sol"]
+        assert rep.assistant_turns == 1
+        assert mu.input_tokens == 300  # 600 input delta - 300 cached
+        assert mu.cache_read == 300
+        assert mu.cache_creation == 40
+        assert mu.output_tokens == 80
+
+    def test_post_window_continuation_does_not_erase_in_window_delta(
+        self, codex_factory,
+    ):
+        records = [
+            {
+                "timestamp": "2026-07-09T23:00:00Z",
+                "type": "session_meta",
+                "payload": {"session_id": "continued", "cwd": "/Users/test/app"},
+            },
+            {
+                "timestamp": "2026-07-09T23:01:00Z",
+                "type": "turn_context",
+                "payload": {"model": "gpt-5.6-sol"},
+            },
+            make_codex_token_count(
+                "2026-07-09T23:59:00Z", input_tokens=100,
+                cached_input_tokens=0, output_tokens=10,
+            ),
+            make_codex_token_count(
+                "2026-07-10T12:00:00Z", input_tokens=400,
+                cached_input_tokens=100, output_tokens=50,
+            ),
+            make_codex_token_count(
+                "2026-07-21T00:01:00Z", input_tokens=900,
+                cached_input_tokens=300, output_tokens=120,
+            ),
+        ]
+        codex_factory("continued", records)
+        rep = collect_usage(
+            datetime(2026, 7, 10, tzinfo=timezone.utc),
+            datetime(2026, 7, 20, tzinfo=timezone.utc),
+            agent="codex",
+        )
+        assert rep.assistant_turns == 1
+        assert rep.total_input == 200
+        assert rep.total_cache_read == 100
+        assert rep.total_output == 40
+
+    def test_delta_is_attributed_to_model_active_at_snapshot(self, codex_factory):
+        records = [
+            {
+                "timestamp": "2026-07-10T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"session_id": "models", "cwd": "/Users/test/app"},
+            },
+            {
+                "timestamp": "2026-07-10T00:01:00Z",
+                "type": "turn_context",
+                "payload": {"model": "gpt-5.6-terra"},
+            },
+            make_codex_token_count(
+                "2026-07-10T00:02:00Z", input_tokens=500,
+                cached_input_tokens=100, output_tokens=50,
+            ),
+            {
+                "timestamp": "2026-07-10T00:03:00Z",
+                "type": "turn_context",
+                "payload": {"model": "gpt-5.6-sol"},
+            },
+            make_codex_token_count(
+                "2026-07-10T00:04:00Z", input_tokens=900,
+                cached_input_tokens=250, output_tokens=120,
+            ),
+        ]
+        codex_factory("models", records)
+        rep = collect_usage(
+            datetime(2026, 7, 10, tzinfo=timezone.utc),
+            datetime(2026, 7, 11, tzinfo=timezone.utc),
+            agent="codex",
+        )
+        terra = rep.by_model["gpt-5.6-terra"]
+        sol = rep.by_model["gpt-5.6-sol"]
+        assert (terra.input_tokens, terra.cache_read, terra.output_tokens) == (
+            400, 100, 50,
+        )
+        assert (sol.input_tokens, sol.cache_read, sol.output_tokens) == (
+            250, 150, 70,
+        )
+        assert terra.turns == sol.turns == 1
+
+    def test_resume_uses_baseline_from_older_rollout_file(self, codex_factory):
+        root_id = "shared-thread-root"
+        old_path = codex_factory(
+            "old-rollout",
+            [
+                {
+                    "timestamp": "2026-07-01T00:00:00Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "session_id": root_id,
+                        "id": root_id,
+                        "cwd": "/Users/test/app",
+                    },
+                },
+                {
+                    "timestamp": "2026-07-01T00:01:00Z",
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-5.6-sol"},
+                },
+                make_codex_token_count(
+                    "2026-07-01T00:02:00Z", input_tokens=1000,
+                    cached_input_tokens=200, output_tokens=100,
+                ),
+            ],
+        )
+        # Reproduce a genuinely old root rollout: its mtime predates the
+        # report window even though a resumed file for the same thread is new.
+        old_mtime = datetime(2026, 7, 1, tzinfo=timezone.utc).timestamp()
+        os.utime(old_path, (old_mtime, old_mtime))
+        codex_factory(
+            "new-rollout",
+            [
+                {
+                    "timestamp": "2026-07-10T00:00:00Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "session_id": root_id,
+                        "id": root_id,
+                        "cwd": "/Users/test/app",
+                    },
+                },
+                {
+                    "timestamp": "2026-07-10T00:01:00Z",
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-5.6-sol"},
+                },
+                make_codex_token_count(
+                    "2026-07-10T00:02:00Z", input_tokens=1600,
+                    cached_input_tokens=500, output_tokens=180,
+                ),
+            ],
+        )
+        rep = collect_usage(
+            datetime(2026, 7, 10, tzinfo=timezone.utc),
+            datetime(2026, 7, 11, tzinfo=timezone.utc),
+            agent="codex",
+        )
+        assert rep.total_input == 300
+        assert rep.total_cache_read == 300
+        assert rep.total_output == 80
+
     def test_agent_filter_claude_vs_codex(self, jsonl_factory, codex_factory):
         claude_records = [
             make_user_msg("hello", _ts(2026, 7, 22, 10, 0, 0)),
@@ -406,45 +584,326 @@ class TestCodexTokenUsage:
         assert mu.output_tokens == 300
         assert mu.cost_usd == 0.0
 
-    def test_codex_subagent_rollout_excluded(self, codex_factory):
-        """Subagent rollouts (carrying parent_thread_id) are excluded from collect_usage.
-
-        Reason: Codex token counts are cumulative across the thread root, so subagent
-        rollouts carry cumulative totals that duplicate parent thread rollouts.
-        Excluding them prevents 7.3x token inflation via deduplication.
-        """
-        records = [
+    def test_subagent_inherited_baseline_is_subtracted_but_child_cost_is_included(
+        self, codex_factory,
+    ):
+        parent_id = "parent-branch"
+        root = [
             {
                 "timestamp": "2026-07-22T12:00:00Z",
                 "type": "session_meta",
                 "payload": {
-                    "session_id": "sub-1",
-                    "parent_thread_id": "parent-123",
-                    "source": {"subagent": "task-runner"},
+                    "session_id": parent_id,
+                    "id": parent_id,
                     "cwd": "/Users/test/app",
                 },
             },
             {
                 "timestamp": "2026-07-22T12:01:00Z",
                 "type": "turn_context",
-                "payload": {"model": "gpt-5.6-sol"},
+                "payload": {"model": "gpt-5.6-terra"},
             },
             make_codex_token_count(
                 "2026-07-22T12:02:00Z",
-                input_tokens=2000,
-                cached_input_tokens=500,
-                output_tokens=400,
+                input_tokens=100,
+                cached_input_tokens=20,
+                output_tokens=10,
+            ),
+            make_codex_token_count(
+                "2026-07-22T12:03:00Z",
+                input_tokens=300,
+                cached_input_tokens=60,
+                output_tokens=30,
             ),
         ]
-        codex_factory("sub-1", records)
+        child = [
+            {
+                "timestamp": "2026-07-22T12:04:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "session_id": parent_id,
+                    "id": "child-branch",
+                    "parent_thread_id": parent_id,
+                    "source": {"subagent": {"thread_spawn": {"depth": 1}}},
+                    "cwd": "/Users/test/app",
+                },
+            },
+            {
+                "timestamp": "2026-07-22T12:04:01Z",
+                "type": "turn_context",
+                "payload": {"model": "gpt-5.6-sol"},
+            },
+            # Copied ancestor baseline: not child usage.
+            make_codex_token_count(
+                "2026-07-22T12:04:02Z",
+                input_tokens=100,
+                cached_input_tokens=20,
+                output_tokens=10,
+            ),
+            # Branch-local delta: 400 input (100 cached), 60 output.
+            make_codex_token_count(
+                "2026-07-22T12:05:00Z",
+                input_tokens=500,
+                cached_input_tokens=120,
+                output_tokens=70,
+            ),
+        ]
+        codex_factory(parent_id, root)
+        codex_factory("child-branch", child)
         rep = collect_usage(
             datetime(2026, 7, 1, tzinfo=timezone.utc),
             datetime(2026, 7, 31, tzinfo=timezone.utc),
             agent="codex",
         )
-        assert "gpt-5.6-sol" not in rep.by_model
-        assert rep.total_input == 0
-        assert rep.total_output == 0
+        # Parent: 240 fresh + 60 cached + 30 output.
+        # Child: 300 fresh + 100 cached + 60 output. The copied 100/20/10
+        # baseline is present in both files but charged only on the parent.
+        assert rep.total_input == 540
+        assert rep.total_cache_read == 160
+        assert rep.total_output == 90
+        assert rep.assistant_turns == 3
+        assert rep.by_model["gpt-5.6-terra"].output_tokens == 30
+        assert rep.by_model["gpt-5.6-sol"].output_tokens == 60
+
+    def test_nested_subagent_copied_prefix_is_not_replayed(
+        self, codex_factory,
+    ):
+        root_id = "root-branch"
+        codex_factory(
+            root_id,
+            [
+                {
+                    "timestamp": "2026-07-22T12:00:00Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "session_id": root_id,
+                        "id": root_id,
+                        "cwd": "/Users/test/app",
+                    },
+                },
+                {
+                    "timestamp": "2026-07-22T12:00:01Z",
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-5.6-terra"},
+                },
+                make_codex_token_count(
+                    "2026-07-22T12:01:00Z", 100, 20, 10,
+                ),
+                make_codex_token_count(
+                    "2026-07-22T12:02:00Z", 300, 60, 30,
+                ),
+            ],
+        )
+        # Real depth-2 rollouts put their own session_meta first, then copy
+        # parent-shaped records into the child file. The whole matching prefix
+        # is inherited history; only growth after its terminal snapshot is
+        # branch-local usage.
+        codex_factory(
+            "nested-branch",
+            [
+                {
+                    "timestamp": "2026-07-22T12:03:00Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "session_id": root_id,
+                        "id": "nested-branch",
+                        "parent_thread_id": root_id,
+                        "source": {"subagent": {"thread_spawn": {"depth": 2}}},
+                    },
+                },
+                {
+                    "timestamp": "2026-07-22T12:03:00Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "session_id": root_id,
+                        "id": root_id,
+                    },
+                },
+                {
+                    "timestamp": "2026-07-22T12:03:00Z",
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-5.6-sol"},
+                },
+                make_codex_token_count(
+                    "2026-07-22T12:03:00Z", 100, 20, 10,
+                ),
+                make_codex_token_count(
+                    "2026-07-22T12:03:00Z", 300, 60, 30,
+                ),
+                make_codex_token_count(
+                    "2026-07-22T12:04:00Z", 500, 100, 70,
+                ),
+            ],
+        )
+        rep = collect_usage(
+            datetime(2026, 7, 1, tzinfo=timezone.utc),
+            datetime(2026, 7, 31, tzinfo=timezone.utc),
+            agent="codex",
+        )
+        # Root output 30 + nested branch-local output (70 - 30) = 70.
+        assert rep.total_output == 70
+        assert rep.total_input == 400  # root 240 fresh + nested 160 fresh
+        assert rep.total_cache_read == 100
+        assert rep.assistant_turns == 3
+
+    def test_real_shape_44_of_108_child_snapshots_are_copied_prefix(
+        self, codex_factory,
+    ):
+        """Regression for rollout 019f84f3…: its first 44 of 108 cumulative
+        snapshots match the parent, ending at output=12,232; child-local
+        output is therefore 31,380 - 12,232 = 19,148."""
+        root_id = "real-shape-root"
+        start = datetime(2026, 7, 22, 12, tzinfo=timezone.utc)
+        parent_snapshots = [
+            make_codex_token_count(
+                (start + timedelta(seconds=i)).isoformat().replace("+00:00", "Z"),
+                input_tokens=1000 * i,
+                cached_input_tokens=800 * i,
+                output_tokens=(12232 * i) // 44,
+            )
+            for i in range(1, 45)
+        ]
+        codex_factory(
+            root_id,
+            [
+                {
+                    "timestamp": start.isoformat().replace("+00:00", "Z"),
+                    "type": "session_meta",
+                    "payload": {"session_id": root_id, "id": root_id},
+                },
+                {
+                    "timestamp": (start + timedelta(milliseconds=1))
+                    .isoformat()
+                    .replace("+00:00", "Z"),
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-5.6-terra"},
+                },
+                *parent_snapshots,
+            ],
+        )
+
+        copied_prefix = [
+            make_codex_token_count(
+                (start + timedelta(minutes=2)).isoformat().replace("+00:00", "Z"),
+                input_tokens=1000 * i,
+                cached_input_tokens=800 * i,
+                output_tokens=(12232 * i) // 44,
+            )
+            for i in range(1, 45)
+        ]
+        child_growth = [
+            make_codex_token_count(
+                (start + timedelta(minutes=3, seconds=i))
+                .isoformat()
+                .replace("+00:00", "Z"),
+                input_tokens=44000 + 1000 * i,
+                cached_input_tokens=35200 + 800 * i,
+                output_tokens=12232 + ((31380 - 12232) * i) // 64,
+            )
+            for i in range(1, 65)
+        ]
+        codex_factory(
+            "real-shape-child",
+            [
+                {
+                    "timestamp": (start + timedelta(minutes=2))
+                    .isoformat()
+                    .replace("+00:00", "Z"),
+                    "type": "session_meta",
+                    "payload": {
+                        "session_id": root_id,
+                        "id": "real-shape-child",
+                        "parent_thread_id": root_id,
+                        "source": {"subagent": {"thread_spawn": {"depth": 1}}},
+                    },
+                },
+                {
+                    "timestamp": (start + timedelta(minutes=2, milliseconds=1))
+                    .isoformat()
+                    .replace("+00:00", "Z"),
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-5.6-sol"},
+                },
+                *copied_prefix,
+                *child_growth,
+            ],
+        )
+
+        rep = collect_usage(
+            datetime(2026, 7, 1, tzinfo=timezone.utc),
+            datetime(2026, 7, 31, tzinfo=timezone.utc),
+            agent="codex",
+        )
+        assert rep.by_model["gpt-5.6-terra"].output_tokens == 12232
+        assert rep.by_model["gpt-5.6-sol"].output_tokens == 19148
+        assert rep.total_output == 31380
+        assert rep.total_input == 21600
+        assert rep.total_cache_read == 86400
+        assert rep.assistant_turns == 108
+
+    def test_subagent_window_keeps_current_delta_and_ignores_post_window(
+        self, codex_factory,
+    ):
+        parent_id = "window-parent"
+        codex_factory(
+            parent_id,
+            [
+                {
+                    "timestamp": "2026-07-09T23:00:00Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "session_id": parent_id,
+                        "id": parent_id,
+                    },
+                },
+                {
+                    "timestamp": "2026-07-09T23:01:00Z",
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-5.6-sol"},
+                },
+                make_codex_token_count(
+                    "2026-07-09T23:02:00Z", 100, 20, 10,
+                ),
+            ],
+        )
+        codex_factory(
+            "window-child",
+            [
+                {
+                    "timestamp": "2026-07-09T23:30:00Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "session_id": parent_id,
+                        "id": "window-child",
+                        "parent_thread_id": parent_id,
+                        "source": {"subagent": {"thread_spawn": {"depth": 1}}},
+                    },
+                },
+                {
+                    "timestamp": "2026-07-09T23:31:00Z",
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-5.6-sol"},
+                },
+                make_codex_token_count(
+                    "2026-07-09T23:32:00Z", 100, 20, 10,
+                ),
+                make_codex_token_count(
+                    "2026-07-10T12:00:00Z", 400, 80, 50,
+                ),
+                make_codex_token_count(
+                    "2026-07-21T00:01:00Z", 900, 200, 120,
+                ),
+            ],
+        )
+        rep = collect_usage(
+            datetime(2026, 7, 10, tzinfo=timezone.utc),
+            datetime(2026, 7, 20, tzinfo=timezone.utc),
+            agent="codex",
+        )
+        assert rep.assistant_turns == 1
+        assert rep.total_input == 240
+        assert rep.total_cache_read == 60
+        assert rep.total_output == 40
 
 
 class TestUsageReportUnpricedModels:
@@ -469,5 +928,3 @@ class TestUsageReportUnpricedModels:
             model="unknown-model-zero", input_tokens=0, output_tokens=0
         )
         assert rep.unpriced_models == ["unknown-model-a", "unknown-model-b"]
-
-

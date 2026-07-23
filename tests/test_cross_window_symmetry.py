@@ -18,9 +18,13 @@ from pathlib import Path
 
 from ccstory import session_summarizer
 from ccstory.session_summarizer import _classify_cache_upsert_many
-from ccstory.time_tracking import SessionStat, rollup_by_category
-from ccstory.trends import _resolve_sessions_from_cache, compare_to_previous
-from ccstory.token_usage import UsageReport
+from ccstory.time_tracking import SessionStat, collect_sessions, rollup_by_category
+from ccstory.trends import (
+    _resolve_sessions_from_cache,
+    collect_trend,
+    compare_to_previous,
+)
+from ccstory.token_usage import UsageReport, collect_usage
 
 
 def _stat(
@@ -127,3 +131,83 @@ class TestRollupAfterResolver:
         # Post-PR-A: both = ["writing"].
         assert {r.category for r in cur_rollups} == {"writing"}
         assert {r.category for r in prev_rollups} == {"writing"}
+
+
+class TestCodexUsageWindowSymmetry:
+    def test_trend_and_comparison_keep_only_each_windows_cumulative_delta(
+        self, codex_factory,
+    ):
+        def token_count(ts: str, inp: int, out: int) -> dict:
+            return {
+                "timestamp": ts,
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": inp,
+                            "cached_input_tokens": 0,
+                            "cache_write_input_tokens": 0,
+                            "output_tokens": out,
+                        },
+                    },
+                },
+            }
+
+        codex_factory(
+            "cross-window-codex",
+            [
+                {
+                    "timestamp": "2026-07-08T10:00:00Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "session_id": "cross-window-codex",
+                        "id": "cross-window-codex",
+                        "cwd": "/Users/me/proj",
+                    },
+                },
+                {
+                    "timestamp": "2026-07-08T10:01:00Z",
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-5.6-sol"},
+                },
+                token_count("2026-07-08T11:00:00Z", 100, 10),
+                {
+                    "timestamp": "2026-07-10T10:00:00Z",
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "First"},
+                },
+                token_count("2026-07-10T11:00:00Z", 300, 30),
+                {
+                    "timestamp": "2026-07-17T10:00:00Z",
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "Continue"},
+                },
+                token_count("2026-07-17T11:00:00Z", 700, 70),
+                token_count("2026-07-23T11:00:00Z", 900, 90),
+            ],
+        )
+        now = datetime(2026, 7, 22, 12, tzinfo=timezone.utc)
+        points = collect_trend(
+            period="week", count=2, now=now, agent="codex",
+        )
+        assert [point.output_tokens for point in points] == [20, 40]
+
+        since = now - timedelta(days=7)
+        sessions = collect_sessions(since, now, agent="codex")
+        _resolve_sessions_from_cache(sessions, mode="folder", fallback="coding")
+        current_usage = collect_usage(since, now, agent="codex")
+        comparison = compare_to_previous(
+            current_sessions=sessions,
+            current_rollups=rollup_by_category(sessions),
+            current_usage=current_usage,
+            current_label="current",
+            since=since,
+            until=now,
+            mode="folder",
+            fallback="coding",
+            agent="codex",
+        )
+        assert comparison is not None
+        assert comparison.current_output_tokens == 40
+        assert comparison.previous_output_tokens == 20
