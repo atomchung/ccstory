@@ -405,7 +405,13 @@ class TestCodexTokenUsage:
         assert mu.output_tokens == 300
         assert mu.cost_usd == 0.0
 
-    def test_codex_subagent_usage_included(self, codex_factory):
+    def test_codex_subagent_rollout_excluded(self, codex_factory):
+        """Subagent rollouts (carrying parent_thread_id) are excluded from collect_usage.
+
+        Reason: Codex token counts are cumulative across the thread root, so subagent
+        rollouts carry cumulative totals that duplicate parent thread rollouts.
+        Excluding them prevents 7.3x token inflation via deduplication.
+        """
         records = [
             {
                 "timestamp": "2026-07-22T12:00:00Z",
@@ -435,9 +441,7 @@ class TestCodexTokenUsage:
             datetime(2026, 7, 31, tzinfo=timezone.utc),
             agent="codex",
         )
-        assert "gpt-5.6-sol" in rep.by_model
-        mu = rep.by_model["gpt-5.6-sol"]
-        assert mu.input_tokens == 1500
-        assert mu.cache_read == 500
-        assert mu.output_tokens == 400
+        assert "gpt-5.6-sol" not in rep.by_model
+        assert rep.total_input == 0
+        assert rep.total_output == 0
 

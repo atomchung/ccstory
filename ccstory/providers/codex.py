@@ -276,17 +276,16 @@ class CodexProvider(BaseAgentProvider):
     ) -> int:
         """Scan all Codex jsonl files and aggregate token usage in [since, until].
 
-        Codex total_token_usage is cumulative across turns in a rollout file.
-        Slicing per turn by summing last_token_usage causes overcounting
-        (17/122 tested files overestimated, e.g. 3.4M vs 3.26M cumulative).
-        Therefore, token usage is attributed per session based on the timestamp
-        of the final token_count record in the rollout.
+        Codex total_token_usage in a rollout file is cumulative across the entire
+        thread root. Multiple rollout files (such as subagent spawns, resumes, or forks)
+        belong to the same thread root and each carries total cumulative token usage from
+        the thread's beginning. Summing token usage across all rollout files causes
+        massive inflation (e.g. 7.3x overcounting).
 
-        Note: Session time tracking (parse_session) excludes subagent rollouts to
-        avoid double-counting active work hours. Token usage and cost aggregation
-        (collect_usage) deliberately includes subagents because Codex subagent
-        rollouts carry their own independent token_count records representing real
-        API cost expenditures.
+        Filtering out subagent rollouts (via is_subagent_meta, which checks for
+        parent_thread_id) provides exact 1-to-1 deduplication for threads. This filter is
+        a deduplication step rather than an exclusion of costs, as subagent usage is
+        already accumulated inside the parent thread's rollout.
         """
         from ..token_usage import ModelUsage
 
@@ -302,6 +301,7 @@ class CodexProvider(BaseAgentProvider):
                 except OSError:
                     continue
 
+                is_subagent = False
                 current_model = "unknown"
                 last_token_count_record: tuple[datetime, dict, str] | None = None
                 tc_count = 0
@@ -324,7 +324,11 @@ class CodexProvider(BaseAgentProvider):
                                 else {}
                             )
 
-                            if kind == "turn_context":
+                            if kind == "session_meta":
+                                if is_subagent_meta(payload):
+                                    is_subagent = True
+                                    break
+                            elif kind == "turn_context":
                                 m = payload.get("model")
                                 if isinstance(m, str) and m:
                                     current_model = m
@@ -355,7 +359,7 @@ class CodexProvider(BaseAgentProvider):
                 except OSError:
                     continue
 
-                if last_token_count_record is None:
+                if is_subagent or last_token_count_record is None:
                     continue
 
                 ts, ttu, model = last_token_count_record
