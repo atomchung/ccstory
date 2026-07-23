@@ -313,8 +313,6 @@ def _run_category(argv: list[str], console: Console) -> int:
 def _run_trend(argv: list[str]) -> int:
     if not CLAUDE_PROJECTS.exists():
         sys.exit(f"No Claude Code data at {CLAUDE_PROJECTS}.")
-    prices, snapshot = load_prices_config(CONFIG_PATH)
-    apply_prices(prices, snapshot)
     p = argparse.ArgumentParser(
         prog="ccstory trend",
         description="Show per-bucket sparklines over N periods.",
@@ -344,6 +342,10 @@ def _run_trend(argv: list[str]) -> int:
                         "$CCSTORY_LANG, config.toml, CLAUDE.md, "
                         "settings.json, and system locale.")
     args = p.parse_args(argv)
+
+    # Load prices after parsing so any pricing-related flag is readable here.
+    prices, snapshot, provenance = load_prices_config(CONFIG_PATH)
+    apply_prices(prices, snapshot, provenance)
 
     apply_lang_override(args.lang)
     output_format = resolve_output_format(args.output_format)

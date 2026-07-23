@@ -229,8 +229,8 @@ def compare_to_previous(
         # (cli.py) both take before computing cost — skipping it would leave
         # collect_usage() pricing off of whatever DEFAULT_PRICES/config
         # overrides some *other* call in this process happened to apply.
-        prices, snapshot = load_prices_config(recap.CONFIG_PATH)
-        apply_prices(prices, snapshot)
+        prices, snapshot, provenance = load_prices_config(recap.CONFIG_PATH)
+        apply_prices(prices, snapshot, provenance)
         usage = collect_usage(since, until)
         cmp = _compare_to_previous(
             current_sessions=sessions,
@@ -271,8 +271,8 @@ def get_trend(
         # (build_recap, _run_trend, compare_to_previous above) — without it
         # the per-point cost_usd would depend on whatever prices some other
         # call in this server process happened to leave applied (#115).
-        prices, snapshot = load_prices_config(recap.CONFIG_PATH)
-        apply_prices(prices, snapshot)
+        prices, snapshot, provenance = load_prices_config(recap.CONFIG_PATH)
+        apply_prices(prices, snapshot, provenance)
         fallback_bucket = load_settings().get("default_bucket", "coding")
         points = collect_trend(
             period=period, count=n, mode=classify, fallback=fallback_bucket,

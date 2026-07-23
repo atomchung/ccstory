@@ -575,8 +575,8 @@ def build_recap(
         raise RecapUnavailable(f"No session data ({where}). Have you used it yet?")
 
     # Load user price overrides (config [prices] table). No-op if absent.
-    prices, snapshot = load_prices_config(CONFIG_PATH)
-    apply_prices(prices, snapshot)
+    prices, snapshot, provenance = load_prices_config(CONFIG_PATH)
+    apply_prices(prices, snapshot, provenance)
 
     # Config validation (#69): a project listed under two areas is ambiguous.
     # The resolver keeps the first (exact-membership, config order); surface

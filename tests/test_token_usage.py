@@ -37,7 +37,7 @@ class TestPriceFor:
         assert p["inp"] == 1.00
 
     def test_unknown_model_returns_none(self):
-        assert _price_for("gpt-4") is None
+        assert _price_for("nonexistent-dummy-model-xyz") is None
         assert _price_for("") is None
 
 
@@ -78,7 +78,7 @@ class TestModelUsage:
         assert mu.cost_uncached_usd == 5.0
 
     def test_unknown_model_zero_cost(self):
-        mu = ModelUsage(model="gpt-4", input_tokens=1_000_000)
+        mu = ModelUsage(model="nonexistent-dummy-model-xyz", input_tokens=1_000_000)
         assert mu.cost_usd == 0.0
 
 

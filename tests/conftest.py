@@ -45,6 +45,13 @@ def tmp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     monkeypatch.setattr(time_tracking, "CLAUDE_PROJECTS", projects)
     monkeypatch.setattr(token_usage, "PROJECTS_DIR", projects)
+    import urllib.request
+    from urllib.error import URLError
+
+    def _no_network(*args, **kwargs):
+        raise URLError("Network calls disabled in test suite")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _no_network)
     monkeypatch.setattr(session_summarizer, "PROJECTS_DIR", projects)
     monkeypatch.setattr(session_summarizer, "DB_PATH", ccstory_dir / "cache.db")
     monkeypatch.setattr(
