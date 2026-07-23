@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-23
+
+### Added
+
+- OpenAI Codex is now a first-class data source alongside Claude Code.
+  `--agent all|claude|codex` works across recap, trend, terminal, Markdown,
+  JSON, and MCP surfaces, with per-agent session and time-share breakdowns.
+- Codex token usage now includes model-aware input, cache, and output totals
+  from rollout cumulative counters, including resumed, nested, and guardian
+  subagent branches without replaying copied ancestor history.
+- Model pricing is vendored into each release, including GPT-5 family entries,
+  and can be refreshed through the repository's validation workflow without
+  adding runtime network requests.
+
+### Changed
+
+- Collection is split behind provider interfaces so Claude Code and Codex use
+  one aggregation pipeline while retaining source-specific parsing.
+- Report titles, metadata, JSON payloads, terminal cards, and filenames retain
+  the selected agent scope; agent-specific reports no longer collide.
+- Content classification gives each run bounded proposal headroom and preserves
+  cross-chunk evidence before accepting a new bucket.
+
+### Fixed
+
+- Codex-only recap and trend commands no longer require a Claude data path.
+- Windowed Codex totals use cumulative deltas instead of replaying lifetime
+  counters, and child rollouts subtract the longest copied ancestor prefix.
+- MCP agent filters and per-agent breakdowns now match the CLI contract.
+- Explicit narrative language instructions are no longer weakened by the
+  language found in session content.
+- Reports distinguish unpriced models from stale Claude-only pricing caveats.
+
 ## [0.6.1] - 2026-07-19
 
 ### Fixed
@@ -313,7 +346,8 @@ Initial tagged release.
 - Category surfaced in the CLI, with louder warnings on silent
   classification failures.
 
-[Unreleased]: https://github.com/atomchung/ccstory/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/atomchung/ccstory/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/atomchung/ccstory/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/atomchung/ccstory/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/atomchung/ccstory/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/atomchung/ccstory/compare/v0.5.1...v0.5.2
