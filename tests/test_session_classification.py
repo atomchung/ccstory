@@ -480,6 +480,75 @@ class TestClassifySessionsByContent:
         assert len(result) == 80
         assert all(sid.startswith("s") and int(sid[1:]) >= 80 for sid in result)
 
+    def test_headroom_allows_new_bucket_when_user_has_six_categories(
+        self, tmp_home: Path,
+    ):
+        """#120 Leak 2 regression: when user already has >= 6 configured
+        categories, new_bucket_headroom must still allow new proposed buckets
+        with sufficient evidence (>= 2 sessions)."""
+        cfg = tmp_home / ".ccstory" / "config.toml"
+        cfg.write_text(
+            "[categories]\n"
+            '"cat1" = ["k1"]\n'
+            '"cat2" = ["k2"]\n'
+            '"cat3" = ["k3"]\n'
+            '"cat4" = ["k4"]\n'
+            '"cat5" = ["k5"]\n'
+            '"cat6" = ["k6"]\n',
+            encoding="utf-8",
+        )
+        mock_proc = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout=(
+                '{"session_id": "s1", "bucket": "newbucket"}\n'
+                '{"session_id": "s2", "bucket": "newbucket"}\n'
+            ),
+            stderr="",
+        )
+        items = [
+            ("s1", "proj1", "summary 1"),
+            ("s2", "proj2", "summary 2"),
+        ]
+        with patch("ccstory.session_summarizer.claude_bin_available",
+                   return_value=True), \
+             patch("ccstory.session_summarizer.subprocess.run",
+                   return_value=mock_proc):
+            result = classify_sessions_by_content(items)
+
+        assert result == {"s1": "newbucket", "s2": "newbucket"}
+
+    def test_cross_chunk_proposal_accumulation_accepts_shared_bucket(
+        self, tmp_home: Path,
+    ):
+        """#120 Leak 3 regression: proposal counts accumulate across chunks
+        so a bucket proposed once in chunk 1 and once in chunk 2 reaches
+        the threshold (>= 2) in chunk 2 and is accepted."""
+        items = [
+            ("s1", "proj1", "summary 1"),
+            ("s2", "proj2", "summary 2"),
+        ]
+        proc_chunk1 = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout='{"session_id": "s1", "bucket": "sharedbucket"}\n',
+            stderr="",
+        )
+        proc_chunk2 = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout='{"session_id": "s2", "bucket": "sharedbucket"}\n',
+            stderr="",
+        )
+        with patch("ccstory.session_summarizer.claude_bin_available",
+                   return_value=True), \
+             patch("ccstory.session_summarizer.subprocess.run",
+                   side_effect=[proc_chunk1, proc_chunk2]):
+            result = classify_sessions_by_content(items, batch_size=1)
+
+        # s1 in chunk 1 only saw count=1 -> dropped to fallback "coding"
+        # s2 in chunk 2 sees cumulative count=2 -> "sharedbucket" accepted!
+        assert result["s1"] == "coding"
+        assert result["s2"] == "sharedbucket"
+
+
 
 class TestCategoryContextInPrompt:
     """Issue #62: LLM classifier must see the user's [categories] vocabulary
