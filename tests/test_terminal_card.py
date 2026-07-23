@@ -157,3 +157,43 @@ class TestWhatYouDidCard:
         narrative = "Focused on ccstory this week, shipping the v0.6 release."
         out = self._card_text(narrative)
         assert narrative in out
+
+
+class TestUnpricedModelCaveatTerminalCard:
+    def test_no_caveat_when_all_models_priced(self):
+        usage = UsageReport(since=SINCE, until=UNTIL)
+        usage.by_model["claude-opus-4-7"] = ModelUsage(
+            model="claude-opus-4-7", turns=5, input_tokens=1000, output_tokens=500
+        )
+        console = Console(width=72, record=True)
+        console.print(
+            render_terminal_card(
+                since=SINCE,
+                until=UNTIL,
+                sessions=[],
+                rollups=_rollups([("coding", 60.0)]),
+                usage=usage,
+            )
+        )
+        text = console.export_text()
+        assert "Claude Code only" not in text
+        assert "Cost excludes" not in text
+
+    def test_caveat_present_when_unpriced_model_exists(self):
+        usage = UsageReport(since=SINCE, until=UNTIL)
+        usage.by_model["gpt-5.7-super"] = ModelUsage(
+            model="gpt-5.7-super", turns=5, input_tokens=1000, output_tokens=500
+        )
+        console = Console(width=72, record=True)
+        console.print(
+            render_terminal_card(
+                since=SINCE,
+                until=UNTIL,
+                sessions=[],
+                rollups=_rollups([("coding", 60.0)]),
+                usage=usage,
+            )
+        )
+        text = console.export_text()
+        assert "Cost excludes gpt-5.7-super (missing from price table)." in text
+

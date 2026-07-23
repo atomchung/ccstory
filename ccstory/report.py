@@ -507,17 +507,15 @@ def render_report(
         f"- **Without cache it would be**: ${usage.total_cost_uncached_usd:,.2f} "
         f"(cache saved ${usage.cache_savings_usd:,.2f})"
     )
-    lines.append("")
-    others = [a.label for a in agent_breakdown(sessions) if a.agent != "claude"]
-    if others:
-        # Time now spans every agent; token accounting still reads Claude Code
-        # transcripts only. Say so rather than letting the reader divide a
-        # multi-agent hour count into a single-agent cost.
+    if usage.unpriced_models:
+        # Some models consumed tokens but have no rate in the active price table.
+        # Disclose that total cost is underestimated rather than presenting a silently low bill.
+        unpriced_str = ", ".join(usage.unpriced_models)
         lines.append(
-            f"> ⚠️ Token and cost figures cover Claude Code only — "
-            f"{', '.join(others)} usage is in the time breakdown above but not "
-            "in these numbers."
+            f"> ⚠️ Cost figures exclude {unpriced_str} — "
+            "tokens are counted in usage totals, but rates are missing from the price table so total cost is underestimated."
         )
+
     lines.append(
         "> For exact cost / billing-window breakdowns, pair with "
         "[ccusage](https://github.com/ryoppippi/ccusage). ccstory tells the story; "
@@ -903,8 +901,11 @@ def render_terminal_card(
         note.append(f"{parallelism_factor(sessions):.1f}× parallel", style="bold")
         note.append("  shares are weights, not hours", style="dim")
         parts.append(note)
+
+    if usage.unpriced_models:
+        unpriced_str = ", ".join(usage.unpriced_models)
         parts.append(
-            Text("Tokens / cost above are Claude Code only.", style="dim yellow")
+            Text(f"Cost excludes {unpriced_str} (missing from price table).", style="dim yellow")
         )
 
     if overall_narrative:

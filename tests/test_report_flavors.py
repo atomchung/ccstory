@@ -386,3 +386,48 @@ class TestMarkdownTableEscaping:
         assert "client \\| finance" in row
         # Sanity: exactly the 5 documented columns survive (6 dividers)
         assert row.count("|") - row.count("\\|") == 6
+
+
+class TestUnpricedModelCaveatMarkdown:
+    def test_no_caveat_when_all_models_priced(self):
+        s = _stat("coding", "myapp", "s1")
+        usage = UsageReport(
+            since=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 31, tzinfo=timezone.utc),
+        )
+        usage.by_model["claude-opus-4-7"] = ModelUsage(
+            model="claude-opus-4-7", turns=5, input_tokens=1000, output_tokens=500
+        )
+        md = render_report(
+            label="2026-05",
+            since=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 31, tzinfo=timezone.utc),
+            sessions=[s],
+            rollups=[_rollup("coding", [s])],
+            usage=usage,
+            summaries={},
+        )
+        assert "Claude Code only" not in md
+        assert "Cost figures exclude" not in md
+
+    def test_caveat_present_when_unpriced_model_exists(self):
+        s = _stat("coding", "myapp", "s1")
+        usage = UsageReport(
+            since=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 31, tzinfo=timezone.utc),
+        )
+        usage.by_model["gpt-5.7-super"] = ModelUsage(
+            model="gpt-5.7-super", turns=2, input_tokens=500, output_tokens=100
+        )
+        md = render_report(
+            label="2026-05",
+            since=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 31, tzinfo=timezone.utc),
+            sessions=[s],
+            rollups=[_rollup("coding", [s])],
+            usage=usage,
+            summaries={},
+        )
+        assert "Cost figures exclude gpt-5.7-super" in md
+        assert "underestimated" in md
+

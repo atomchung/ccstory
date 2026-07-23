@@ -365,6 +365,20 @@ class UsageReport:
         denom = self.total_cache_read + self.total_cache_creation + self.total_input
         return (self.total_cache_read / denom) if denom else 0.0
 
+    @property
+    def unpriced_models(self) -> list[str]:
+        """Models that consumed tokens but have no row in the price table.
+
+        Their tokens are counted in the usage totals but contribute $0 to cost,
+        so the report must say so rather than present a silently low bill.
+        """
+        return sorted([
+            mu.model
+            for mu in self.by_model.values()
+            if mu.total_tokens > 0 and not _price_for(mu.model)
+        ])
+
+
 
 def collect_usage(
     since: datetime,
