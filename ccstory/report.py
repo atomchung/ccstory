@@ -507,6 +507,7 @@ def render_report(
         f"- **Without cache it would be**: ${usage.total_cost_uncached_usd:,.2f} "
         f"(cache saved ${usage.cache_savings_usd:,.2f})"
     )
+    lines.append("")
     if usage.unpriced_models:
         # Some models consumed tokens but have no rate in the active price table.
         # Disclose that total cost is underestimated rather than presenting a silently low bill.

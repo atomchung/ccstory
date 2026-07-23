@@ -379,7 +379,6 @@ class UsageReport:
         ])
 
 
-
 def collect_usage(
     since: datetime,
     until: datetime | None = None,

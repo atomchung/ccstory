@@ -431,3 +431,29 @@ class TestUnpricedModelCaveatMarkdown:
         assert "Cost figures exclude gpt-5.7-super" in md
         assert "underestimated" in md
 
+    def test_blank_line_after_cost_section(self):
+        s = _stat("coding", "myapp", "s1")
+        usage = UsageReport(
+            since=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 31, tzinfo=timezone.utc),
+        )
+        usage.by_model["claude-opus-4-7"] = ModelUsage(
+            model="claude-opus-4-7", turns=5, input_tokens=1000, output_tokens=500
+        )
+        md = render_report(
+            label="2026-05",
+            since=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 31, tzinfo=timezone.utc),
+            sessions=[s],
+            rollups=[_rollup("coding", [s])],
+            usage=usage,
+            summaries={},
+        )
+        lines = md.splitlines()
+        idx = next(
+            i for i, line in enumerate(lines)
+            if line.startswith("- **Without cache it would be**")
+        )
+        assert lines[idx + 1] == ""
+
+
