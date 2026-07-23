@@ -39,6 +39,18 @@ class BaseAgentProvider(ABC):
     def parse_session(self, path: Path) -> SessionStat | None:
         """Parse a single session transcript file into a SessionStat."""
 
+    @abstractmethod
+    def collect_usage(
+        self,
+        since: datetime,
+        until: datetime,
+        by_model: dict,
+    ) -> int:
+        """Collect token usage for sessions in [since, until] into by_model dictionary.
+
+        Returns the count of assistant turns processed.
+        """
+
     def transcript_path(self, sess: SessionStat) -> Path | None:
         """Locate the transcript backing ``sess``, or None if it is gone.
 

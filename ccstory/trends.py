@@ -144,7 +144,7 @@ def compare_to_previous(
         return None
     _resolve_sessions_from_cache(prev_sessions, mode=mode, fallback=fallback)
     prev_rollups = rollup_by_category(prev_sessions)
-    prev_usage = collect_usage(prev_since, prev_until)
+    prev_usage = collect_usage(prev_since, prev_until, agent=agent)
 
     cats = {r.category for r in current_rollups} | {r.category for r in prev_rollups}
     cur_by_cat = {r.category: r.active_min for r in current_rollups}
@@ -275,7 +275,7 @@ def collect_trend(
             if s.start >= start and s.start < end
         ]
         rollups = rollup_by_category(in_window)
-        usage = collect_usage(start, end)
+        usage = collect_usage(start, end, agent=agent)
         total_h = sum(r.active_min for r in rollups) / 60
         points.append(PeriodPoint(
             label=label,

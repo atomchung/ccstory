@@ -125,6 +125,67 @@ class ClaudeCodeProvider(BaseAgentProvider):
             path=jsonl_path,
         )
 
+    def collect_usage(
+        self,
+        since: datetime,
+        until: datetime,
+        by_model: dict,
+    ) -> int:
+        """Scan all Claude Code jsonl files and aggregate token usage in [since, until]."""
+        from ..token_usage import ModelUsage
+
+        assistant_turns = 0
+        seen_ids: set[str] = set()
+
+        for path_str in glob.glob(
+            str(self.projects_dir / "**" / "*.jsonl"), recursive=True
+        ):
+            fp = Path(path_str)
+            if _is_subagent_path(fp):
+                continue
+            try:
+                with fp.open() as f:
+                    for line in f:
+                        try:
+                            d = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        msg = d.get("message")
+                        ts = d.get("timestamp")
+                        if not (
+                            isinstance(msg, dict)
+                            and msg.get("role") == "assistant"
+                            and "usage" in msg
+                            and ts
+                        ):
+                            continue
+                        try:
+                            t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                        except ValueError:
+                            continue
+                        if t < since or t > until:
+                            continue
+
+                        mid = msg.get("id")
+                        if mid:
+                            if mid in seen_ids:
+                                continue
+                            seen_ids.add(mid)
+
+                        u = msg["usage"]
+                        model = msg.get("model") or "unknown"
+                        mu = by_model.setdefault(model, ModelUsage(model=model))
+                        mu.turns += 1
+                        mu.input_tokens   += u.get("input_tokens", 0) or 0
+                        mu.cache_creation += u.get("cache_creation_input_tokens", 0) or 0
+                        mu.cache_read     += u.get("cache_read_input_tokens", 0) or 0
+                        mu.output_tokens  += u.get("output_tokens", 0) or 0
+                        assistant_turns += 1
+            except OSError:
+                continue
+
+        return assistant_turns
+
     def collect_sessions(
         self,
         since: datetime,

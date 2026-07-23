@@ -268,6 +268,116 @@ class CodexProvider(BaseAgentProvider):
             path=jsonl_path,
         )
 
+    def collect_usage(
+        self,
+        since: datetime,
+        until: datetime,
+        by_model: dict,
+    ) -> int:
+        """Scan all Codex jsonl files and aggregate token usage in [since, until].
+
+        Codex total_token_usage is cumulative across turns in a rollout file.
+        Slicing per turn by summing last_token_usage causes overcounting
+        (17/122 tested files overestimated, e.g. 3.4M vs 3.26M cumulative).
+        Therefore, token usage is attributed per session based on the timestamp
+        of the final token_count record in the rollout.
+        """
+        from ..token_usage import ModelUsage
+
+        assistant_turns = 0
+        since_ts = since.timestamp()
+
+        for pattern in self._transcript_globs():
+            for path_str in glob.glob(pattern, recursive=True):
+                jsonl_path = Path(path_str)
+                try:
+                    if jsonl_path.stat().st_mtime < since_ts:
+                        continue
+                except OSError:
+                    continue
+
+                is_subagent = False
+                current_model = "unknown"
+                last_token_count_record: tuple[datetime, dict, str] | None = None
+                tc_count = 0
+
+                try:
+                    with jsonl_path.open("r", encoding="utf-8", errors="ignore") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                d = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+
+                            kind = d.get("type")
+                            payload = (
+                                d.get("payload")
+                                if isinstance(d.get("payload"), dict)
+                                else {}
+                            )
+
+                            if kind == "session_meta":
+                                if is_subagent_meta(payload):
+                                    is_subagent = True
+                                    break
+                            elif kind == "turn_context":
+                                m = payload.get("model")
+                                if isinstance(m, str) and m:
+                                    current_model = m
+                            elif (
+                                kind == "event_msg"
+                                and payload.get("type") == "token_count"
+                            ):
+                                ts_raw = d.get("timestamp")
+                                info = (
+                                    payload.get("info")
+                                    if isinstance(payload.get("info"), dict)
+                                    else {}
+                                )
+                                ttu = (
+                                    info.get("total_token_usage")
+                                    if isinstance(info, dict)
+                                    else None
+                                )
+                                if ts_raw and isinstance(ttu, dict):
+                                    ts = _parse_ts(ts_raw)
+                                    if ts:
+                                        last_token_count_record = (
+                                            ts,
+                                            ttu,
+                                            current_model,
+                                        )
+                                        tc_count += 1
+                except OSError:
+                    continue
+
+                if is_subagent or last_token_count_record is None:
+                    continue
+
+                ts, ttu, model = last_token_count_record
+                if ts < since or ts > until:
+                    continue
+
+                inp = ttu.get("input_tokens", 0) or 0
+                cached_inp = ttu.get("cached_input_tokens", 0) or 0
+                cw = ttu.get("cache_write_input_tokens", 0) or 0
+                out = ttu.get("output_tokens", 0) or 0
+
+                uncached_inp = max(0, inp - cached_inp)
+
+                mu = by_model.setdefault(model, ModelUsage(model=model))
+                mu.turns += tc_count
+                mu.input_tokens += uncached_inp
+                mu.cache_read += cached_inp
+                mu.cache_creation += cw
+                mu.output_tokens += out
+                assistant_turns += tc_count
+
+        return assistant_turns
+
     def collect_sessions(
         self,
         since: datetime,

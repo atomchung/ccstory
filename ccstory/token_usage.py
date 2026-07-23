@@ -366,13 +366,19 @@ class UsageReport:
         return (self.total_cache_read / denom) if denom else 0.0
 
 
-def collect_usage(since: datetime, until: datetime | None = None) -> UsageReport:
-    """Scan all jsonl files and aggregate token usage in [since, until].
+def collect_usage(
+    since: datetime,
+    until: datetime | None = None,
+    agent: str = "all",
+) -> UsageReport:
+    """Scan session files and aggregate token usage in [since, until].
 
     Both bounds are normalized to UTC for comparison against the tz-aware
     UTC timestamps in jsonl. Naive inputs are treated as UTC (not system
     local) so test behavior is deterministic across hosts.
     """
+    from .providers import _PROVIDERS, list_providers
+
     if since.tzinfo is None:
         since = since.replace(tzinfo=timezone.utc)
     else:
@@ -384,52 +390,21 @@ def collect_usage(since: datetime, until: datetime | None = None) -> UsageReport
     else:
         until = until.astimezone(timezone.utc)
 
+    if agent == "all":
+        providers_to_run = [cls() for cls in _PROVIDERS.values()]
+    elif agent in _PROVIDERS:
+        providers_to_run = [_PROVIDERS[agent]()]
+    else:
+        raise ValueError(
+            f"Unsupported agent filter '{agent}'. "
+            f"Expected 'all' or one of {list_providers()}"
+        )
+
     by_model: dict[str, ModelUsage] = {}
     assistant_turns = 0
-    seen_ids: set[str] = set()  # dedup: Claude Code writes streaming chunks 2-3×
 
-    for fp in PROJECTS_DIR.rglob("*.jsonl"):
-        try:
-            with fp.open() as f:
-                for line in f:
-                    try:
-                        d = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    msg = d.get("message")
-                    ts = d.get("timestamp")
-                    if not (
-                        isinstance(msg, dict)
-                        and msg.get("role") == "assistant"
-                        and "usage" in msg
-                        and ts
-                    ):
-                        continue
-                    try:
-                        t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                    except ValueError:
-                        continue
-                    if t < since or t > until:
-                        continue
-
-                    mid = msg.get("id")
-                    if mid:
-                        if mid in seen_ids:
-                            continue
-                        seen_ids.add(mid)
-
-                    u = msg["usage"]
-                    model = msg.get("model") or "unknown"
-                    mu = by_model.setdefault(model, ModelUsage(model=model))
-                    mu.turns += 1
-                    mu.input_tokens   += u.get("input_tokens", 0) or 0
-                    mu.cache_creation += u.get("cache_creation_input_tokens", 0) or 0
-                    mu.cache_read     += u.get("cache_read_input_tokens", 0) or 0
-                    mu.output_tokens  += u.get("output_tokens", 0) or 0
-                    assistant_turns += 1
-        except OSError as e:
-            LOG.debug("failed to read %s: %s", fp, e)
-            continue
+    for provider in providers_to_run:
+        assistant_turns += provider.collect_usage(since, until, by_model)
 
     return UsageReport(
         since=since, until=until, by_model=by_model, assistant_turns=assistant_turns

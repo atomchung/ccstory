@@ -168,10 +168,29 @@ def jsonl_factory(tmp_home: Path):
     return _make
 
 
+@pytest.fixture
+def codex_factory(tmp_home: Path):
+    """Write a Codex rollout transcript into the fake home. Returns its path."""
+
+    def _make(session_id: str, records: list[dict], archived: bool = False) -> Path:
+        root = tmp_home / ".codex" / (
+            "archived_sessions" if archived else "sessions"
+        ) / "2026" / "07" / "22"
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / f"rollout-2026-07-22T12-00-00-{session_id}.jsonl"
+        with path.open("w", encoding="utf-8") as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+        return path
+
+    return _make
+
+
 __all__ = [
     "tmp_home",
     "fixtures_dir",
     "jsonl_factory",
+    "codex_factory",
     "make_user_msg",
     "make_assistant_msg",
     "write_jsonl",

@@ -600,7 +600,7 @@ def build_recap(
         if not sessions:
             raise RecapUnavailable("No engaged sessions in this window.")
         # since/until are tz-aware local; collect_usage normalizes to UTC.
-        usage = collect_usage(since, until)
+        usage = collect_usage(since, until, agent=agent)
 
     console.print(
         f"[green]✓[/green] {len(sessions)} sessions · "
