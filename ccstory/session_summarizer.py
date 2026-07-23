@@ -1437,6 +1437,8 @@ MAX_CONTENT_BUCKETS = 6
 # Maximum number of new proposed content bucket names accepted per run.
 # Solves issue #120 leak 2: when a user already has >= 6 configured categories,
 # per-run headroom still allows inventing new names with sufficient evidence.
+# MAX_CONTENT_BUCKETS remains the floor shared by all users; headroom is growth
+# space added above it.
 NEW_BUCKET_HEADROOM = 2
 CONTENT_CLASSIFIER_POLICY_VERSION = 3
 
@@ -1659,7 +1661,7 @@ def classify_sessions_by_content(
     # a partial-cache run keeps the same vocabulary as its earlier sessions.
     accepted_buckets = set(preferred_buckets) | set(cached.values())
     used_buckets = set(cached.values())
-    bucket_limit = len(accepted_buckets) + NEW_BUCKET_HEADROOM
+    bucket_limit = max(MAX_CONTENT_BUCKETS, len(accepted_buckets) + NEW_BUCKET_HEADROOM)
     proposed_bucket_counts: dict[str, int] = {}
     # Local import, same reason as _build_category_vocabulary's: avoids a
     # module-load cycle and keeps CONFIG_PATH monkeypatching effective.

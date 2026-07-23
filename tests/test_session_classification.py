@@ -517,6 +517,49 @@ class TestClassifySessionsByContent:
 
         assert result == {"s1": "newbucket", "s2": "newbucket"}
 
+    def test_max_content_buckets_floor_preserved_for_small_config(
+        self, tmp_home: Path,
+    ):
+        """Regression test for floor restoration: user with a small config (e.g. 2
+        categories) should still be able to grow up to MAX_CONTENT_BUCKETS (6),
+        allowing 4 new proposed buckets with >= 2 evidence sessions each to all be accepted.
+        """
+        cfg = tmp_home / ".ccstory" / "config.toml"
+        cfg.write_text(
+            "[categories]\n"
+            '"cat1" = ["k1"]\n'
+            '"cat2" = ["k2"]\n',
+            encoding="utf-8",
+        )
+        stdout_lines = []
+        items = []
+        for b_idx in range(1, 5):
+            b_name = f"newbucket{b_idx}"
+            for s_idx in range(1, 3):
+                sid = f"s_{b_idx}_{s_idx}"
+                items.append((sid, f"proj_{b_idx}", f"summary {b_idx} {s_idx}"))
+                stdout_lines.append(f'{{"session_id": "{sid}", "bucket": "{b_name}"}}')
+
+        mock_proc = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout="\n".join(stdout_lines) + "\n",
+            stderr="",
+        )
+        with patch("ccstory.session_summarizer.claude_bin_available",
+                   return_value=True), \
+              patch("ccstory.session_summarizer.subprocess.run",
+                   return_value=mock_proc):
+            result = classify_sessions_by_content(items)
+
+        accepted_new = {bucket for bucket in result.values() if bucket.startswith("newbucket")}
+        assert len(accepted_new) == 4
+        assert result == {
+            "s_1_1": "newbucket1", "s_1_2": "newbucket1",
+            "s_2_1": "newbucket2", "s_2_2": "newbucket2",
+            "s_3_1": "newbucket3", "s_3_2": "newbucket3",
+            "s_4_1": "newbucket4", "s_4_2": "newbucket4",
+        }
+
     def test_cross_chunk_proposal_accumulation_accepts_shared_bucket(
         self, tmp_home: Path,
     ):
