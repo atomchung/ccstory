@@ -11,6 +11,7 @@ from pathlib import Path
 
 from ccstory.token_usage import (
     ModelUsage,
+    UsageReport,
     _price_for,
     collect_usage,
     fmt_tokens,
@@ -444,4 +445,29 @@ class TestCodexTokenUsage:
         assert "gpt-5.6-sol" not in rep.by_model
         assert rep.total_input == 0
         assert rep.total_output == 0
+
+
+class TestUsageReportUnpricedModels:
+    def test_unpriced_models_only_includes_positive_tokens_without_price(self):
+        rep = UsageReport(
+            since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            until=datetime(2026, 7, 8, tzinfo=timezone.utc),
+        )
+        # Priced model with tokens -> excluded
+        rep.by_model["claude-opus-4-7"] = ModelUsage(
+            model="claude-opus-4-7", input_tokens=100, output_tokens=50
+        )
+        # Unpriced model with tokens -> included
+        rep.by_model["unknown-model-b"] = ModelUsage(
+            model="unknown-model-b", input_tokens=200
+        )
+        rep.by_model["unknown-model-a"] = ModelUsage(
+            model="unknown-model-a", output_tokens=100
+        )
+        # Unpriced model with zero tokens -> excluded
+        rep.by_model["unknown-model-zero"] = ModelUsage(
+            model="unknown-model-zero", input_tokens=0, output_tokens=0
+        )
+        assert rep.unpriced_models == ["unknown-model-a", "unknown-model-b"]
+
 
