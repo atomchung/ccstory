@@ -43,7 +43,7 @@ class TestVendoredPriceTable:
         assert "prices" in content
         assert isinstance(content["prices"], dict)
         assert content["entry_count"] == len(content["prices"])
-        assert content["entry_count"] < 50
+        assert content["entry_count"] < 150
 
     def test_vendored_file_contains_required_models(self):
         prices, _ = load_vendored_prices()

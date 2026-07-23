@@ -20,12 +20,19 @@ OUTPUT_FILE = Path(__file__).resolve().parent.parent / "ccstory" / "model_prices
 
 
 # Model ID allowlist rule for ccstory pricing table filtering.
-# Currently matches bare first-party Anthropic Claude IDs only (no provider prefixes,
-# no suffixed region/subvariant delimiters like /, @, :, .).
-# Expand this rule when ccstory starts pricing other vendors' agents (e.g. OpenAI, Google).
+# Matches bare first-party Anthropic Claude IDs (`claude-`) and OpenAI GPT-5 family IDs (`gpt-5`).
+# Provider prefixes (e.g. `azure/`) and variant delimiters (`@`, `:`) are excluded.
+# Note: `.` is allowed to support subversion identifiers like `gpt-5.6-terra`.
+#
+# WHY `gpt-5` AND NOT `gpt-`:
+# Restricting to `gpt-5` specifically targets active OpenAI models used by Codex
+# (e.g., gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna) while preventing bloat from 110+ legacy
+# models (e.g., gpt-3.5-turbo, gpt-4) present in upstream LiteLLM registries.
 def is_allowed_model(model_id: str) -> bool:
     lk = model_id.lower().strip()
-    return lk.startswith("claude-") and not any(ch in lk for ch in ("/", "@", ":", "."))
+    is_valid_prefix = lk.startswith(("claude-", "gpt-5"))
+    has_excluded_delim = any(ch in lk for ch in ("/", "@", ":"))
+    return is_valid_prefix and not has_excluded_delim
 
 
 MODEL_ALLOWLIST_RULE = is_allowed_model
