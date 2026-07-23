@@ -60,6 +60,7 @@ class TestReportJson:
         p = _build()
         assert p["schema_version"] == JSON_SCHEMA_VERSION
         assert p["kind"] == "recap"
+        assert p["agent"] == "claude"  # inferred for legacy direct callers
         assert p["window"] == {
             "label": "2026-W27",
             "since": SINCE.isoformat(),
@@ -149,12 +150,26 @@ class TestTrendJson:
         p = build_trend_json([pt], "week")
         assert p["schema_version"] == JSON_SCHEMA_VERSION
         assert p["kind"] == "trend"
+        assert p["agent"] == "claude"
         assert p["period"] == "week"
         assert p["points"][0]["total_hours"] == 1.5
         assert p["points"][0]["buckets"] == [
             {"name": "coding", "active_hours": 1.5, "sessions": 2},
         ]
         assert json.loads(json.dumps(p)) == p
+
+    def test_selected_agent_scope_is_additive(self):
+        s = _stat()
+        pt = PeriodPoint(
+            label="2026-W27",
+            since=SINCE,
+            until=UNTIL,
+            rollups=[],
+            total_h=0,
+            output_tokens=0,
+            cost_usd=0,
+        )
+        assert build_trend_json([pt], "week", agent="codex")["agent"] == "codex"
 
 
 class TestJsonFlagParsing:

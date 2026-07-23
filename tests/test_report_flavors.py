@@ -122,6 +122,30 @@ class TestPlainFlavor:
         assert "[[myapp]]" not in md
         assert "refactored auth" in md
 
+    @pytest.mark.parametrize(
+        ("agent", "title"),
+        [
+            ("all", "# AI Coding Recap"),
+            ("claude", "# Claude Code Recap"),
+            ("codex", "# OpenAI Codex Recap"),
+        ],
+    )
+    def test_title_and_metadata_preserve_selected_agent_scope(self, agent, title):
+        s = _stat("coding", "-Users-alice-code-myapp", "s1")
+        s.agent = "codex" if agent == "codex" else "claude"
+        md = render_report(
+            label="2026-05",
+            since=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 31, tzinfo=timezone.utc),
+            sessions=[s],
+            rollups=[_rollup("coding", [s])],
+            usage=_usage(),
+            summaries={},
+            agent=agent,
+        )
+        assert md.startswith(title)
+        assert f"> Agent scope: `{agent}`" in md
+
 
 class TestObsidianFlavor:
     def test_starts_with_frontmatter(self):
@@ -455,5 +479,4 @@ class TestUnpricedModelCaveatMarkdown:
             if line.startswith("- **Without cache it would be**")
         )
         assert lines[idx + 1] == ""
-
 

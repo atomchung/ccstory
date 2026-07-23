@@ -44,6 +44,7 @@ from . import recap  # noqa: E402 — module import so recap.CONFIG_PATH reads l
 from .categorizer import load_rules, load_settings, normalize_project_name  # noqa: E402
 from .session_summarizer import CacheUnavailable  # noqa: E402
 from .recap import RecapUnavailable, build_recap, parse_window  # noqa: E402
+from .report import agent_breakdown  # noqa: E402
 from .time_tracking import collect_sessions, rollup_by_category  # noqa: E402
 from .token_usage import apply_prices, collect_usage, load_prices_config  # noqa: E402
 from .trends import _resolve_sessions_from_cache  # noqa: E402
@@ -54,6 +55,7 @@ mcp = FastMCP("ccstory")
 
 Window = Literal["week", "month", "all"] | str
 Classify = Literal["folder", "content", "hybrid"]
+Agent = Literal["all", "claude", "codex"]
 
 # "folder" is the only classify mode that never fires an LLM call (content/
 # hybrid batch-classify claude -p on cache misses) — same choice
@@ -91,6 +93,7 @@ def _compact_recap(result) -> dict:
     top = sorted(result.sessions, key=lambda s: -s.active_min)[:5]
     return {
         "ok": True,
+        "agent": result.agent,
         "label": result.label,
         "since": result.since.isoformat(),
         "until": result.until.isoformat(),
@@ -118,6 +121,7 @@ def _compact_recap(result) -> dict:
         "top_sessions": [
             {
                 "id": s.session_id,
+                "agent": getattr(s, "agent", "claude") or "claude",
                 "project": normalize_project_name(s.project) or s.project,
                 "active_hours": round(s.active_min / 60, 2),
                 "summary": (
@@ -126,6 +130,17 @@ def _compact_recap(result) -> dict:
                 ),
             }
             for s in top
+        ],
+        "agents": [
+            {
+                "agent": share.agent,
+                "label": share.label,
+                "sessions": share.sessions,
+                "messages": share.messages,
+                "time_share": round(share.time_share, 4),
+                "session_share": round(share.session_share, 4),
+            }
+            for share in agent_breakdown(result.sessions)
         ],
         "cost_usd": round(result.usage.total_cost_usd, 2),
         "report_path": str(result.report_path) if result.report_path else None,
@@ -163,6 +178,7 @@ def get_recap(
     window: Window = "month",
     classify: Classify = _DEFAULT_CLASSIFY,
     allow_llm: bool = False,
+    agent: Agent = "all",
 ) -> dict:
     """Recap totals, per-category breakdown, and the overall narrative for
     one window (week | month | all | YYYY-MM). Read-only, compact JSON —
@@ -173,6 +189,7 @@ def get_recap(
     `narrative` are null unless `allow_llm=True`. Pass `classify="content"`
     or `"hybrid"`, and/or `allow_llm=True`, to opt into LLM-assisted
     classification / narrative synthesis (slower, may cost tokens).
+    `agent` selects all providers or only Claude Code / OpenAI Codex data.
     """
     try:
         result = build_recap(
@@ -184,16 +201,21 @@ def get_recap(
             compare=False,
             artifacts=False,
             write_report=False,
+            agent=agent,
             console=None,
         )
     except _TOOL_ERRORS as e:
-        return _normalize_error(e)
+        out = _normalize_error(e)
+        out["agent"] = agent
+        return out
     return _compact_recap(result)
 
 
 @mcp.tool()
 def compare_to_previous(
-    window: Window = "week", classify: Classify = _DEFAULT_CLASSIFY,
+    window: Window = "week",
+    classify: Classify = _DEFAULT_CLASSIFY,
+    agent: Agent = "all",
 ) -> dict:
     """Compare one window against the immediately preceding same-length
     window: active-hours deltas per category, cost deltas. Not supported
@@ -205,18 +227,24 @@ def compare_to_previous(
     resolved cache-only (this tool's own choice, not an intrinsic property
     of the classify mode), so `narrative` is always null (use `get_recap`
     with `allow_llm=True` for a synthesized narrative).
+    `agent` is applied symmetrically to both windows and their usage.
     """
     if window == "all":
         return {
             "ok": False,
+            "agent": agent,
             "error": "compare_to_previous does not support window='all' "
                      "(no meaningful previous window to compare against).",
         }
     try:
         since, until, label = parse_window(window)
-        sessions = collect_sessions(since, until)
+        sessions = collect_sessions(since, until, agent=agent)
         if not sessions:
-            return {"ok": False, "error": "No engaged sessions in this window."}
+            return {
+                "ok": False,
+                "agent": agent,
+                "error": "No engaged sessions in this window.",
+            }
         fallback_bucket = load_settings().get("default_bucket", "coding")
         # Sessions come back from collect_sessions() with .category unset —
         # resolve_session_bucket() (via the cache-only helper, same one
@@ -231,7 +259,7 @@ def compare_to_previous(
         # overrides some *other* call in this process happened to apply.
         prices, snapshot, provenance = load_prices_config(recap.CONFIG_PATH)
         apply_prices(prices, snapshot, provenance)
-        usage = collect_usage(since, until)
+        usage = collect_usage(since, until, agent=agent)
         cmp = _compare_to_previous(
             current_sessions=sessions,
             current_rollups=rollups,
@@ -241,12 +269,21 @@ def compare_to_previous(
             until=until,
             mode=classify,
             fallback=fallback_bucket,
+            agent=agent,
         )
     except _TOOL_ERRORS as e:
-        return _normalize_error(e)
+        out = _normalize_error(e)
+        out["agent"] = agent
+        return out
     if cmp is None:
-        return {"ok": False, "error": "No sessions in the previous window to compare."}
-    return _compact_comparison(cmp)
+        return {
+            "ok": False,
+            "agent": agent,
+            "error": "No sessions in the previous window to compare.",
+        }
+    out = _compact_comparison(cmp)
+    out["agent"] = agent
+    return out
 
 
 @mcp.tool()
@@ -254,6 +291,7 @@ def get_trend(
     period: Literal["week", "month"] = "week",
     count: int = 8,
     classify: Classify = _DEFAULT_CLASSIFY,
+    agent: Agent = "all",
 ) -> dict:
     """Per-period activity series over the last `count` weeks or months —
     active hours, cost, and per-category hours for each window, oldest
@@ -264,6 +302,7 @@ def get_trend(
     buckets cache-only by design (cache-miss sessions land in the fallback
     bucket), so `classify="hybrid"` here only changes which cache layers
     are consulted, never whether an LLM runs.
+    `agent` selects the provider population for every point.
     """
     try:
         n = max(1, min(int(count), 24))
@@ -275,12 +314,19 @@ def get_trend(
         apply_prices(prices, snapshot, provenance)
         fallback_bucket = load_settings().get("default_bucket", "coding")
         points = collect_trend(
-            period=period, count=n, mode=classify, fallback=fallback_bucket,
+            period=period,
+            count=n,
+            mode=classify,
+            fallback=fallback_bucket,
+            agent=agent,
         )
     except _TOOL_ERRORS as e:
-        return _normalize_error(e)
+        out = _normalize_error(e)
+        out["agent"] = agent
+        return out
     return {
         "ok": True,
+        "agent": agent,
         "period": period,
         "count": n,
         "points": [

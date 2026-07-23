@@ -8,12 +8,16 @@ better tested via integration once #25 etc. settle.
 from __future__ import annotations
 
 import argparse
+import json
 import os
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from ccstory import session_summarizer as ss
+from ccstory import cli
 from ccstory.cli import apply_lang_override, resolve_output_format
+from tests.conftest import make_assistant_msg, make_user_msg
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -175,6 +179,108 @@ class TestApplyLangOverride:
         monkeypatch.delenv(ss.CCSTORY_LANG_ENV, raising=False)
         apply_lang_override("  Japanese  ")
         assert os.environ[ss.CCSTORY_LANG_ENV] == "Japanese"
+
+
+class TestTrendProviderRootsAndArtifacts:
+    @staticmethod
+    def _recent(hours_ago: float) -> str:
+        dt = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
+        return dt.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    def _seed_codex(self, codex_factory, sid: str = "trend-codex"):
+        codex_factory(
+            sid,
+            [
+                {
+                    "timestamp": self._recent(2.6),
+                    "type": "session_meta",
+                    "payload": {
+                        "session_id": sid,
+                        "id": sid,
+                        "cwd": "/Users/me/proj",
+                    },
+                },
+                {
+                    "timestamp": self._recent(2.5),
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "Start"},
+                },
+                {
+                    "timestamp": self._recent(2.4),
+                    "type": "event_msg",
+                    "payload": {"type": "agent_message", "message": "Working"},
+                },
+                {
+                    "timestamp": self._recent(2.3),
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "Continue"},
+                },
+                {
+                    "timestamp": self._recent(2.2),
+                    "type": "event_msg",
+                    "payload": {"type": "agent_message", "message": "Done"},
+                },
+            ],
+        )
+
+    def _seed_claude(self, jsonl_factory):
+        jsonl_factory(
+            "-Users-me-proj",
+            "trend-claude",
+            [
+                make_user_msg("Start", self._recent(2.6)),
+                make_assistant_msg(
+                    "Working", self._recent(2.5), "trend-c1",
+                ),
+                make_user_msg("Continue", self._recent(2.4)),
+                make_assistant_msg("Done", self._recent(2.3), "trend-c2"),
+            ],
+        )
+
+    def test_help_does_not_require_any_provider_root(self, tmp_home):
+        (tmp_home / ".claude" / "projects").rmdir()
+        with pytest.raises(SystemExit) as exc:
+            cli._run_trend(["--help"])
+        assert exc.value.code == 0
+
+    def test_codex_only_home_runs(self, tmp_home, codex_factory, tmp_path, capsys):
+        (tmp_home / ".claude" / "projects").rmdir()
+        self._seed_codex(codex_factory)
+        rc = cli._run_trend([
+            "--agent", "codex", "--weeks", "1", "--format", "json",
+            "--reports-dir", str(tmp_path),
+        ])
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["agent"] == "codex"
+        assert (tmp_path / "trend-week-1-codex.md").exists()
+
+    def test_claude_filter_names_only_missing_claude_root(self, tmp_home):
+        (tmp_home / ".claude" / "projects").rmdir()
+        with pytest.raises(SystemExit) as exc:
+            cli._run_trend(["--agent", "claude"])
+        message = str(exc.value)
+        assert "Claude Code" in message
+        assert "Codex" not in message
+
+    def test_all_and_filtered_artifact_names_are_distinct(
+        self, jsonl_factory, codex_factory, tmp_path, capsys,
+    ):
+        self._seed_claude(jsonl_factory)
+        self._seed_codex(codex_factory)
+        for agent in ("all", "claude", "codex"):
+            assert cli._run_trend([
+                "--agent", agent, "--weeks", "1", "--format", "json",
+                "--reports-dir", str(tmp_path),
+            ]) == 0
+            capsys.readouterr()
+        assert {
+            path.name for path in tmp_path.glob("trend-*.md")
+        } == {
+            "trend-week-1.md",
+            "trend-week-1-claude.md",
+            "trend-week-1-codex.md",
+        }
 
 
 class TestFormatArgparseValidation:

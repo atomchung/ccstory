@@ -57,6 +57,28 @@ class AgentShare:
     session_share: float
 
 
+def _report_agent_scope(agent: str | None, sessions: list[SessionStat]) -> str:
+    """Resolve a display scope while keeping direct legacy callers useful."""
+    if agent in ("all", "claude", "codex"):
+        return agent
+    names = {
+        getattr(session, "agent", "claude") or "claude"
+        for session in sessions
+    }
+    if len(names) == 1:
+        return next(iter(names))
+    return "all" if len(names) > 1 else "claude"
+
+
+def _agent_title(scope: str, noun: str) -> str:
+    prefix = {
+        "claude": "Claude Code",
+        "codex": "OpenAI Codex",
+        "all": "AI Coding",
+    }.get(scope, "AI Coding")
+    return f"{prefix} {noun}"
+
+
 def agent_breakdown(sessions: list[SessionStat]) -> list[AgentShare]:
     """Per-agent share of raw interaction time and of session count.
 
@@ -270,6 +292,7 @@ def _obsidian_frontmatter(
     until: datetime,
     rollups: list[CategoryRollup],
     usage: UsageReport,
+    agent: str,
 ) -> list[str]:
     """YAML front-matter for the Obsidian flavor.
 
@@ -290,6 +313,7 @@ def _obsidian_frontmatter(
     lines = ["---"]
     lines.append(f"date_start: {since.date().isoformat()}")
     lines.append(f"date_end: {until.date().isoformat()}")
+    lines.append(f"agent: {agent}")
     lines.append(f"active_hours: {total_h:.1f}")
     if top_focus:
         lines.append(f"top_focus: {_yaml_scalar(top_focus)}")
@@ -356,6 +380,7 @@ def render_report(
     flavor: str = "plain",
     artifacts: ArtifactsReport | None = None,
     category_narratives: dict[str, str] | None = None,
+    agent: str | None = None,
 ) -> str:
     """Produce the full markdown report.
 
@@ -370,17 +395,21 @@ def render_report(
     total_min = sum(r.active_min for r in rollups)
     total_h = total_min / 60
     total_msgs = sum(r.messages for r in rollups)
+    agent_scope = _report_agent_scope(agent, sessions)
 
     lines: list[str] = []
     if flavor == "obsidian":
-        lines.extend(_obsidian_frontmatter(since, until, rollups, usage))
+        lines.extend(
+            _obsidian_frontmatter(since, until, rollups, usage, agent_scope)
+        )
         lines.append("")
 
     date_range = _format_date_range(since, until)
-    lines.append(f"# Claude Code Recap · {date_range}")
+    lines.append(f"# {_agent_title(agent_scope, 'Recap')} · {date_range}")
     lines.append("")
     lines.append(f"> Period label: `{label}` · Generated: {datetime.now().isoformat(timespec='seconds')}")
     lines.append(f"> Window: {since.date()} → {until.date()}")
+    lines.append(f"> Agent scope: `{agent_scope}`")
     lines.append(
         f"> **{total_h:.1f}h active** · {len(sessions)} sessions · {total_msgs:,} messages"
     )
@@ -559,6 +588,7 @@ def build_report_json(
     comparison: PeriodComparison | None = None,
     artifacts: ArtifactsReport | None = None,
     category_narratives: dict[str, str] | None = None,
+    agent: str | None = None,
 ) -> dict:
     """Machine-readable envelope mirroring the markdown report's content.
 
@@ -567,9 +597,11 @@ def build_report_json(
     """
     total_min = sum(r.active_min for r in rollups)
     category_narratives = category_narratives or {}
+    agent_scope = _report_agent_scope(agent, sessions)
     payload: dict = {
         "schema_version": JSON_SCHEMA_VERSION,
         "kind": "recap",
+        "agent": agent_scope,
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "window": {
             "label": label,
@@ -726,11 +758,15 @@ def build_report_json(
     return payload
 
 
-def build_trend_json(points: list[PeriodPoint], period: str) -> dict:
+def build_trend_json(
+    points: list[PeriodPoint], period: str, agent: str | None = None,
+) -> dict:
     """Machine-readable trend series (per-period totals + bucket hours)."""
+    agent_scope = agent if agent in ("all", "claude", "codex") else "claude"
     return {
         "schema_version": JSON_SCHEMA_VERSION,
         "kind": "trend",
+        "agent": agent_scope,
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "period": period,
         "pricing_snapshot": get_snapshot_date(),
@@ -776,6 +812,7 @@ def render_terminal_card(
     report_path: str | None = None,
     comparison: PeriodComparison | None = None,
     artifacts: ArtifactsReport | None = None,
+    agent: str | None = None,
 ) -> Panel:
     """Rich Panel summarizing the recap. Designed for screenshot sharing."""
     summaries = summaries or {}
@@ -957,9 +994,8 @@ def render_terminal_card(
         parts.append(Text(f"⚠️ {pricing_warning}", style="yellow"))
 
     title_range = _format_date_range(since, until)
-    # Only rebrand the card when the window genuinely spans several agents —
-    # a Claude-Code-only user should keep seeing the name they installed.
-    card_title = "AI Coding Recap" if len(shares) >= 2 else "Claude Code Recap"
+    agent_scope = _report_agent_scope(agent, sessions)
+    card_title = _agent_title(agent_scope, "Recap")
     return Panel(
         Group(*parts),
         title=f"[bold]{card_title}[/bold] [dim]·[/dim] [cyan]{title_range}[/cyan]",
@@ -1090,7 +1126,9 @@ def render_comparison_markdown(cmp: PeriodComparison) -> str:
 
 # ----- Trend rendering (feature B) --------------------------------------------
 
-def render_trend_card(points: list[PeriodPoint], period: str) -> Panel:
+def render_trend_card(
+    points: list[PeriodPoint], period: str, agent: str | None = None,
+) -> Panel:
     """Rich Panel showing per-bucket sparklines over N periods."""
     if not points:
         return Panel(Text("No data in window."), title="ccstory trend")
@@ -1183,9 +1221,10 @@ def render_trend_card(points: list[PeriodPoint], period: str) -> Panel:
             Text(f"⚠️ {pricing_warning}", style="yellow"),
         ))
     body = Group(*body_parts)
+    agent_scope = agent if agent in ("all", "claude", "codex") else "claude"
     return Panel(
         body,
-        title=f"[bold]Claude Code Trend[/bold] "
+        title=f"[bold]{_agent_title(agent_scope, 'Trend')}[/bold] "
               f"[dim]·[/dim] [cyan]last {len(points)} {period}s[/cyan]",
         subtitle="[dim]ccstory trend[/dim]",
         border_style="cyan",
@@ -1194,13 +1233,21 @@ def render_trend_card(points: list[PeriodPoint], period: str) -> Panel:
     )
 
 
-def render_trend_markdown(points: list[PeriodPoint], period: str) -> str:
+def render_trend_markdown(
+    points: list[PeriodPoint], period: str, agent: str | None = None,
+) -> str:
     """Markdown table mirroring the trend card."""
     if not points:
         return "# ccstory trend\n\nNo data.\n"
+    agent_scope = agent if agent in ("all", "claude", "codex") else "claude"
     cat_series = trend_by_category(points)
     labels = [p.label for p in points]
-    lines = [f"# Claude Code Trend · last {len(points)} {period}s", ""]
+    lines = [
+        f"# {_agent_title(agent_scope, 'Trend')} · last {len(points)} {period}s",
+        "",
+        f"> Agent scope: `{agent_scope}`",
+        "",
+    ]
     lines.append(f"_Window labels (oldest → newest)_: {', '.join(labels)}")
     lines.append("")
     lines.append("| Bucket | Spark | Latest | Average | Δ vs previous |")

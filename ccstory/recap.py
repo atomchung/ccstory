@@ -175,6 +175,9 @@ class RecapResult:
     markdown: str
     report_path: Path | None = None
     counts: dict[str, int] = field(default_factory=dict)
+    # Appended after the existing defaulted fields so older positional
+    # RecapResult(...) callers do not silently bind report_path as agent.
+    agent: str = "all"
 
     def to_json(self) -> dict:
         """The machine-readable envelope (`schema_version: 1`), same shape
@@ -192,6 +195,7 @@ class RecapResult:
             comparison=self.comparison,
             artifacts=self.artifacts,
             category_narratives=self.category_narratives or None,
+            agent=self.agent,
         )
         if self.report_path is not None:
             payload["report_path"] = str(self.report_path)
@@ -764,13 +768,15 @@ def build_recap(
         flavor=flavor,
         artifacts=artifacts_report,
         category_narratives=category_narratives or None,
+        agent=agent,
     )
 
     report_path: Path | None = None
     if write_report:
         out_dir = reports_dir if reports_dir is not None else REPORTS_DIR
         out_dir.mkdir(parents=True, exist_ok=True)
-        report_path = out_dir / f"recap-{label}.md"
+        agent_suffix = "" if agent == "all" else f"-{agent}"
+        report_path = out_dir / f"recap-{label}{agent_suffix}.md"
         report_path.write_text(md, encoding="utf-8")
 
     return RecapResult(
@@ -786,6 +792,7 @@ def build_recap(
         comparison=comparison,
         artifacts=artifacts_report,
         markdown=md,
+        agent=agent,
         report_path=report_path,
         counts=counts,
     )
