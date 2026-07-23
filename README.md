@@ -133,8 +133,9 @@ flow after the live debug session on Wednesday.
 | `--agent claude` | Claude Code only (`~/.claude/projects`) |
 | `--agent codex` | OpenAI Codex only (`~/.codex/sessions`) |
 
-See [Multiple coding agents](#multiple-coding-agents) for what the numbers mean
-once more than one agent is in the window.
+Also accepted by `ccstory trend`, so a trend line and a week over the same range
+describe the same population. See [Multiple coding agents](#multiple-coding-agents)
+for what the numbers mean once more than one agent is in the window.
 
 **Session classification mode**
 

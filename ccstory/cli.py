@@ -328,6 +328,10 @@ def _run_trend(argv: list[str]) -> int:
                    help="Bucket resolution mode — must match what `ccstory "
                         "week` is using to keep vocabulary aligned across "
                         "trend, week, and vs-previous views.")
+    p.add_argument("--agent", choices=["all", *list_providers()], default="all",
+                   help="Which coding agent's sessions to include — mirror "
+                        "what `ccstory week` uses so the trend line and the "
+                        "week describe the same population.")
     p.add_argument("--reports-dir", type=Path, default=REPORTS_DIR)
     p.add_argument("--format", dest="output_format",
                    choices=VALID_OUTPUT_FORMATS, default="auto",
@@ -357,7 +361,7 @@ def _run_trend(argv: list[str]) -> int:
     ):
         points = collect_trend(
             period=period, count=count,
-            mode=args.classify, fallback=fallback_bucket,
+            mode=args.classify, fallback=fallback_bucket, agent=args.agent,
         )
     if not any(p.total_h for p in points):
         sys.exit("No engaged sessions across the trend window.")

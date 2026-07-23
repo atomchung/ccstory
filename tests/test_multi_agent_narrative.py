@@ -242,6 +242,49 @@ class TestTimeSemantics:
         assert all("active_hours" not in a for a in payload["agents"])
 
 
+class TestAgentFilterReachesEveryView:
+    """A `--agent` filter that only applies to the recap would put a
+    Claude-only week next to an every-agent trend line and vs-previous block."""
+
+    def _record_agent(self, monkeypatch, module) -> list[str]:
+        seen: list[str] = []
+        import ccstory.time_tracking as tt
+
+        real = tt.collect_sessions
+
+        def spy(since, until=None, engaged_only=True, agent="all"):
+            seen.append(agent)
+            return real(since, until, engaged_only=engaged_only, agent=agent)
+
+        monkeypatch.setattr(tt, "collect_sessions", spy)
+        return seen
+
+    def test_trend_forwards_the_filter(self, monkeypatch, tmp_home):
+        from ccstory.trends import collect_trend
+
+        seen = self._record_agent(monkeypatch, "trends")
+        collect_trend(period="week", count=2, agent="codex")
+        assert seen and set(seen) == {"codex"}
+
+    def test_previous_window_comparison_forwards_the_filter(
+        self, monkeypatch, tmp_home
+    ):
+        from ccstory.trends import compare_to_previous
+        from ccstory.token_usage import UsageReport
+
+        seen = self._record_agent(monkeypatch, "trends")
+        compare_to_previous(
+            current_sessions=[],
+            current_rollups=[],
+            current_usage=UsageReport(since=SINCE, until=UNTIL),
+            current_label="week",
+            since=SINCE,
+            until=UNTIL,
+            agent="codex",
+        )
+        assert seen and set(seen) == {"codex"}
+
+
 def _render(sessions: list[SessionStat]) -> str:
     from ccstory.time_tracking import rollup_by_category
 
