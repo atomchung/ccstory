@@ -604,6 +604,7 @@ class TestLanguageDirective:
         directive = language_directive()
         assert directive == (
             "Respond in Traditional Chinese. "
+            "The input summaries may be in a different language — still respond ONLY in Traditional Chinese, translating concepts as needed. "
             "Keep the same length / format limits regardless of language."
         )
 
@@ -654,6 +655,7 @@ class TestLanguageDirective:
         directive = language_directive()
         assert directive == (
             "Respond in Traditional Chinese. "
+            "The input summaries may be in a different language — still respond ONLY in Traditional Chinese, translating concepts as needed. "
             "Keep the same length / format limits regardless of language."
         )
         assert "--- CLAUDE.md ---" not in directive
@@ -670,6 +672,7 @@ class TestLanguageDirective:
         directive = language_directive()
         assert directive == (
             "Respond in Korean. "
+            "The input summaries may be in a different language — still respond ONLY in Korean, translating concepts as needed. "
             "Keep the same length / format limits regardless of language."
         )
 
@@ -714,6 +717,7 @@ class TestLanguageDirective:
         directive = language_directive()
         assert directive == (
             "Respond in Traditional Chinese. "
+            "The input summaries may be in a different language — still respond ONLY in Traditional Chinese, translating concepts as needed. "
             "Keep the same length / format limits regardless of language."
         )
 
@@ -722,6 +726,28 @@ class TestLanguageDirective:
         monkeypatch.setenv(ss.CCSTORY_LANG_ENV, "   ")
         ss.language_directive.cache_clear()
         assert language_directive() == "Respond in English."
+
+    def test_explicit_override_directive_includes_multilingual_reinforcement(
+        self, tmp_home: Path, monkeypatch,
+    ):
+        """Issue #131: explicit language overrides must instruct Claude to respond
+        ONLY in the target language even if input summaries are in another language.
+        The default hardcoded fallback ('Respond in English.') does NOT include this line.
+        """
+        monkeypatch.setenv(ss.CCSTORY_LANG_ENV, "English")
+        ss.language_directive.cache_clear()
+        directive_override = language_directive()
+        assert (
+            "The input summaries may be in a different language — still respond ONLY in English, translating concepts as needed."
+            in directive_override
+        )
+
+        monkeypatch.delenv(ss.CCSTORY_LANG_ENV, raising=False)
+        monkeypatch.setattr(ss, "_detect_system_locale", lambda: None)
+        ss.language_directive.cache_clear()
+        directive_fallback = language_directive()
+        assert directive_fallback == "Respond in English."
+        assert "The input summaries may be in a different language" not in directive_fallback
 
     def test_malformed_ccstory_config_falls_through(self, tmp_home: Path):
         cfg = tmp_home / ".ccstory" / "config.toml"

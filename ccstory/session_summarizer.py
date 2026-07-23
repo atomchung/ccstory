@@ -56,6 +56,7 @@ def _build_language_line(language: str) -> str:
     language picks (CLI flag, env, ccstory config, settings.json, locale)."""
     return (
         f"Respond in {language}. "
+        f"The input summaries may be in a different language — still respond ONLY in {language}, translating concepts as needed. "
         "Keep the same length / format limits regardless of language."
     )
 
