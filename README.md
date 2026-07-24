@@ -1,8 +1,8 @@
 # ccstory
 
-> **Your Claude Code week, in plain English.**
-> Reads `~/.claude/projects/**/*.jsonl` locally and writes a categorized recap
-> with active hours, costs, and a per-bucket narrative.
+> **Your AI coding agent week, in plain English.**
+> Reads session logs from local coding agents (Claude Code, OpenAI Codex, and more)
+> and writes a categorized recap with active hours, costs, and a per-bucket narrative.
 
 Sibling to [ccusage](https://github.com/ryoppippi/ccusage):
 **ccusage tells you how much you spent · ccstory tells you what on.**
@@ -10,8 +10,8 @@ Sibling to [ccusage](https://github.com/ryoppippi/ccusage):
 ## Who this is for
 
 - People who want to write a weekly status without scrolling scrollback.
-- People who saw a ccusage number and want to know what kind of work those
-  tokens went to.
+- People who saw a ccusage number across their AI coding agents and want to know
+  what kind of work those tokens went to.
 - People who do a Sunday-night reflection on what they actually shipped.
 
 ## Quick start
@@ -249,12 +249,7 @@ reruns are free.
 
 ## Multiple coding agents
 
-ccstory reads Claude Code (`~/.claude/projects`) and OpenAI Codex
-(`~/.codex/sessions`, plus `archived_sessions`) by default. Codex sessions are
-attributed to a project from the `cwd` the transcript records, folded through
-the same rules Claude Code project folders get — including git worktrees, so a
-detached checkout counts toward the repo it came from rather than becoming its
-own one-off project.
+ccstory is designed as an extensible multi-agent platform. By default, it reads local session logs from both **Claude Code** (`~/.claude/projects`) and **OpenAI Codex** (`~/.codex/sessions`, plus `archived_sessions`), and its provider architecture (`BaseAgentProvider`) allows adding more coding agents seamlessly. Codex sessions are attributed to a project from the `cwd` recorded in the transcript, folded through the same rules Claude Code project folders use — including git worktrees, so a detached checkout counts toward its parent repository rather than becoming a one-off project.
 
 **Time is reported once, not per agent.** Agents run concurrently: a Codex
 review and a Claude Code session routinely occupy the same ten minutes. Summing
@@ -272,10 +267,9 @@ per-agent time added up to 177h against a deduplicated wall clock of 64h. So:
 - **`N× parallel`** is raw agent time ÷ wall clock: how much of the work
   overlapped.
 
-Token counts and costs still cover Claude Code only — Codex usage appears in the
-time breakdown but not in the cost numbers, and the report says so inline.
+**Token usage and costs span all supported providers.** Both Claude Code and OpenAI Codex token counts (including cumulative rollout counters and subagent branches) are tracked and converted to estimated costs using vendored model pricing tables (including GPT-5 model families).
 
-Use `--agent claude` to get the pre-multi-agent numbers back.
+Use `--agent claude` or `--agent codex` to filter the report to a specific coding agent.
 
 ## What shipped
 
@@ -487,7 +481,7 @@ ccstory month
 ccstory never sends your conversation data to its own service or to the
 What-shipped metadata providers. There is no ccstory telemetry or account.
 
-- **Data source**: `~/.claude/projects/**/*.jsonl` — Claude Code's own logs.
+- **Data source**: Local session logs from supported coding agents (`~/.claude/projects/**/*.jsonl` for Claude Code, `~/.codex/sessions/**/*.jsonl` for OpenAI Codex, etc.).
 - **Narratives and classification**: subprocess-call your locally installed
   `claude -p`. The Claude CLI contacts Anthropic using your signed-in session
   and plan quota; ccstory does not use your API key or operate a proxy.
@@ -632,7 +626,13 @@ full backlog.
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for release history.
+### Highlights
+
+- **v0.7.0**: First-class OpenAI Codex support with cross-agent session aggregation, multi-provider token usage and cost metrics (including GPT-5 family vendored pricing), and unified agent filtering (`--agent all|claude|codex`).
+- **v0.6.1**: Enhanced terminal card rendering and fine-tuned goal-thread narratives.
+- **v0.6.0**: Multi-agent wall-clock active time deduplication and Rich terminal recap cards.
+
+For full release history and version details, see [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
