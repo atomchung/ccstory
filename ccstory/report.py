@@ -19,7 +19,7 @@ from rich.text import Text
 
 from .artifacts import ArtifactsReport
 from .categorizer import colors_for, load_settings, normalize_project_name
-from .providers import agent_label
+from .providers import agent_label, list_providers
 from .session_summarizer import SessionSummary
 from .time_tracking import CategoryRollup, SessionStat, wall_clock_active_sec
 from .token_usage import (
@@ -59,7 +59,7 @@ class AgentShare:
 
 def _report_agent_scope(agent: str | None, sessions: list[SessionStat]) -> str:
     """Resolve a display scope while keeping direct legacy callers useful."""
-    if agent in ("all", "claude", "codex"):
+    if agent == "all" or agent in list_providers():
         return agent
     names = {
         getattr(session, "agent", "claude") or "claude"
@@ -71,12 +71,40 @@ def _report_agent_scope(agent: str | None, sessions: list[SessionStat]) -> str:
 
 
 def _agent_title(scope: str, noun: str) -> str:
-    prefix = {
-        "claude": "Claude Code",
-        "codex": "OpenAI Codex",
-        "all": "AI Coding",
-    }.get(scope, "AI Coding")
+    prefix = "AI Coding" if scope == "all" else agent_label(scope)
     return f"{prefix} {noun}"
+
+
+def _usage_coverage_message(provider_coverage: dict[str, str]) -> str | None:
+    """Human-readable disclosure preserving partial vs unavailable states."""
+    partial = sorted(
+        name for name, state in provider_coverage.items() if state == "partial"
+    )
+    unavailable = sorted(
+        name
+        for name, state in provider_coverage.items()
+        if state == "unavailable"
+    )
+    details: list[str] = []
+    if partial:
+        details.append(f"partial exact usage for {', '.join(partial)}")
+    if unavailable:
+        details.append(f"exact usage unavailable for {', '.join(unavailable)}")
+    if not details:
+        return None
+    return "Token and cost totals are incomplete: " + "; ".join(details) + "."
+
+
+def _trend_provider_coverage(points: list[PeriodPoint]) -> dict[str, str]:
+    """Merge the per-period provider coverage states for one trend."""
+    coverage: dict[str, str] = {}
+    rank = {"complete": 0, "partial": 1, "unavailable": 2}
+    for point in points:
+        for name, state in point.provider_coverage.items():
+            current = coverage.get(name)
+            if current is None or rank.get(state, 2) > rank.get(current, 2):
+                coverage[name] = state
+    return dict(sorted(coverage.items()))
 
 
 def agent_breakdown(sessions: list[SessionStat]) -> list[AgentShare]:
@@ -322,6 +350,19 @@ def _obsidian_frontmatter(
     )
     lines.append(f"cost_usd: {usage.total_cost_usd:.2f}")
     lines.append(f"output_tokens: {usage.total_output}")
+    lines.append(f"usage_complete: {str(usage.usage_complete).lower()}")
+    if usage.partial_agents:
+        lines.append(
+            "usage_partial_agents: ["
+            + ", ".join(_yaml_scalar(name) for name in usage.partial_agents)
+            + "]"
+        )
+    if usage.unavailable_agents:
+        lines.append(
+            "usage_unavailable_agents: ["
+            + ", ".join(_yaml_scalar(name) for name in usage.unavailable_agents)
+            + "]"
+        )
     lines.append("---")
     return lines
 
@@ -545,6 +586,9 @@ def render_report(
             f"> ⚠️ Cost figures exclude {unpriced_str} — "
             "tokens are counted in usage totals, but rates are missing from the price table so total cost is underestimated."
         )
+    coverage_warning = _usage_coverage_message(usage.provider_coverage)
+    if coverage_warning:
+        lines.append(f"> ⚠️ {coverage_warning}")
 
     lines.append(
         "> For exact cost / billing-window breakdowns, pair with "
@@ -626,6 +670,11 @@ def build_report_json(
             "cache_savings_usd": round(usage.cache_savings_usd, 2),
         },
         "pricing_snapshot": get_snapshot_date(),
+        "usage_coverage": {
+            "complete": usage.usage_complete,
+            "incomplete_agents": usage.incomplete_agents,
+            "providers": usage.provider_coverage,
+        },
         "buckets": [
             {
                 "name": r.category,
@@ -762,7 +811,13 @@ def build_trend_json(
     points: list[PeriodPoint], period: str, agent: str | None = None,
 ) -> dict:
     """Machine-readable trend series (per-period totals + bucket hours)."""
-    agent_scope = agent if agent in ("all", "claude", "codex") else "claude"
+    agent_scope = _report_agent_scope(agent, [])
+    provider_coverage = _trend_provider_coverage(points)
+    incomplete_agents = sorted(
+        name
+        for name, state in provider_coverage.items()
+        if state != "complete"
+    )
     return {
         "schema_version": JSON_SCHEMA_VERSION,
         "kind": "trend",
@@ -770,6 +825,11 @@ def build_trend_json(
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "period": period,
         "pricing_snapshot": get_snapshot_date(),
+        "usage_coverage": {
+            "complete": not incomplete_agents,
+            "incomplete_agents": incomplete_agents,
+            "providers": provider_coverage,
+        },
         "points": [
             {
                 "label": p.label,
@@ -944,6 +1004,11 @@ def render_terminal_card(
         unpriced_str = ", ".join(usage.unpriced_models)
         parts.append(
             Text(f"Cost excludes {unpriced_str} (missing from price table).", style="dim yellow")
+        )
+    coverage_warning = _usage_coverage_message(usage.provider_coverage)
+    if coverage_warning:
+        parts.append(
+            Text(coverage_warning, style="yellow")
         )
 
     if overall_narrative:
@@ -1214,6 +1279,14 @@ def render_trend_card(
         Text(""),
         axis_hint,
     ]
+    coverage_warning = _usage_coverage_message(
+        _trend_provider_coverage(points)
+    )
+    if coverage_warning:
+        body_parts.extend((
+            Text(""),
+            Text(f"⚠️ {coverage_warning}", style="yellow"),
+        ))
     pricing_warning = pricing_snapshot_warning(points[-1].until)
     if pricing_warning:
         body_parts.extend((
@@ -1221,7 +1294,7 @@ def render_trend_card(
             Text(f"⚠️ {pricing_warning}", style="yellow"),
         ))
     body = Group(*body_parts)
-    agent_scope = agent if agent in ("all", "claude", "codex") else "claude"
+    agent_scope = _report_agent_scope(agent, [])
     return Panel(
         body,
         title=f"[bold]{_agent_title(agent_scope, 'Trend')}[/bold] "
@@ -1239,7 +1312,7 @@ def render_trend_markdown(
     """Markdown table mirroring the trend card."""
     if not points:
         return "# ccstory trend\n\nNo data.\n"
-    agent_scope = agent if agent in ("all", "claude", "codex") else "claude"
+    agent_scope = _report_agent_scope(agent, [])
     cat_series = trend_by_category(points)
     labels = [p.label for p in points]
     lines = [
@@ -1279,6 +1352,11 @@ def render_trend_markdown(
             f"{p.output_tokens/1_000_000:.2f} | ${p.cost_usd:,.0f} |"
         )
     lines.append("")
+    coverage_warning = _usage_coverage_message(
+        _trend_provider_coverage(points)
+    )
+    if coverage_warning:
+        lines.append(f"> ⚠️ {coverage_warning}")
     lines.append(f"> Pricing snapshot: `{get_snapshot_date()}`.")
     pricing_warning = pricing_snapshot_warning(points[-1].until)
     if pricing_warning:

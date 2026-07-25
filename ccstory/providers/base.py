@@ -27,6 +27,25 @@ class BaseAgentProvider(ABC):
         """Identifier for the agent (e.g. ``claude``, ``codex``)."""
 
     @abstractmethod
+    def data_roots(self) -> tuple[Path, ...]:
+        """Directories that may contain this provider's transcripts.
+
+        The recap preflight uses this provider-owned declaration to decide
+        whether data exists before collection starts. Keep every supported
+        location here so collection and availability checks cannot drift
+        apart (for example, Codex has both live and archived roots).
+        """
+
+    @abstractmethod
+    def extract_excerpt(self, path: Path) -> tuple[str, str]:
+        """Return ``(project, bounded user-facing excerpt)`` for one transcript.
+
+        Summary generation calls this through the provider selected for the
+        session. New transcript formats therefore stay inside their provider
+        module instead of adding format branches to ``session_summarizer``.
+        """
+
+    @abstractmethod
     def collect_sessions(
         self,
         since: datetime,
@@ -48,7 +67,10 @@ class BaseAgentProvider(ABC):
     ) -> int:
         """Collect token usage for sessions in [since, until] into by_model dictionary.
 
-        Returns the count of assistant turns processed.
+        Returns the count of assistant turns with exact usage processed. Never
+        synthesize tokens from character counts or other heuristics. A provider
+        whose normal logs lack exact usage returns zero and declares partial or
+        unavailable coverage in its ``AgentProviderSpec``.
         """
 
     def transcript_path(self, sess: SessionStat) -> Path | None:

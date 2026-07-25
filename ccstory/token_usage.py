@@ -1,4 +1,4 @@
-"""Aggregate Claude token usage from ~/.claude/projects/**/*.jsonl.
+"""Aggregate token usage across registered coding-agent providers.
 
 Each assistant message carries a `usage` block with input / cache_creation /
 cache_read / output token counts. We sum these per model over a date range,
@@ -327,6 +327,40 @@ class UsageReport:
     until: datetime
     by_model: dict[str, ModelUsage] = field(default_factory=dict)
     assistant_turns: int = 0
+    provider_coverage: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def usage_complete(self) -> bool:
+        """Whether every selected provider exposed complete exact usage."""
+        return all(
+            coverage == "complete"
+            for coverage in self.provider_coverage.values()
+        )
+
+    @property
+    def incomplete_agents(self) -> list[str]:
+        """Selected active providers without complete exact usage."""
+        return sorted(
+            name
+            for name, coverage in self.provider_coverage.items()
+            if coverage != "complete"
+        )
+
+    @property
+    def partial_agents(self) -> list[str]:
+        return sorted(
+            name
+            for name, coverage in self.provider_coverage.items()
+            if coverage == "partial"
+        )
+
+    @property
+    def unavailable_agents(self) -> list[str]:
+        return sorted(
+            name
+            for name, coverage in self.provider_coverage.items()
+            if coverage == "unavailable"
+        )
 
     @property
     def total_input(self) -> int:
@@ -383,14 +417,18 @@ def collect_usage(
     since: datetime,
     until: datetime | None = None,
     agent: str = "all",
+    active_agents: set[str] | None = None,
 ) -> UsageReport:
     """Scan session files and aggregate token usage in [since, until].
 
     Both bounds are normalized to UTC for comparison against the tz-aware
     UTC timestamps in jsonl. Naive inputs are treated as UTC (not system
-    local) so test behavior is deterministic across hosts.
+    local) so test behavior is deterministic across hosts. ``active_agents``
+    is the session-derived population for this exact window; when supplied,
+    dormant registered providers do not create false incomplete-coverage
+    warnings.
     """
-    from .providers import _PROVIDERS, list_providers
+    from .providers import create_providers, provider_specs
 
     if since.tzinfo is None:
         since = since.replace(tzinfo=timezone.utc)
@@ -403,24 +441,23 @@ def collect_usage(
     else:
         until = until.astimezone(timezone.utc)
 
-    if agent == "all":
-        providers_to_run = [cls() for cls in _PROVIDERS.values()]
-    elif agent in _PROVIDERS:
-        providers_to_run = [_PROVIDERS[agent]()]
-    else:
-        raise ValueError(
-            f"Unsupported agent filter '{agent}'. "
-            f"Expected 'all' or one of {list_providers()}"
-        )
-
+    specs = provider_specs(agent)
     by_model: dict[str, ModelUsage] = {}
     assistant_turns = 0
 
-    for provider in providers_to_run:
+    for provider in create_providers(agent):
         assistant_turns += provider.collect_usage(since, until, by_model)
 
     return UsageReport(
-        since=since, until=until, by_model=by_model, assistant_turns=assistant_turns
+        since=since,
+        until=until,
+        by_model=by_model,
+        assistant_turns=assistant_turns,
+        provider_coverage={
+            spec.name: spec.usage_coverage
+            for spec in specs
+            if active_agents is None or spec.name in active_agents
+        },
     )
 
 

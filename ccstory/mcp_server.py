@@ -55,7 +55,7 @@ mcp = FastMCP("ccstory")
 
 Window = Literal["week", "month", "all"] | str
 Classify = Literal["folder", "content", "hybrid"]
-Agent = Literal["all", "claude", "codex"]
+Agent = str
 
 # "folder" is the only classify mode that never fires an LLM call (content/
 # hybrid batch-classify claude -p on cache misses) — same choice
@@ -189,7 +189,7 @@ def get_recap(
     `narrative` are null unless `allow_llm=True`. Pass `classify="content"`
     or `"hybrid"`, and/or `allow_llm=True`, to opt into LLM-assisted
     classification / narrative synthesis (slower, may cost tokens).
-    `agent` selects all providers or only Claude Code / OpenAI Codex data.
+    `agent` selects all providers or one registered provider id.
     """
     try:
         result = build_recap(
@@ -259,7 +259,12 @@ def compare_to_previous(
         # overrides some *other* call in this process happened to apply.
         prices, snapshot, provenance = load_prices_config(recap.CONFIG_PATH)
         apply_prices(prices, snapshot, provenance)
-        usage = collect_usage(since, until, agent=agent)
+        usage = collect_usage(
+            since,
+            until,
+            agent=agent,
+            active_agents={session.agent for session in sessions},
+        )
         cmp = _compare_to_previous(
             current_sessions=sessions,
             current_rollups=rollups,

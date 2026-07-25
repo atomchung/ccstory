@@ -24,6 +24,8 @@ from pathlib import Path
 
 from ..time_tracking import GAP_CAP_SEC, SessionStat, _parse_ts
 from .base import BaseAgentProvider
+from .excerpts import build_excerpt, include_message
+from .projects import encode_project_dir, worktree_origin
 
 # Payload types whose timestamps count as "the agent was working". Bookkeeping
 # events (`token_count`, `task_started`, ...) are skipped so the gap-sum stays
@@ -36,61 +38,6 @@ _ROLLOUT_ID_RE = re.compile(
     r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
     re.IGNORECASE,
 )
-
-
-def _encode_project_dir(cwd: str) -> str:
-    """Render a cwd the way Claude Code names its project folders.
-
-    ``/Users/a/Side_project/ccstory`` → ``-Users-a-Side-project-ccstory``.
-    Codex has no project folder of its own, so we mint the identifier Claude
-    Code *would* have used: every downstream consumer (categorizer buckets,
-    ``[projects]`` aliases, the layer-2 rollup) already runs
-    ``normalize_project_name`` over that shape, so the same repo lands in the
-    same bucket no matter which agent worked in it.
-    """
-    return (
-        str(cwd)
-        .replace("\\", "-")  # Windows transcripts record backslash paths
-        .replace("/", "-")
-        .replace(".", "-")
-        .replace("_", "-")
-    )
-
-
-def _worktree_origin(cwd: str) -> str:
-    """Fold a git worktree checkout back onto the repo it was created from.
-
-    Codex parks its own worktrees at ``~/.codex/worktrees/<hash>/<repo>``,
-    entirely outside the repo — so unlike Claude Code's in-repo
-    ``.claude/worktrees/<name>`` (which ``normalize_project_name`` strips by
-    pattern) the parent path is not recoverable from the string alone. It *is*
-    recoverable from git: a linked worktree's ``.git`` is a file pointing at
-    ``<repo>/.git/worktrees/<name>``.
-
-    Returns the origin repo path, or ``cwd`` unchanged when this is not a
-    linked worktree / the checkout has since been pruned.
-    """
-    if not cwd:
-        return cwd
-    pointer = Path(cwd) / ".git"
-    try:
-        if not pointer.is_file():
-            return cwd
-        line = pointer.read_text(encoding="utf-8", errors="ignore").strip()
-    except OSError:
-        return cwd
-    if not line.startswith("gitdir:"):
-        return cwd
-    gitdir = Path(line[len("gitdir:"):].strip())
-    parts = gitdir.parts
-    try:
-        # <repo>/.git/worktrees/<name>  →  <repo>
-        idx = len(parts) - 1 - parts[::-1].index("worktrees")
-    except ValueError:
-        return cwd
-    if idx < 2 or parts[idx - 1] != ".git":
-        return cwd
-    return str(Path(*parts[: idx - 1]))
 
 
 def is_subagent_meta(meta: dict) -> bool:
@@ -154,11 +101,64 @@ class CodexProvider(BaseAgentProvider):
     def agent_name(self) -> str:
         return "codex"
 
+    def data_roots(self) -> tuple[Path, ...]:
+        return (
+            self.codex_dir / "sessions",
+            self.codex_dir / "archived_sessions",
+        )
+
+    def extract_excerpt(self, jsonl_path: Path) -> tuple[str, str]:
+        user_msgs: list[str] = []
+        assistant_msgs: list[str] = []
+        cwd = ""
+
+        try:
+            with jsonl_path.open(encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    payload = record.get("payload")
+                    if not isinstance(payload, dict):
+                        continue
+                    if not cwd and isinstance(payload.get("cwd"), str):
+                        cwd = payload["cwd"]
+
+                    kind = record.get("type")
+                    ptype = payload.get("type")
+                    role: str | None = None
+                    text = ""
+                    if kind == "event_msg" and ptype == "user_message":
+                        role = "user"
+                        text = strip_task_wrapper(
+                            _codex_text(payload.get("message", ""))
+                        )
+                    elif (
+                        kind == "response_item"
+                        and ptype == "message"
+                        and payload.get("role") == "assistant"
+                    ):
+                        role = "assistant"
+                        text = _codex_text(payload.get("content", ""))
+
+                    text = text.strip()
+                    if role is None or not include_message(text):
+                        continue
+                    if role == "user":
+                        user_msgs.append(text[:500])
+                    else:
+                        assistant_msgs.append(text[:500])
+        except OSError:
+            return jsonl_path.parent.name, ""
+
+        project = jsonl_path.parent.name
+        if cwd:
+            project = encode_project_dir(worktree_origin(cwd)) or project
+        return project, build_excerpt(user_msgs, assistant_msgs)
+
     def _transcript_globs(self) -> list[str]:
-        return [
-            str(self.codex_dir / "sessions" / "**" / "*.jsonl"),
-            str(self.codex_dir / "archived_sessions" / "**" / "*.jsonl"),
-        ]
+        return [str(root / "**" / "*.jsonl") for root in self.data_roots()]
 
     def parse_session(self, jsonl_path: Path) -> SessionStat | None:
         """Parse one Codex rollout transcript into a SessionStat."""
@@ -251,7 +251,7 @@ class CodexProvider(BaseAgentProvider):
             active_sec += min(gap, GAP_CAP_SEC)
 
         return SessionStat(
-            project=_encode_project_dir(_worktree_origin(cwd)) if cwd else "codex",
+            project=encode_project_dir(worktree_origin(cwd)) if cwd else "codex",
             # Left empty on purpose — see ClaudeCodeProvider.parse_session.
             category="",
             session_id=session_id or jsonl_path.stem,
