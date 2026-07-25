@@ -17,8 +17,8 @@ from pathlib import Path
 
 from ..time_tracking import GAP_CAP_SEC, SessionStat, _parse_ts
 from .base import BaseAgentProvider
-from .codex import _encode_project_dir, _worktree_origin
 from .excerpts import build_excerpt, include_message
+from .projects import encode_project_dir, worktree_origin
 
 
 def extract_user_request_text(text: str) -> str:
@@ -119,7 +119,7 @@ class AntigravityProvider(BaseAgentProvider):
         db_path = self.antigravity_dir / "conversations" / f"{session_id}.db"
         cwd = extract_cwd_from_db(db_path)
         project = (
-            _encode_project_dir(_worktree_origin(cwd)) if cwd else "antigravity"
+            encode_project_dir(worktree_origin(cwd)) if cwd else "antigravity"
         )
 
         try:
@@ -205,7 +205,7 @@ class AntigravityProvider(BaseAgentProvider):
             active_sec += min(gap, GAP_CAP_SEC)
 
         project = (
-            _encode_project_dir(_worktree_origin(cwd)) if cwd else "antigravity"
+            encode_project_dir(worktree_origin(cwd)) if cwd else "antigravity"
         )
 
         return SessionStat(
