@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Callable, Literal
 
 from ..time_tracking import SessionStat
+from .antigravity import AntigravityProvider
 from .base import BaseAgentProvider
 from .claude import ClaudeCodeProvider
 from .codex import CodexProvider
@@ -60,6 +61,9 @@ def register_provider(spec: AgentProviderSpec, *, replace: bool = False) -> None
 
 register_provider(AgentProviderSpec("claude", "Claude Code", ClaudeCodeProvider))
 register_provider(AgentProviderSpec("codex", "OpenAI Codex", CodexProvider))
+register_provider(
+    AgentProviderSpec("antigravity", "Google Antigravity", AntigravityProvider)
+)
 
 
 def provider_specs(agent: str = "all") -> list[AgentProviderSpec]:

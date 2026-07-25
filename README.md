@@ -132,6 +132,7 @@ flow after the live debug session on Wednesday.
 | `--agent all` (default) | Every agent ccstory can read |
 | `--agent claude` | Claude Code only (`~/.claude/projects`) |
 | `--agent codex` | OpenAI Codex only (`~/.codex/sessions`) |
+| `--agent antigravity` | Google Antigravity only (`~/.gemini/antigravity/brain`) |
 
 Also accepted by `ccstory trend`, so a trend line and a week over the same range
 describe the same population. See [Multiple coding agents](#multiple-coding-agents)
