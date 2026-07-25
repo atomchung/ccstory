@@ -160,20 +160,39 @@ class TestAntigravityParsing:
         assert stat is not None
         assert stat.active_sec == 300
 
-    def test_sqlite_cwd_extraction(self, tmp_path):
+    def test_sqlite_cwd_extraction_uses_read_only_uri(
+        self, tmp_path, monkeypatch
+    ):
         db_path = tmp_path / "test.db"
         conn = sqlite3.connect(db_path)
         c = conn.cursor()
         c.execute("CREATE TABLE trajectory_metadata_blob (id TEXT, data BLOB);")
         c.execute(
             "INSERT INTO trajectory_metadata_blob VALUES ('main', ?)",
-            ("prefix file:///Users/test/项目 With Space\x12".encode("utf-8"),),
+            (
+                b"prefix file:///Users/test/"
+                b"%E9%A1%B9%E7%9B%AE%20With%20Space\x12",
+            ),
         )
         conn.commit()
         conn.close()
+        real_connect = sqlite3.connect
+        calls: list[tuple[object, dict]] = []
+
+        def tracking_connect(database, *args, **kwargs):
+            calls.append((database, kwargs))
+            return real_connect(database, *args, **kwargs)
+
+        monkeypatch.setattr(
+            "ccstory.providers.antigravity.sqlite3.connect",
+            tracking_connect,
+        )
 
         extracted = extract_cwd_from_db(db_path)
+
         assert extracted == "/Users/test/项目 With Space"
+        assert "mode=ro" in str(calls[0][0])
+        assert calls[0][1]["uri"] is True
 
     def test_non_string_content_is_ignored(self, antigravity_factory, tmp_home):
         malformed = _user("ignored", 1)
@@ -320,6 +339,32 @@ class TestAntigravityExcerptExtraction:
         assert project == "-Users-x-Side-project-ccstory"
         assert "[USER 1]\nFirst user request" in excerpt
         assert "[ASSISTANT END]\nFirst planner response" in excerpt
+
+    def test_model_tool_events_are_not_narrative_assistant_text(
+        self, antigravity_factory, tmp_home
+    ):
+        tool_event = {
+            "source": "MODEL",
+            "type": "VIEW_FILE",
+            "created_at": _ts(2),
+            "content": "SECRET_FILE_CONTENT",
+        }
+        path = antigravity_factory(
+            SID,
+            [
+                _user("Review the provider", 1),
+                _planner("Safe final response", 2),
+                tool_event,
+            ],
+        )
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
+
+        _, excerpt = provider.extract_excerpt(path)
+
+        assert "Safe final response" in excerpt
+        assert "SECRET_FILE_CONTENT" not in excerpt
 
 
 class TestAntigravityRegistryContracts:

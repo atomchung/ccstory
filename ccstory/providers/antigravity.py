@@ -14,6 +14,7 @@ import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import unquote
 
 from ..time_tracking import GAP_CAP_SEC, SessionStat, _parse_ts
 from .base import BaseAgentProvider
@@ -58,7 +59,8 @@ def extract_cwd_from_db(db_path: Path) -> str:
     if not db_path.exists():
         return ""
     try:
-        with contextlib.closing(sqlite3.connect(db_path)) as conn:
+        uri = f"{db_path.resolve().as_uri()}?mode=ro"
+        with contextlib.closing(sqlite3.connect(uri, uri=True)) as conn:
             c = conn.cursor()
             rows = c.execute("SELECT data FROM trajectory_metadata_blob;").fetchall()
             for row in rows:
@@ -66,7 +68,10 @@ def extract_cwd_from_db(db_path: Path) -> str:
                 if isinstance(data, bytes):
                     matches = re.findall(rb'file://(/[^\x00-\x1f"]+)', data)
                     if matches:
-                        return matches[0].decode("utf-8", errors="ignore").strip()
+                        encoded = matches[0].decode(
+                            "utf-8", errors="ignore"
+                        ).strip()
+                        return unquote(encoded)
     except (sqlite3.Error, OSError):
         pass
     return ""
@@ -137,11 +142,17 @@ class AntigravityProvider(BaseAgentProvider):
                     source = d.get("source")
                     content = _content_text(d.get("content"))
 
-                    if stype == "USER_INPUT" or source == "USER_EXPLICIT":
+                    is_user = stype == "USER_INPUT" or (
+                        stype is None and source == "USER_EXPLICIT"
+                    )
+                    is_assistant = stype == "PLANNER_RESPONSE" or (
+                        stype is None and source == "MODEL"
+                    )
+                    if is_user:
                         text = extract_user_request_text(content)
                         if include_message(text):
                             user_msgs.append(text[:500])
-                    elif stype == "PLANNER_RESPONSE" or source == "MODEL":
+                    elif is_assistant:
                         text = content.strip()
                         if include_message(text):
                             assistant_msgs.append(text[:500])
@@ -180,13 +191,16 @@ class AntigravityProvider(BaseAgentProvider):
                     if ts:
                         timestamps.append(ts)
 
-                    if stype in ("USER_INPUT", "PLANNER_RESPONSE") or source in (
-                        "USER_EXPLICIT",
-                        "MODEL",
-                    ):
+                    is_user = stype == "USER_INPUT" or (
+                        stype is None and source == "USER_EXPLICIT"
+                    )
+                    is_assistant = stype == "PLANNER_RESPONSE" or (
+                        stype is None and source == "MODEL"
+                    )
+                    if is_user or is_assistant:
                         msg_count += 1
 
-                    if stype == "USER_INPUT" or source == "USER_EXPLICIT":
+                    if is_user:
                         text = extract_user_request_text(content)
                         if include_message(text):
                             user_msg_count += 1
@@ -257,7 +271,10 @@ class AntigravityProvider(BaseAgentProvider):
                         stype = d.get("type")
                         source = d.get("source")
 
-                        if stype == "PLANNER_RESPONSE" or source == "MODEL":
+                        is_assistant = stype == "PLANNER_RESPONSE" or (
+                            stype is None and source == "MODEL"
+                        )
+                        if is_assistant:
                             ts_raw = d.get("created_at")
                             if not ts_raw:
                                 continue
