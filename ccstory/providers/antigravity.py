@@ -33,6 +33,26 @@ def extract_user_request_text(text: str) -> str:
     return stripped.strip()
 
 
+def _content_text(value: object) -> str:
+    """Text payload from the string or text-part shapes seen in step logs."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "\n".join(
+            part["text"]
+            for part in value
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
+        )
+    return ""
+
+
+def _exact_token_count(value: object) -> int | None:
+    """A real non-negative JSON integer, never a heuristic conversion."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
 def extract_cwd_from_db(db_path: Path) -> str:
     """Extract launch CWD from an Antigravity conversation database if present."""
     if not db_path.exists():
@@ -44,9 +64,9 @@ def extract_cwd_from_db(db_path: Path) -> str:
             for row in rows:
                 data = row[0]
                 if isinstance(data, bytes):
-                    matches = re.findall(rb"file://(/[^ \x00-\x1f\x7f-\xff\"]+)", data)
+                    matches = re.findall(rb'file://(/[^\x00-\x1f"]+)', data)
                     if matches:
-                        return matches[0].decode("utf-8", errors="ignore")
+                        return matches[0].decode("utf-8", errors="ignore").strip()
     except (sqlite3.Error, OSError):
         pass
     return ""
@@ -115,7 +135,7 @@ class AntigravityProvider(BaseAgentProvider):
 
                     stype = d.get("type")
                     source = d.get("source")
-                    content = d.get("content", "") or ""
+                    content = _content_text(d.get("content"))
 
                     if stype == "USER_INPUT" or source == "USER_EXPLICIT":
                         text = extract_user_request_text(content)
@@ -154,7 +174,7 @@ class AntigravityProvider(BaseAgentProvider):
 
                     stype = d.get("type")
                     source = d.get("source")
-                    content = d.get("content", "") or ""
+                    content = _content_text(d.get("content"))
 
                     ts = _parse_ts(d.get("created_at"))
                     if ts:
@@ -168,7 +188,7 @@ class AntigravityProvider(BaseAgentProvider):
 
                     if stype == "USER_INPUT" or source == "USER_EXPLICIT":
                         text = extract_user_request_text(content)
-                        if text and not text.startswith("<") and "tool_use_id" not in text:
+                        if include_message(text):
                             user_msg_count += 1
                             if not first_user_text:
                                 first_user_text = text[:200]
@@ -211,10 +231,11 @@ class AntigravityProvider(BaseAgentProvider):
         until: datetime,
         by_model: dict,
     ) -> int:
-        """Scan all Antigravity jsonl transcripts and aggregate token usage in [since, until].
+        """Collect exact usage fields present in Antigravity step logs.
 
         Standard Antigravity logs do not contain precise token usage fields.
-        Returns 0 without modifying by_model unless explicit usage fields are present.
+        Returns 0 without modifying ``by_model`` unless explicit fields are
+        present; the provider descriptor therefore declares partial coverage.
         """
         from ..token_usage import ModelUsage
 
@@ -246,15 +267,33 @@ class AntigravityProvider(BaseAgentProvider):
 
                             usage = d.get("usage")
                             if isinstance(usage, dict):
-                                inp = usage.get("input_tokens") or usage.get("prompt_tokens")
-                                out = usage.get("output_tokens") or usage.get("completion_tokens")
+                                inp_raw = (
+                                    usage["input_tokens"]
+                                    if "input_tokens" in usage
+                                    else usage.get("prompt_tokens")
+                                )
+                                out_raw = (
+                                    usage["output_tokens"]
+                                    if "output_tokens" in usage
+                                    else usage.get("completion_tokens")
+                                )
+                                inp = _exact_token_count(inp_raw)
+                                out = _exact_token_count(out_raw)
                                 model = usage.get("model") or d.get("model")
 
-                                if inp is not None and out is not None and model:
-                                    mu = by_model.setdefault(model, ModelUsage(model=model))
+                                if (
+                                    inp is not None
+                                    and out is not None
+                                    and isinstance(model, str)
+                                    and model.strip()
+                                ):
+                                    model = model.strip()
+                                    mu = by_model.setdefault(
+                                        model, ModelUsage(model=model)
+                                    )
                                     mu.turns += 1
-                                    mu.input_tokens += int(inp)
-                                    mu.output_tokens += int(out)
+                                    mu.input_tokens += inp
+                                    mu.output_tokens += out
                                     assistant_turns += 1
             except OSError:
                 continue

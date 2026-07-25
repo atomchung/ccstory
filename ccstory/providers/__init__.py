@@ -62,7 +62,12 @@ def register_provider(spec: AgentProviderSpec, *, replace: bool = False) -> None
 register_provider(AgentProviderSpec("claude", "Claude Code", ClaudeCodeProvider))
 register_provider(AgentProviderSpec("codex", "OpenAI Codex", CodexProvider))
 register_provider(
-    AgentProviderSpec("antigravity", "Google Antigravity", AntigravityProvider)
+    AgentProviderSpec(
+        "antigravity",
+        "Google Antigravity",
+        AntigravityProvider,
+        usage_coverage="partial",
+    )
 )
 
 

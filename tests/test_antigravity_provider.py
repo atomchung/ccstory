@@ -1,4 +1,4 @@
-"""Antigravity session provider tests: parsing, SQLite attribution, token usage, excerpts, and registry integration."""
+"""Antigravity session parsing, attribution, usage, and registry contracts."""
 
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ def _planner(text: str, minute: int, thinking: str = "") -> dict:
 
 @pytest.fixture
 def antigravity_factory(tmp_home: Path):
-    """Write an Antigravity transcript and companion SQLite DB into fake home. Returns transcript path."""
+    """Write an Antigravity transcript and companion DB into the fake home."""
 
     def _make(
         session_id: str, records: list[dict], cwd: str | None = None
@@ -103,7 +103,9 @@ SID = "076447e4-3f6c-42e0-ada8-e1ade38b7706"
 
 
 class TestAntigravityParsing:
-    def test_reads_user_turns_and_unwraps_user_request(self, antigravity_factory, tmp_home):
+    def test_reads_user_turns_and_unwraps_user_request(
+        self, antigravity_factory, tmp_home
+    ):
         path = antigravity_factory(
             SID,
             [
@@ -113,7 +115,9 @@ class TestAntigravityParsing:
             ],
             cwd="/Users/x/Side_project/ccstory",
         )
-        provider = AntigravityProvider(antigravity_dir=tmp_home / ".gemini" / "antigravity")
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
         stat = provider.parse_session(path)
 
         assert stat is not None
@@ -124,7 +128,10 @@ class TestAntigravityParsing:
         assert stat.path == path
 
     def test_unwraps_user_request_helper(self):
-        raw = "<USER_REQUEST>\nFix bug in parser\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\ntime: 12:00\n</ADDITIONAL_METADATA>"
+        raw = (
+            "<USER_REQUEST>\nFix bug in parser\n</USER_REQUEST>\n"
+            "<ADDITIONAL_METADATA>\ntime: 12:00\n</ADDITIONAL_METADATA>"
+        )
         assert extract_user_request_text(raw) == "Fix bug in parser"
 
     def test_default_project_when_no_cwd(self, antigravity_factory, tmp_home):
@@ -132,7 +139,9 @@ class TestAntigravityParsing:
             SID,
             [_user("Hello", 1), _planner("Hi there", 2)],
         )
-        provider = AntigravityProvider(antigravity_dir=tmp_home / ".gemini" / "antigravity")
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
         stat = provider.parse_session(path)
         assert stat is not None
         assert stat.project == "antigravity"
@@ -144,7 +153,9 @@ class TestAntigravityParsing:
             [_user("start", 0), _planner("working", 10)],
             cwd="/Users/x/demo",
         )
-        provider = AntigravityProvider(antigravity_dir=tmp_home / ".gemini" / "antigravity")
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
         stat = provider.parse_session(path)
         assert stat is not None
         assert stat.active_sec == 300
@@ -156,17 +167,35 @@ class TestAntigravityParsing:
         c.execute("CREATE TABLE trajectory_metadata_blob (id TEXT, data BLOB);")
         c.execute(
             "INSERT INTO trajectory_metadata_blob VALUES ('main', ?)",
-            (b"foo file:///Users/test/project bar",),
+            ("prefix file:///Users/test/项目 With Space\x12".encode("utf-8"),),
         )
         conn.commit()
         conn.close()
 
         extracted = extract_cwd_from_db(db_path)
-        assert extracted == "/Users/test/project"
+        assert extracted == "/Users/test/项目 With Space"
+
+    def test_non_string_content_is_ignored(self, antigravity_factory, tmp_home):
+        malformed = _user("ignored", 1)
+        malformed["content"] = {"text": "unsupported shape"}
+        path = antigravity_factory(
+            SID,
+            [malformed, _planner("valid response", 2)],
+        )
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
+
+        stat = provider.parse_session(path)
+
+        assert stat is not None
+        assert stat.user_msg_count == 0
 
 
 class TestAntigravityUsageCollection:
-    def test_returns_zero_when_no_explicit_tokens(self, antigravity_factory, tmp_home):
+    def test_returns_zero_when_no_explicit_tokens(
+        self, antigravity_factory, tmp_home
+    ):
         antigravity_factory(
             SID,
             [
@@ -178,13 +207,17 @@ class TestAntigravityUsageCollection:
         since = datetime(2026, 7, 1, tzinfo=timezone.utc)
         until = datetime(2026, 7, 30, tzinfo=timezone.utc)
 
-        provider = AntigravityProvider(antigravity_dir=tmp_home / ".gemini" / "antigravity")
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
         by_model: dict = {}
         turns = provider.collect_usage(since, until, by_model)
         assert turns == 0
         assert len(by_model) == 0
 
-    def test_collects_tokens_when_explicit_usage_present(self, antigravity_factory, tmp_home):
+    def test_collects_tokens_when_explicit_usage_present(
+        self, antigravity_factory, tmp_home
+    ):
         rec = _planner("Hello", 2)
         rec["usage"] = {
             "model": "gemini-3.6-flash",
@@ -196,7 +229,9 @@ class TestAntigravityUsageCollection:
         since = datetime(2026, 7, 1, tzinfo=timezone.utc)
         until = datetime(2026, 7, 30, tzinfo=timezone.utc)
 
-        provider = AntigravityProvider(antigravity_dir=tmp_home / ".gemini" / "antigravity")
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
         by_model: dict = {}
         turns = provider.collect_usage(since, until, by_model)
         assert turns == 1
@@ -204,9 +239,39 @@ class TestAntigravityUsageCollection:
         assert by_model["gemini-3.6-flash"].input_tokens == 100
         assert by_model["gemini-3.6-flash"].output_tokens == 50
 
+    @pytest.mark.parametrize(
+        "bad_usage",
+        [
+            {"model": "gemini", "input_tokens": "100", "output_tokens": 50},
+            {"model": "gemini", "input_tokens": -1, "output_tokens": 50},
+            {"model": {}, "input_tokens": 100, "output_tokens": 50},
+        ],
+    )
+    def test_invalid_usage_is_ignored(
+        self, antigravity_factory, tmp_home, bad_usage
+    ):
+        rec = _planner("Hello", 2)
+        rec["usage"] = bad_usage
+        antigravity_factory(SID, [_user("Hi", 1), rec])
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
+
+        by_model: dict = {}
+        turns = provider.collect_usage(
+            datetime(2026, 7, 1, tzinfo=timezone.utc),
+            datetime(2026, 7, 30, tzinfo=timezone.utc),
+            by_model,
+        )
+
+        assert turns == 0
+        assert by_model == {}
+
 
 class TestAntigravityMultiAgentCollection:
-    def test_collects_antigravity_and_multi_agent(self, antigravity_factory, tmp_home):
+    def test_collects_antigravity_and_multi_agent(
+        self, antigravity_factory, tmp_home
+    ):
         antigravity_factory(
             SID,
             [_user("test multi agent", 1), _planner("ok", 3)],
@@ -229,7 +294,9 @@ class TestAntigravityTranscriptResolution:
             [_user("query", 1), _planner("ans", 2)],
             cwd="/Users/x/demo",
         )
-        provider = AntigravityProvider(antigravity_dir=tmp_home / ".gemini" / "antigravity")
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
         stat = provider.parse_session(path)
         assert stat is not None
         resolver = TranscriptResolver()
@@ -246,7 +313,9 @@ class TestAntigravityExcerptExtraction:
             ],
             cwd="/Users/x/Side_project/ccstory",
         )
-        provider = AntigravityProvider(antigravity_dir=tmp_home / ".gemini" / "antigravity")
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
         project, excerpt = provider.extract_excerpt(path)
         assert project == "-Users-x-Side-project-ccstory"
         assert "[USER 1]\nFirst user request" in excerpt
@@ -262,6 +331,13 @@ class TestAntigravityRegistryContracts:
 
         data_roots = _agent_data_roots("antigravity")
         assert any(name == "antigravity" for name, _ in data_roots)
+        usage = collect_usage(
+            datetime(2026, 7, 1, tzinfo=timezone.utc),
+            datetime(2026, 7, 30, tzinfo=timezone.utc),
+            agent="antigravity",
+        )
+        assert usage.incomplete_agents == ["antigravity"]
+        assert not usage.usage_complete
 
         with pytest.raises(SystemExit) as excinfo:
             cli.main(["week", "--help"])
