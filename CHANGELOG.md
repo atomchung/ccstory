@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Google Antigravity session provider adapter (`--agent antigravity`), reading
+  transcripts under `~/.gemini/antigravity/brain` while explicitly marking
+  token and cost coverage incomplete when exact usage is unavailable.
 - Coding-agent sources now register one provider descriptor and own their data
   roots plus narrative-excerpt parsing. CLI, MCP, reports, session collection,
   usage aggregation, and availability checks derive from the same registry, so

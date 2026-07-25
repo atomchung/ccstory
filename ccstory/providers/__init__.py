@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable, Literal
 
 from ..time_tracking import SessionStat
+from .antigravity import AntigravityProvider
 from .base import BaseAgentProvider
 from .claude import ClaudeCodeProvider
 from .codex import CodexProvider
@@ -79,6 +80,14 @@ register_provider(
         "OpenAI Codex",
         CodexProvider,
         usage_coverage="complete",
+    )
+)
+register_provider(
+    AgentProviderSpec(
+        "antigravity",
+        "Google Antigravity",
+        AntigravityProvider,
+        usage_coverage="partial",
     )
 )
 

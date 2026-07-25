@@ -1,8 +1,9 @@
 # ccstory
 
 > **Your AI coding-agent week, in plain English.**
-> Reads local Claude Code and OpenAI Codex session logs and writes a categorized
-> recap with active hours, costs, and a per-bucket narrative.
+> Reads local Claude Code, OpenAI Codex, and Google Antigravity session logs
+> and writes a categorized recap with active hours, costs, and a per-bucket
+> narrative.
 
 Sibling to [ccusage](https://github.com/ryoppippi/ccusage):
 **ccusage tells you how much you spent · ccstory tells you what on.**
@@ -132,6 +133,7 @@ flow after the live debug session on Wednesday.
 | `--agent all` (default) | Every agent ccstory can read |
 | `--agent claude` | Claude Code only (`~/.claude/projects`) |
 | `--agent codex` | OpenAI Codex only (`~/.codex/sessions`) |
+| `--agent antigravity` | Google Antigravity only (`~/.gemini/antigravity/brain`) |
 
 Also accepted by `ccstory trend`, so a trend line and a week over the same range
 describe the same population. See [Multiple coding agents](#multiple-coding-agents)
@@ -249,9 +251,10 @@ reruns are free.
 
 ## Multiple coding agents
 
-ccstory reads Claude Code (`~/.claude/projects`) and OpenAI Codex
-(`~/.codex/sessions`, plus `archived_sessions`) by default. Codex sessions are
-attributed to a project from the `cwd` the transcript records, folded through
+ccstory reads Claude Code (`~/.claude/projects`), OpenAI Codex
+(`~/.codex/sessions`, plus `archived_sessions`), and Google Antigravity
+(`~/.gemini/antigravity/brain`) by default. Codex and Antigravity sessions are
+attributed to a project from the `cwd` their metadata records, folded through
 the same rules Claude Code project folders get — including git worktrees, so a
 detached checkout counts toward the repo it came from rather than becoming its
 own one-off project.
@@ -279,12 +282,14 @@ per-agent time added up to 177h against a deduplicated wall clock of 64h. So:
 - **`N× parallel`** is raw agent time ÷ wall clock: how much of the work
   overlapped.
 
-Token usage and costs cover both shipped providers. Claude Code and OpenAI
-Codex input, cache, and output tokens are converted through the vendored model
-price table; models without a known rate remain visible and make the cost
-estimate warn that it is incomplete.
+Token usage and costs fully cover Claude Code and OpenAI Codex. Standard
+Antigravity step logs do not expose complete exact token usage, so ccstory never
+guesses from character counts; reports mark token and cost totals incomplete
+whenever Antigravity is in scope. Models with exact tokens but no known rate
+remain visible and trigger a separate missing-price warning.
 
-Use `--agent claude` or `--agent codex` to isolate one provider.
+Use `--agent claude`, `--agent codex`, or `--agent antigravity` to isolate one
+provider.
 
 ## What shipped
 
@@ -498,7 +503,11 @@ What-shipped metadata providers. There is no ccstory telemetry or account.
 
 - **Data source**: Claude Code logs under
   `~/.claude/projects/**/*.jsonl`, plus Codex live and archived rollouts under
-  `~/.codex/{sessions,archived_sessions}/**/*.jsonl`.
+  `~/.codex/{sessions,archived_sessions}/**/*.jsonl`, plus Antigravity step
+  logs under
+  `~/.gemini/antigravity/brain/*/.system_generated/logs/transcript.jsonl`
+  and companion project metadata under
+  `~/.gemini/antigravity/conversations/*.db`.
 - **Narratives and classification**: subprocess-call your locally installed
   `claude -p`. The Claude CLI contacts Anthropic using your signed-in session
   and plan quota; ccstory does not use your API key or operate a proxy.
