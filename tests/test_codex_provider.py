@@ -9,7 +9,8 @@ from pathlib import Path
 import pytest
 
 from ccstory.providers import TranscriptResolver, collect_multi_agent_sessions
-from ccstory.providers.codex import CodexProvider, _encode_project_dir
+from ccstory.providers.codex import CodexProvider
+from ccstory.providers.projects import encode_project_dir
 
 
 def _ts(minute: int) -> str:
@@ -183,7 +184,7 @@ class TestCodexParsing:
 class TestCodexProjectAttribution:
     def test_cwd_is_encoded_like_a_claude_project_dir(self):
         assert (
-            _encode_project_dir("/Users/atomo/Side_project/investment_note")
+            encode_project_dir("/Users/atomo/Side_project/investment_note")
             == "-Users-atomo-Side-project-investment-note"
         )
 

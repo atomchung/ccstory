@@ -18,7 +18,6 @@ import os
 import re
 import sqlite3
 import statistics
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -41,7 +40,7 @@ from .categorizer import (
     normalize_project_name,
     resolve_session_bucket,
 )
-from .providers import TranscriptResolver, agent_label, list_providers
+from .providers import TranscriptResolver, agent_label, provider_data_roots
 from .report import build_report_json, render_report
 from .session_summarizer import (
     CCSTORY_LANG_ENV,
@@ -461,8 +460,13 @@ def _backfill_summaries(
                 counts["skipped"] += 1
                 progress.advance(task)
                 continue
-            result = summarize_session(sid, jsonl_path, use_llm=use_llm,
-                                       force=force)
+            result = summarize_session(
+                sid,
+                jsonl_path,
+                use_llm=use_llm,
+                force=force,
+                provider=resolver.provider_for(sess),
+            )
             if result and result.source == "auto":
                 counts["summarized"] += 1
                 latest = result.summary
@@ -475,36 +479,9 @@ def _backfill_summaries(
     return counts
 
 
-# Where each provider's transcripts live, for the "have you used it yet?" check
-# only — collection itself goes through the provider. Callables, not values, so
-# the path is resolved per call and a patched ``$HOME`` (tests) or a moved home
-# directory is honoured. `claude` reads this module's alias because that is the
-# name conftest and the library's callers patch.
-_DATA_ROOTS: dict[str, Callable[[], Path]] = {
-    "claude": lambda: CLAUDE_PROJECTS,
-    "codex": lambda: Path.home() / ".codex" / "sessions",
-    "antigravity": lambda: Path.home() / ".gemini" / "antigravity" / "brain",
-}
-
-
 def _agent_data_roots(agent: str) -> list[tuple[str, Path]]:
     """(agent, transcript root) pairs for the selected ``--agent`` filter."""
-    if agent not in ("all", *list_providers()):
-        raise ValueError(
-            f"Unsupported agent filter '{agent}'. "
-            f"Expected 'all' or one of {list_providers()}"
-        )
-    wanted = list_providers() if agent == "all" else [agent]
-    missing = [name for name in wanted if name not in _DATA_ROOTS]
-    if missing:
-        # A provider was registered without telling this check where to look.
-        # Fail loudly here rather than reporting "no session data ()" to a user
-        # whose data is sitting right there.
-        raise ValueError(
-            f"Provider(s) {missing} have no entry in recap._DATA_ROOTS; "
-            "add one when registering a provider."
-        )
-    return [(name, _DATA_ROOTS[name]()) for name in wanted]
+    return provider_data_roots(agent)
 
 
 def build_recap(
@@ -549,8 +526,8 @@ def build_recap(
       refresh_all       --refresh-all    wipe ALL classification caches
       flavor            --for            plain | obsidian markdown variant
       lang              --lang           narrative language override
-      agent             --agent          all | claude | codex — which coding
-                                         agent's sessions to include (#133)
+      agent             --agent          all | registered provider id — which
+                                         coding agent's sessions to include
       reports_dir       --reports-dir    None → ~/.ccstory/reports
       write_report      (CLI always writes)  False skips the report file
 
@@ -605,7 +582,12 @@ def build_recap(
         if not sessions:
             raise RecapUnavailable("No engaged sessions in this window.")
         # since/until are tz-aware local; collect_usage normalizes to UTC.
-        usage = collect_usage(since, until, agent=agent)
+        usage = collect_usage(
+            since,
+            until,
+            agent=agent,
+            active_agents={session.agent for session in sessions},
+        )
 
     console.print(
         f"[green]✓[/green] {len(sessions)} sessions · "

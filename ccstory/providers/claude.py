@@ -20,6 +20,19 @@ from ..time_tracking import (
     _parse_ts,
 )
 from .base import BaseAgentProvider
+from .excerpts import build_excerpt, include_message
+
+
+def _conversation_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    return ""
 
 
 class ClaudeCodeProvider(BaseAgentProvider):
@@ -40,6 +53,45 @@ class ClaudeCodeProvider(BaseAgentProvider):
     @property
     def agent_name(self) -> str:
         return "claude"
+
+    def data_roots(self) -> tuple[Path, ...]:
+        return (self.projects_dir,)
+
+    def extract_excerpt(self, jsonl_path: Path) -> tuple[str, str]:
+        user_msgs: list[str] = []
+        assistant_msgs: list[str] = []
+        try:
+            project = jsonl_path.relative_to(self.projects_dir).parts[0]
+        except ValueError:
+            project = jsonl_path.parent.name
+
+        try:
+            with jsonl_path.open(encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    role = record.get("type")
+                    if role not in ("user", "assistant"):
+                        continue
+                    message = record.get("message")
+                    content = (
+                        message.get("content", "")
+                        if isinstance(message, dict)
+                        else ""
+                    )
+                    text = _conversation_text(content).strip()
+                    if not include_message(text):
+                        continue
+                    if role == "user":
+                        user_msgs.append(text[:500])
+                    else:
+                        assistant_msgs.append(text[:500])
+        except OSError:
+            return project, ""
+
+        return project, build_excerpt(user_msgs, assistant_msgs)
 
     def parse_session(self, jsonl_path: Path) -> SessionStat | None:
         """Compute active time + metadata for one session file."""

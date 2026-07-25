@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ccstory"
-version = "0.7.0"
-description = "Claude Code usage recap with narrative. ccusage tells you the bill, ccstory tells the story."
+version = "0.8.0.dev0"
+description = "AI coding-agent usage recap with narrative. ccusage tells you the bill, ccstory tells the story."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

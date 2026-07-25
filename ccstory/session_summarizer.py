@@ -35,16 +35,12 @@ CCSTORY_CONFIG_PATH = Path.home() / ".ccstory" / "config.toml"
 CCSTORY_LANG_ENV = "CCSTORY_LANG"
 CLAUDE_BIN = "claude"
 
-N_USER_HEAD = 3
-N_USER_TAIL = 2
-N_ASSISTANT_TAIL = 1
-
 # Bump whenever the per-session narrative prompt (_PROMPT_TEMPLATE) is changed
 # materially, or when retuning it for a newer/better default `claude` model.
 # Cached "auto" summaries carrying a lower prompt_version are treated as stale
 # and regenerated on the next `--llm-narrative` run. Keep this an int so the
 # comparison `stored < PROMPT_VERSION` is monotonic.
-PROMPT_VERSION = 1
+PROMPT_VERSION = 2
 CACHE_SCHEMA_VERSION = 3
 
 
@@ -609,178 +605,43 @@ def resolve_transcript_path(sess) -> Path | None:
     return TranscriptResolver().path_for(sess)
 
 
-def _claude_record_text(d: dict) -> tuple[str | None, str]:
-    """(role, text) for one Claude Code transcript record."""
-    role = d.get("type")
-    if role not in ("user", "assistant"):
-        return None, ""
-    msg = d.get("message")
-    content = msg.get("content", "") if isinstance(msg, dict) else ""
-    if isinstance(content, str):
-        return role, content
-    if isinstance(content, list):
-        return role, "\n".join(
-            c.get("text", "")
-            for c in content
-            if isinstance(c, dict) and c.get("type") == "text"
-        )
-    return role, ""
-
-
-def _codex_record_text(payload: dict, kind: str | None) -> tuple[str | None, str]:
-    """(role, text) for one Codex rollout record.
-
-    User text is read from the ``event_msg`` / ``user_message`` record only:
-    the parallel ``response_item`` user records repeat the same turn wrapped in
-    everything the harness injected (plugin lists, environment context, skill
-    bodies), so preferring them means summarizing the harness, not the work.
-    Assistant text is the mirror image — ``response_item`` carries the final
-    message, ``event_msg`` / ``agent_message`` merely duplicates it.
-    """
-    from .providers.codex import strip_task_wrapper
-
-    ptype = payload.get("type")
-    if kind == "event_msg" and ptype == "user_message":
-        return "user", strip_task_wrapper(_codex_content_text(payload.get("message", "")))
-    if (
-        kind == "response_item"
-        and ptype == "message"
-        and payload.get("role") == "assistant"
-    ):
-        return "assistant", _codex_content_text(payload.get("content", ""))
-    return None, ""
-
-
-def _codex_content_text(content) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "\n".join(
-            part["text"]
-            for part in content
-            if isinstance(part, dict) and isinstance(part.get("text"), str)
-        )
-    return ""
-
-
-def _antigravity_record_text(d: dict) -> tuple[str | None, str]:
-    """(role, text) for one Antigravity transcript record."""
-    from .providers.antigravity import extract_user_request_text
-
-    stype = d.get("type")
-    source = d.get("source")
-    content = d.get("content", "") or ""
-
-    if stype == "USER_INPUT" or source == "USER_EXPLICIT":
-        return "user", extract_user_request_text(content)
-    if stype == "PLANNER_RESPONSE" or source == "MODEL":
-        return "assistant", content
-    return None, ""
-
-
-def _extract_excerpt(jsonl_path: Path) -> tuple[str, str]:
+def _extract_excerpt(jsonl_path: Path, provider=None) -> tuple[str, str]:
     """Extract user-facing text excerpt for summarization. Returns (project, excerpt).
 
-    Handles every agent's transcript format (#133): a record carrying a dict
-    ``payload`` is Codex, a record carrying ``step_index`` or Antigravity step
-    types is Antigravity, anything else is Claude Code. Format sniffing per
-    record rather than per file keeps this working for a caller that only has
-    a path — `summarize_session` is reached from cache-repair paths that have
-    no `SessionStat` to ask.
+    Normal recap paths pass the registered provider, which owns its transcript
+    format. The path-only fallback preserves older callers and recognizes the
+    bundled provider formats.
     """
-    user_msgs: list[str] = []
-    assistant_msgs: list[str] = []
-    detected_cwd = ""
-    try:
-        project = jsonl_path.relative_to(PROJECTS_DIR).parts[0]
-    except ValueError:
-        project = jsonl_path.parent.name
+    if provider is None:
+        from .providers.antigravity import AntigravityProvider
+        from .providers.claude import ClaudeCodeProvider
+        from .providers.codex import CodexProvider
+
+        provider = ClaudeCodeProvider(projects_dir=PROJECTS_DIR)
+        try:
+            with jsonl_path.open(encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(record.get("payload"), dict):
+                        provider = CodexProvider()
+                    elif "step_index" in record or "brain" in jsonl_path.parts:
+                        provider = AntigravityProvider()
+                    break
+        except OSError:
+            pass
 
     try:
-        with jsonl_path.open(encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    d = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-
-                payload = d.get("payload")
-                if isinstance(payload, dict):
-                    if not detected_cwd and isinstance(payload.get("cwd"), str):
-                        detected_cwd = payload["cwd"]
-                    role, text = _codex_record_text(payload, d.get("type"))
-                elif (
-                    "step_index" in d
-                    or d.get("type") in ("USER_INPUT", "PLANNER_RESPONSE")
-                    or d.get("source") in ("USER_EXPLICIT", "MODEL")
-                ):
-                    role, text = _antigravity_record_text(d)
-                else:
-                    role, text = _claude_record_text(d)
-
-                if role not in ("user", "assistant"):
-                    continue
-                text = text.strip()
-                if (
-                    not text
-                    or text.startswith("<scheduled-task")
-                    or text.startswith("<system-reminder>")
-                    or "tool_use_id" in text
-                ):
-                    continue
-                if role == "user":
-                    user_msgs.append(text[:500])
-                else:
-                    assistant_msgs.append(text[:500])
+        return provider.extract_excerpt(jsonl_path)
     except OSError:
-        return project, ""
-
-    if not detected_cwd and "antigravity" in str(jsonl_path):
-        parts = jsonl_path.parts
-        if "brain" in parts:
-            idx = parts.index("brain")
-            if idx + 1 < len(parts):
-                session_id = parts[idx + 1]
-                from .providers.antigravity import extract_cwd_from_db
-                db_path = (
-                    Path.home()
-                    / ".gemini"
-                    / "antigravity"
-                    / "conversations"
-                    / f"{session_id}.db"
-                )
-                detected_cwd = extract_cwd_from_db(db_path)
-
-    if detected_cwd:
-        # Codex & Antigravity transcripts live in date/brain trees, so project identity
-        # is derived from CWD — encoded the way Claude Code names project dirs.
-        from .providers.codex import _encode_project_dir, _worktree_origin
-
-        project = _encode_project_dir(_worktree_origin(detected_cwd)) or project
-    elif "antigravity" in str(jsonl_path):
-        project = "antigravity"
-
-    parts: list[str] = []
-    head_set = set(user_msgs[:N_USER_HEAD])
-    for i, m in enumerate(user_msgs[:N_USER_HEAD]):
-        parts.append(f"[USER {i+1}]\n{m}")
-    if len(user_msgs) > N_USER_HEAD + N_USER_TAIL:
-        parts.append("...")
-    for m in user_msgs[-N_USER_TAIL:]:
-        if m not in head_set:
-            parts.append(f"[USER LATE]\n{m}")
-    for m in assistant_msgs[-N_ASSISTANT_TAIL:]:
-        parts.append(f"[ASSISTANT END]\n{m[:300]}")
-
-    return project, "\n\n".join(parts)
+        return jsonl_path.parent.name, ""
 
 
 _PROMPT_TEMPLATE = """{language_directive}
 
-Below is an excerpt of a Claude Code conversation (first/last user + assistant messages).
+Below is an excerpt of an AI coding-agent conversation (first/last user + assistant messages).
 
 Write ONE sentence (max 18 words) summarizing what this session ACTUALLY DID — focus on outcomes, not process.
 
@@ -790,7 +651,7 @@ Good examples (English style; mirror this in whichever language you respond in):
 - Drafted PR description for the v2 migration epic
 
 Bad examples (don't do this):
-- User asked X, Claude answered Y  (process, not outcome)
+- User asked X, the agent answered Y  (process, not outcome)
 - A conversation about coding  (too vague)
 
 Excerpt:
@@ -924,6 +785,7 @@ def summarize_session(
     jsonl_path: Path,
     use_llm: bool = False,
     force: bool = False,
+    provider=None,
 ) -> SessionSummary | None:
     """Idempotent: returns the cached entry unless it needs (re)generation.
 
@@ -945,7 +807,7 @@ def summarize_session(
     elif existing and not _needs_llm(existing, force):
         return existing
 
-    project, excerpt = _extract_excerpt(jsonl_path)
+    project, excerpt = _extract_excerpt(jsonl_path, provider=provider)
     if not excerpt:
         # Nothing usable to summarize now — don't clobber a prior summary.
         if existing and existing.source in ("auto", "fallback"):
@@ -968,7 +830,7 @@ def summarize_session(
 
 _OVERALL_PROMPT = """{language_directive}
 
-Below is a breakdown of every Claude Code session in a single time window, grouped by category. Each line under a category is one session's one-line summary.
+Below is a breakdown of every AI coding-agent session in a single time window, grouped by category. Each line under a category is one session's one-line summary.
 
 Reframe the period around the user's GOAL THREADS, NOT a category-by-category log. Merge the categories into 2-4 mission threads reflecting what the user is building toward (fold tool-building categories into one "build" thread; keep investing research its own thread). Lead with the thread that took the most time.
 
@@ -1110,7 +972,7 @@ def synthesize_overall_for_period(
 
 _CATEGORY_PROMPT = """{language_directive}
 
-Below are one-line summaries of every Claude Code session in the "{category}" category for one time window ({count} sessions).
+Below are one-line summaries of every AI coding-agent session in the "{category}" category for one time window ({count} sessions).
 
 Write a short synthesis of what the user did in THIS category over the period, in two parts:
 1) ONE header line (max 20 words): the main thread, phrased as a narrative hook — not a flat category label.
@@ -1290,7 +1152,7 @@ def invalidate_comparison_narratives() -> int:
 
 _COMPARISON_PROMPT = """{language_directive}
 
-Below are session one-line summaries from two consecutive time windows for one user's Claude Code work, plus the per-bucket time deltas.
+Below are session one-line summaries from two consecutive time windows for one user's AI coding-agent work, plus the per-bucket time deltas.
 
 Write ONE OR TWO sentences (max 50 words) describing how the user's focus SHIFTED between the previous window and the current one. Focus on:
 - What dominated each window
@@ -1442,7 +1304,7 @@ def synthesize_comparison(
     return narrative
 
 
-_CONTENT_CLASSIFY_PROMPT = """You are categorizing Claude Code sessions by their CONTENT (not just folder name).
+_CONTENT_CLASSIFY_PROMPT = """You are categorizing AI coding-agent sessions by their CONTENT (not just folder name).
 
 Preferred bucket vocabulary (from this user's config — prefer these names so the report stays aligned with the user's mental model):
 {category_context}
@@ -1479,7 +1341,7 @@ MAX_CONTENT_BUCKETS = 6
 # MAX_CONTENT_BUCKETS remains the floor shared by all users; headroom is growth
 # space added above it.
 NEW_BUCKET_HEADROOM = 2
-CONTENT_CLASSIFIER_POLICY_VERSION = 3
+CONTENT_CLASSIFIER_POLICY_VERSION = 4
 
 
 def _normalize_bucket_name(raw: object) -> str | None:
@@ -1809,7 +1671,13 @@ def backfill_for_sessions(
             if on_progress:
                 on_progress(i + 1, len(todo), sid, "skipped")
             continue
-        result = summarize_session(sid, jsonl_path, use_llm=use_llm, force=force)
+        result = summarize_session(
+            sid,
+            jsonl_path,
+            use_llm=use_llm,
+            force=force,
+            provider=resolver.provider_for(sess),
+        )
         if result and result.source == "auto":
             summarized += 1
         elif result and result.source == "fallback":

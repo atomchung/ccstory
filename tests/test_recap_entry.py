@@ -151,8 +151,8 @@ class TestBuildRecap:
         with pytest.raises(RecapUnavailable, match="No engaged sessions"):
             build_recap("week")
 
-    def test_missing_projects_dir_raises(self, tmp_home, monkeypatch):
-        monkeypatch.setattr(recap, "CLAUDE_PROJECTS", tmp_home / "nope")
+    def test_missing_projects_dir_raises(self, tmp_home):
+        (tmp_home / ".claude" / "projects").rmdir()
         with pytest.raises(RecapUnavailable, match="No session data"):
             build_recap("week")
 
@@ -167,14 +167,22 @@ class TestBuildRecap:
 
     def test_unknown_agent_raises_value_error(self, tmp_home):
         with pytest.raises(ValueError, match="Unsupported agent filter"):
-            build_recap("week", agent="bogus-agent")
+            build_recap("week", agent="unknown_agent")
 
-    def test_every_registered_provider_has_a_data_root(self):
-        """Registering a provider without a root here would report "no session
-        data ()" to a user whose transcripts are sitting right there."""
-        from ccstory.providers import list_providers
+    def test_every_registered_provider_declares_a_data_root(self):
+        from ccstory.providers import provider_specs
 
-        assert set(list_providers()) <= set(recap._DATA_ROOTS)
+        assert all(spec.factory().data_roots() for spec in provider_specs())
+
+    def test_codex_archived_root_passes_data_preflight(self, tmp_home):
+        (tmp_home / ".claude" / "projects").rmdir()
+        archived = tmp_home / ".codex" / "archived_sessions"
+        archived.mkdir(parents=True)
+
+        roots = recap._agent_data_roots("codex")
+
+        assert ("codex", archived) in roots
+        assert any(root.exists() for _, root in roots)
 
     def test_bad_window_raises_value_error(self, tmp_home):
         with pytest.raises(ValueError, match="unrecognized window"):
