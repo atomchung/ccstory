@@ -259,7 +259,12 @@ def compare_to_previous(
         # overrides some *other* call in this process happened to apply.
         prices, snapshot, provenance = load_prices_config(recap.CONFIG_PATH)
         apply_prices(prices, snapshot, provenance)
-        usage = collect_usage(since, until, agent=agent)
+        usage = collect_usage(
+            since,
+            until,
+            agent=agent,
+            active_agents={session.agent for session in sessions},
+        )
         cmp = _compare_to_previous(
             current_sessions=sessions,
             current_rollups=rollups,

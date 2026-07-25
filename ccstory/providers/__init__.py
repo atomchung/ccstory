@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -31,10 +32,11 @@ class AgentProviderSpec:
     name: str
     label: str
     factory: Callable[[], BaseAgentProvider]
-    usage_coverage: UsageCoverage = "complete"
+    usage_coverage: UsageCoverage = "unavailable"
 
 
 _PROVIDER_SPECS: dict[str, AgentProviderSpec] = {}
+_PROVIDER_NAME_RE = re.compile(r"[a-z0-9]+(?:[-_][a-z0-9]+)*")
 
 
 def register_provider(spec: AgentProviderSpec, *, replace: bool = False) -> None:
@@ -48,6 +50,11 @@ def register_provider(spec: AgentProviderSpec, *, replace: bool = False) -> None
         raise ValueError("Provider name must be non-empty and cannot be 'all'")
     if name != spec.name:
         raise ValueError("Provider names cannot contain surrounding whitespace")
+    if _PROVIDER_NAME_RE.fullmatch(name) is None:
+        raise ValueError(
+            "Provider names must be lowercase filename-safe slugs containing "
+            "only letters, numbers, hyphens, or underscores"
+        )
     if name in _PROVIDER_SPECS and not replace:
         raise ValueError(f"Provider '{name}' is already registered")
     if spec.usage_coverage not in ("complete", "partial", "unavailable"):
@@ -58,8 +65,22 @@ def register_provider(spec: AgentProviderSpec, *, replace: bool = False) -> None
     _PROVIDER_SPECS[name] = spec
 
 
-register_provider(AgentProviderSpec("claude", "Claude Code", ClaudeCodeProvider))
-register_provider(AgentProviderSpec("codex", "OpenAI Codex", CodexProvider))
+register_provider(
+    AgentProviderSpec(
+        "claude",
+        "Claude Code",
+        ClaudeCodeProvider,
+        usage_coverage="complete",
+    )
+)
+register_provider(
+    AgentProviderSpec(
+        "codex",
+        "OpenAI Codex",
+        CodexProvider,
+        usage_coverage="complete",
+    )
+)
 
 
 def provider_specs(agent: str = "all") -> list[AgentProviderSpec]:
@@ -109,6 +130,20 @@ def agent_label(agent_name: str) -> str:
     """Human-readable name for an agent, falling back to the raw id."""
     spec = _PROVIDER_SPECS.get(agent_name)
     return spec.label if spec else agent_name
+
+
+def provider_data_roots(agent: str = "all") -> list[tuple[str, Path]]:
+    """Provider-owned transcript roots for a selected agent population."""
+    roots: list[tuple[str, Path]] = []
+    for spec in provider_specs(agent):
+        provider_roots = spec.factory().data_roots()
+        if not provider_roots:
+            raise ValueError(
+                f"Provider '{spec.name}' declared no data roots; "
+                "implement BaseAgentProvider.data_roots()."
+            )
+        roots.extend((spec.name, root) for root in provider_roots)
+    return roots
 
 
 class TranscriptResolver:

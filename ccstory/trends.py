@@ -144,7 +144,12 @@ def compare_to_previous(
         return None
     _resolve_sessions_from_cache(prev_sessions, mode=mode, fallback=fallback)
     prev_rollups = rollup_by_category(prev_sessions)
-    prev_usage = collect_usage(prev_since, prev_until, agent=agent)
+    prev_usage = collect_usage(
+        prev_since,
+        prev_until,
+        agent=agent,
+        active_agents={session.agent for session in prev_sessions},
+    )
 
     cats = {r.category for r in current_rollups} | {r.category for r in prev_rollups}
     cur_by_cat = {r.category: r.active_min for r in current_rollups}
@@ -184,7 +189,7 @@ class PeriodPoint:
     total_h: float
     output_tokens: int
     cost_usd: float
-    incomplete_usage_agents: list[str] = field(default_factory=list)
+    provider_coverage: dict[str, str] = field(default_factory=dict)
 
     def quota_pct(self, monthly_quota_usd: float) -> float:
         """API-equiv cost as % of the prorated monthly quota (1.0 = 100%)."""
@@ -276,7 +281,12 @@ def collect_trend(
             if s.start >= start and s.start < end
         ]
         rollups = rollup_by_category(in_window)
-        usage = collect_usage(start, end, agent=agent)
+        usage = collect_usage(
+            start,
+            end,
+            agent=agent,
+            active_agents={session.agent for session in in_window},
+        )
         total_h = sum(r.active_min for r in rollups) / 60
         points.append(PeriodPoint(
             label=label,
@@ -286,7 +296,7 @@ def collect_trend(
             total_h=total_h,
             output_tokens=usage.total_output,
             cost_usd=usage.total_cost_usd,
-            incomplete_usage_agents=usage.incomplete_agents,
+            provider_coverage=usage.provider_coverage,
         ))
     return points
 

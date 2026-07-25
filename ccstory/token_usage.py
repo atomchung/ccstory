@@ -327,12 +327,40 @@ class UsageReport:
     until: datetime
     by_model: dict[str, ModelUsage] = field(default_factory=dict)
     assistant_turns: int = 0
-    incomplete_agents: list[str] = field(default_factory=list)
+    provider_coverage: dict[str, str] = field(default_factory=dict)
 
     @property
     def usage_complete(self) -> bool:
         """Whether every selected provider exposed complete exact usage."""
-        return not self.incomplete_agents
+        return all(
+            coverage == "complete"
+            for coverage in self.provider_coverage.values()
+        )
+
+    @property
+    def incomplete_agents(self) -> list[str]:
+        """Selected active providers without complete exact usage."""
+        return sorted(
+            name
+            for name, coverage in self.provider_coverage.items()
+            if coverage != "complete"
+        )
+
+    @property
+    def partial_agents(self) -> list[str]:
+        return sorted(
+            name
+            for name, coverage in self.provider_coverage.items()
+            if coverage == "partial"
+        )
+
+    @property
+    def unavailable_agents(self) -> list[str]:
+        return sorted(
+            name
+            for name, coverage in self.provider_coverage.items()
+            if coverage == "unavailable"
+        )
 
     @property
     def total_input(self) -> int:
@@ -389,12 +417,16 @@ def collect_usage(
     since: datetime,
     until: datetime | None = None,
     agent: str = "all",
+    active_agents: set[str] | None = None,
 ) -> UsageReport:
     """Scan session files and aggregate token usage in [since, until].
 
     Both bounds are normalized to UTC for comparison against the tz-aware
     UTC timestamps in jsonl. Naive inputs are treated as UTC (not system
-    local) so test behavior is deterministic across hosts.
+    local) so test behavior is deterministic across hosts. ``active_agents``
+    is the session-derived population for this exact window; when supplied,
+    dormant registered providers do not create false incomplete-coverage
+    warnings.
     """
     from .providers import create_providers, provider_specs
 
@@ -409,6 +441,7 @@ def collect_usage(
     else:
         until = until.astimezone(timezone.utc)
 
+    specs = provider_specs(agent)
     by_model: dict[str, ModelUsage] = {}
     assistant_turns = 0
 
@@ -420,11 +453,11 @@ def collect_usage(
         until=until,
         by_model=by_model,
         assistant_turns=assistant_turns,
-        incomplete_agents=[
-            spec.name
-            for spec in provider_specs(agent)
-            if spec.usage_coverage != "complete"
-        ],
+        provider_coverage={
+            spec.name: spec.usage_coverage
+            for spec in specs
+            if active_agents is None or spec.name in active_agents
+        },
     )
 
 
