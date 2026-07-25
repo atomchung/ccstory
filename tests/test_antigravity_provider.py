@@ -349,12 +349,19 @@ class TestAntigravityExcerptExtraction:
             "created_at": _ts(2),
             "content": "SECRET_FILE_CONTENT",
         }
+        system_input = {
+            "source": "SYSTEM",
+            "type": "USER_INPUT",
+            "created_at": _ts(3),
+            "content": "SYSTEM_INJECTED_SECRET",
+        }
         path = antigravity_factory(
             SID,
             [
                 _user("Review the provider", 1),
                 _planner("Safe final response", 2),
                 tool_event,
+                system_input,
             ],
         )
         provider = AntigravityProvider(
@@ -362,9 +369,13 @@ class TestAntigravityExcerptExtraction:
         )
 
         _, excerpt = provider.extract_excerpt(path)
+        stat = provider.parse_session(path)
 
         assert "Safe final response" in excerpt
         assert "SECRET_FILE_CONTENT" not in excerpt
+        assert "SYSTEM_INJECTED_SECRET" not in excerpt
+        assert stat is not None
+        assert stat.user_msg_count == 1
 
 
 class TestAntigravityRegistryContracts:

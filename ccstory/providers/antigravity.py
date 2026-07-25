@@ -54,6 +54,20 @@ def _exact_token_count(value: object) -> int | None:
     return value
 
 
+def _is_user_step(stype: object, source: object) -> bool:
+    """True only for explicit user-authored steps, never system-injected input."""
+    return (stype == "USER_INPUT" and source in (None, "USER_EXPLICIT")) or (
+        stype is None and source == "USER_EXPLICIT"
+    )
+
+
+def _is_assistant_step(stype: object, source: object) -> bool:
+    """True only for narrative model responses, never tool/model events."""
+    return (
+        stype == "PLANNER_RESPONSE" and source in (None, "MODEL")
+    ) or (stype is None and source == "MODEL")
+
+
 def extract_cwd_from_db(db_path: Path) -> str:
     """Extract launch CWD from an Antigravity conversation database if present."""
     if not db_path.exists():
@@ -142,12 +156,8 @@ class AntigravityProvider(BaseAgentProvider):
                     source = d.get("source")
                     content = _content_text(d.get("content"))
 
-                    is_user = stype == "USER_INPUT" or (
-                        stype is None and source == "USER_EXPLICIT"
-                    )
-                    is_assistant = stype == "PLANNER_RESPONSE" or (
-                        stype is None and source == "MODEL"
-                    )
+                    is_user = _is_user_step(stype, source)
+                    is_assistant = _is_assistant_step(stype, source)
                     if is_user:
                         text = extract_user_request_text(content)
                         if include_message(text):
@@ -191,12 +201,8 @@ class AntigravityProvider(BaseAgentProvider):
                     if ts:
                         timestamps.append(ts)
 
-                    is_user = stype == "USER_INPUT" or (
-                        stype is None and source == "USER_EXPLICIT"
-                    )
-                    is_assistant = stype == "PLANNER_RESPONSE" or (
-                        stype is None and source == "MODEL"
-                    )
+                    is_user = _is_user_step(stype, source)
+                    is_assistant = _is_assistant_step(stype, source)
                     if is_user or is_assistant:
                         msg_count += 1
 
@@ -271,9 +277,7 @@ class AntigravityProvider(BaseAgentProvider):
                         stype = d.get("type")
                         source = d.get("source")
 
-                        is_assistant = stype == "PLANNER_RESPONSE" or (
-                            stype is None and source == "MODEL"
-                        )
+                        is_assistant = _is_assistant_step(stype, source)
                         if is_assistant:
                             ts_raw = d.get("created_at")
                             if not ts_raw:
