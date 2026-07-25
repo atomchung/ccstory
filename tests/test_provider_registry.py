@@ -70,7 +70,7 @@ def third_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "antigravity",
         "Google Antigravity",
         lambda: _ThirdProvider(root),
-        usage_coverage="unavailable",
+        usage_coverage="partial",
     )
     monkeypatch.setitem(_PROVIDER_SPECS, spec.name, spec)
     return root
@@ -86,15 +86,22 @@ def test_descriptor_drives_registry_preflight_usage_and_titles(third_provider):
     assert _agent_title("antigravity", "Recap") == "Google Antigravity Recap"
 
     now = datetime.now().astimezone()
-    usage = collect_usage(now, now, agent="antigravity")
+    usage = collect_usage(
+        now,
+        now,
+        agent="antigravity",
+        active_agents={"antigravity"},
+    )
     assert usage.assistant_turns == 0
     assert usage.incomplete_agents == ["antigravity"]
+    assert usage.partial_agents == ["antigravity"]
+    assert usage.unavailable_agents == []
     assert not usage.usage_complete
 
     markdown = render_report(
         "week", now, now, [], [], usage, {}, agent="antigravity"
     )
-    assert "Token and cost totals are incomplete for antigravity" in markdown
+    assert "partial exact usage for antigravity" in markdown
     obsidian = render_report(
         "week",
         now,
@@ -107,20 +114,23 @@ def test_descriptor_drives_registry_preflight_usage_and_titles(third_provider):
         agent="antigravity",
     )
     assert "usage_complete: false" in obsidian
-    assert "usage_incomplete_agents: [antigravity]" in obsidian
+    assert "usage_partial_agents: [antigravity]" in obsidian
     console = Console(record=True, width=100)
     console.print(
         render_terminal_card(
             now, now, [], [], usage, agent="antigravity"
         )
     )
-    assert "Token/cost totals incomplete for antigravity" in console.export_text()
+    terminal = console.export_text()
+    assert "partial exact usage for" in terminal
+    assert "antigravity." in terminal
     payload = build_report_json(
         "week", now, now, [], [], usage, {}, agent="antigravity"
     )
     assert payload["usage_coverage"] == {
         "complete": False,
         "incomplete_agents": ["antigravity"],
+        "providers": {"antigravity": "partial"},
     }
 
     point = PeriodPoint(
@@ -131,9 +141,9 @@ def test_descriptor_drives_registry_preflight_usage_and_titles(third_provider):
         0,
         0,
         0,
-        incomplete_usage_agents=usage.incomplete_agents,
+        provider_coverage=usage.provider_coverage,
     )
-    assert "incomplete for antigravity" in render_trend_markdown(
+    assert "partial exact usage for antigravity" in render_trend_markdown(
         [point], "week", agent="antigravity"
     )
     assert build_trend_json(
@@ -179,7 +189,19 @@ def test_cli_help_lists_registered_provider(third_provider, capsys):
     assert "antigravity" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("name", ["", "all", " antigravity"])
+def test_cli_preflight_accepts_third_provider_only(
+    third_provider, tmp_home
+):
+    (tmp_home / ".claude" / "projects").rmdir()
+
+    with pytest.raises(SystemExit, match="No engaged sessions"):
+        cli.main(["week", "--agent", "antigravity", "--no-artifacts"])
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["", "all", " antigravity", "vendor/agent", "../agent", "Agent"],
+)
 def test_registration_rejects_reserved_or_ambiguous_names(name):
     with pytest.raises(ValueError):
         register_provider(
@@ -209,3 +231,27 @@ def test_registration_rejects_invalid_usage_coverage():
                 usage_coverage="estimated",  # type: ignore[arg-type]
             )
         )
+
+
+def test_usage_coverage_defaults_fail_closed():
+    spec = AgentProviderSpec(
+        "new-agent",
+        "New Agent",
+        lambda: _ThirdProvider(Path()),
+    )
+
+    assert spec.usage_coverage == "unavailable"
+
+
+def test_inactive_partial_provider_does_not_warn(third_provider):
+    now = datetime.now().astimezone()
+
+    usage = collect_usage(
+        now,
+        now,
+        agent="all",
+        active_agents=set(),
+    )
+
+    assert usage.provider_coverage == {}
+    assert usage.usage_complete

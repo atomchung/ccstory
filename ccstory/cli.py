@@ -627,12 +627,15 @@ def _dispatch(argv: list[str] | None = None) -> int:
         format="%(levelname)s %(name)s: %(message)s",
     )
 
-    # `build_recap` re-checks this per --agent; the early exit here is only so
-    # a first-time user with no data at all gets the message before the
-    # first-run preview prints.
-    if not CLAUDE_PROJECTS.exists() and not (Path.home() / ".codex").exists():
-        sys.exit(f"No session data at {CLAUDE_PROJECTS}. "
-                 "Have you used Claude Code or Codex yet?")
+    # `build_recap` re-checks this; the early exit is only so a first-time
+    # user gets the message before the first-run preview prints. Derive it
+    # from the registry so a third-provider-only install is not rejected.
+    roots = _agent_data_roots(args.agent)
+    if not any(root.exists() for _, root in roots):
+        where = " or ".join(
+            f"{agent_label(name)} at {root}" for name, root in roots
+        )
+        sys.exit(f"No session data ({where}). Have you used it yet?")
 
     _print_first_run_preview(console)
 

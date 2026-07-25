@@ -75,6 +75,38 @@ def _agent_title(scope: str, noun: str) -> str:
     return f"{prefix} {noun}"
 
 
+def _usage_coverage_message(provider_coverage: dict[str, str]) -> str | None:
+    """Human-readable disclosure preserving partial vs unavailable states."""
+    partial = sorted(
+        name for name, state in provider_coverage.items() if state == "partial"
+    )
+    unavailable = sorted(
+        name
+        for name, state in provider_coverage.items()
+        if state == "unavailable"
+    )
+    details: list[str] = []
+    if partial:
+        details.append(f"partial exact usage for {', '.join(partial)}")
+    if unavailable:
+        details.append(f"exact usage unavailable for {', '.join(unavailable)}")
+    if not details:
+        return None
+    return "Token and cost totals are incomplete: " + "; ".join(details) + "."
+
+
+def _trend_provider_coverage(points: list[PeriodPoint]) -> dict[str, str]:
+    """Merge the per-period provider coverage states for one trend."""
+    coverage: dict[str, str] = {}
+    rank = {"complete": 0, "partial": 1, "unavailable": 2}
+    for point in points:
+        for name, state in point.provider_coverage.items():
+            current = coverage.get(name)
+            if current is None or rank.get(state, 2) > rank.get(current, 2):
+                coverage[name] = state
+    return dict(sorted(coverage.items()))
+
+
 def agent_breakdown(sessions: list[SessionStat]) -> list[AgentShare]:
     """Per-agent share of raw interaction time and of session count.
 
@@ -319,10 +351,16 @@ def _obsidian_frontmatter(
     lines.append(f"cost_usd: {usage.total_cost_usd:.2f}")
     lines.append(f"output_tokens: {usage.total_output}")
     lines.append(f"usage_complete: {str(usage.usage_complete).lower()}")
-    if usage.incomplete_agents:
+    if usage.partial_agents:
         lines.append(
-            "usage_incomplete_agents: ["
-            + ", ".join(_yaml_scalar(name) for name in usage.incomplete_agents)
+            "usage_partial_agents: ["
+            + ", ".join(_yaml_scalar(name) for name in usage.partial_agents)
+            + "]"
+        )
+    if usage.unavailable_agents:
+        lines.append(
+            "usage_unavailable_agents: ["
+            + ", ".join(_yaml_scalar(name) for name in usage.unavailable_agents)
             + "]"
         )
     lines.append("---")
@@ -548,13 +586,9 @@ def render_report(
             f"> ⚠️ Cost figures exclude {unpriced_str} — "
             "tokens are counted in usage totals, but rates are missing from the price table so total cost is underestimated."
         )
-    if usage.incomplete_agents:
-        incomplete = ", ".join(usage.incomplete_agents)
-        lines.append(
-            f"> ⚠️ Token and cost totals are incomplete for {incomplete}: "
-            "those providers do not expose complete exact usage in their "
-            "standard session logs."
-        )
+    coverage_warning = _usage_coverage_message(usage.provider_coverage)
+    if coverage_warning:
+        lines.append(f"> ⚠️ {coverage_warning}")
 
     lines.append(
         "> For exact cost / billing-window breakdowns, pair with "
@@ -639,6 +673,7 @@ def build_report_json(
         "usage_coverage": {
             "complete": usage.usage_complete,
             "incomplete_agents": usage.incomplete_agents,
+            "providers": usage.provider_coverage,
         },
         "buckets": [
             {
@@ -777,11 +812,12 @@ def build_trend_json(
 ) -> dict:
     """Machine-readable trend series (per-period totals + bucket hours)."""
     agent_scope = _report_agent_scope(agent, [])
-    incomplete_agents = sorted({
+    provider_coverage = _trend_provider_coverage(points)
+    incomplete_agents = sorted(
         name
-        for point in points
-        for name in point.incomplete_usage_agents
-    })
+        for name, state in provider_coverage.items()
+        if state != "complete"
+    )
     return {
         "schema_version": JSON_SCHEMA_VERSION,
         "kind": "trend",
@@ -792,6 +828,7 @@ def build_trend_json(
         "usage_coverage": {
             "complete": not incomplete_agents,
             "incomplete_agents": incomplete_agents,
+            "providers": provider_coverage,
         },
         "points": [
             {
@@ -968,14 +1005,10 @@ def render_terminal_card(
         parts.append(
             Text(f"Cost excludes {unpriced_str} (missing from price table).", style="dim yellow")
         )
-    if usage.incomplete_agents:
-        incomplete = ", ".join(usage.incomplete_agents)
+    coverage_warning = _usage_coverage_message(usage.provider_coverage)
+    if coverage_warning:
         parts.append(
-            Text(
-                f"Token/cost totals incomplete for {incomplete} "
-                "(exact usage unavailable).",
-                style="yellow",
-            )
+            Text(coverage_warning, style="yellow")
         )
 
     if overall_narrative:
@@ -1246,19 +1279,13 @@ def render_trend_card(
         Text(""),
         axis_hint,
     ]
-    incomplete_agents = sorted({
-        name
-        for point in points
-        for name in point.incomplete_usage_agents
-    })
-    if incomplete_agents:
+    coverage_warning = _usage_coverage_message(
+        _trend_provider_coverage(points)
+    )
+    if coverage_warning:
         body_parts.extend((
             Text(""),
-            Text(
-                "⚠️ Token/cost totals incomplete for "
-                f"{', '.join(incomplete_agents)} (exact usage unavailable).",
-                style="yellow",
-            ),
+            Text(f"⚠️ {coverage_warning}", style="yellow"),
         ))
     pricing_warning = pricing_snapshot_warning(points[-1].until)
     if pricing_warning:
@@ -1325,17 +1352,11 @@ def render_trend_markdown(
             f"{p.output_tokens/1_000_000:.2f} | ${p.cost_usd:,.0f} |"
         )
     lines.append("")
-    incomplete_agents = sorted({
-        name
-        for point in points
-        for name in point.incomplete_usage_agents
-    })
-    if incomplete_agents:
-        lines.append(
-            "> ⚠️ Token and cost totals are incomplete for "
-            f"{', '.join(incomplete_agents)}: those providers do not expose "
-            "complete exact usage in their standard session logs."
-        )
+    coverage_warning = _usage_coverage_message(
+        _trend_provider_coverage(points)
+    )
+    if coverage_warning:
+        lines.append(f"> ⚠️ {coverage_warning}")
     lines.append(f"> Pricing snapshot: `{get_snapshot_date()}`.")
     pricing_warning = pricing_snapshot_warning(points[-1].until)
     if pricing_warning:

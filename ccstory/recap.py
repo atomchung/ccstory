@@ -40,7 +40,7 @@ from .categorizer import (
     normalize_project_name,
     resolve_session_bucket,
 )
-from .providers import TranscriptResolver, agent_label, provider_specs
+from .providers import TranscriptResolver, agent_label, provider_data_roots
 from .report import build_report_json, render_report
 from .session_summarizer import (
     CCSTORY_LANG_ENV,
@@ -481,16 +481,7 @@ def _backfill_summaries(
 
 def _agent_data_roots(agent: str) -> list[tuple[str, Path]]:
     """(agent, transcript root) pairs for the selected ``--agent`` filter."""
-    roots: list[tuple[str, Path]] = []
-    for spec in provider_specs(agent):
-        provider_roots = spec.factory().data_roots()
-        if not provider_roots:
-            raise ValueError(
-                f"Provider '{spec.name}' declared no data roots; "
-                "implement BaseAgentProvider.data_roots()."
-            )
-        roots.extend((spec.name, root) for root in provider_roots)
-    return roots
+    return provider_data_roots(agent)
 
 
 def build_recap(
@@ -591,7 +582,12 @@ def build_recap(
         if not sessions:
             raise RecapUnavailable("No engaged sessions in this window.")
         # since/until are tz-aware local; collect_usage normalizes to UTC.
-        usage = collect_usage(since, until, agent=agent)
+        usage = collect_usage(
+            since,
+            until,
+            agent=agent,
+            active_agents={session.agent for session in sessions},
+        )
 
     console.print(
         f"[green]✓[/green] {len(sessions)} sessions · "
