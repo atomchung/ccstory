@@ -327,6 +327,12 @@ class UsageReport:
     until: datetime
     by_model: dict[str, ModelUsage] = field(default_factory=dict)
     assistant_turns: int = 0
+    incomplete_agents: list[str] = field(default_factory=list)
+
+    @property
+    def usage_complete(self) -> bool:
+        """Whether every selected provider exposed complete exact usage."""
+        return not self.incomplete_agents
 
     @property
     def total_input(self) -> int:
@@ -390,7 +396,7 @@ def collect_usage(
     UTC timestamps in jsonl. Naive inputs are treated as UTC (not system
     local) so test behavior is deterministic across hosts.
     """
-    from .providers import create_providers
+    from .providers import create_providers, provider_specs
 
     if since.tzinfo is None:
         since = since.replace(tzinfo=timezone.utc)
@@ -410,7 +416,15 @@ def collect_usage(
         assistant_turns += provider.collect_usage(since, until, by_model)
 
     return UsageReport(
-        since=since, until=until, by_model=by_model, assistant_turns=assistant_turns
+        since=since,
+        until=until,
+        by_model=by_model,
+        assistant_turns=assistant_turns,
+        incomplete_agents=[
+            spec.name
+            for spec in provider_specs(agent)
+            if spec.usage_coverage != "complete"
+        ],
     )
 
 

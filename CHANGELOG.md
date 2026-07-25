@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   roots plus narrative-excerpt parsing. CLI, MCP, reports, session collection,
   usage aggregation, and availability checks derive from the same registry, so
   a new bundled agent no longer needs parallel edits across every surface.
+- Providers declare whether their logs expose complete exact token usage.
+  Markdown, terminal, JSON, Obsidian, and trend outputs now disclose incomplete
+  agent coverage instead of silently presenting a partial total as complete.
 - Source/editable builds now read the canonical development version from
   `pyproject.toml`; post-0.7 development identifies itself as `0.8.0.dev0`
   instead of impersonating the latest release.

@@ -184,6 +184,7 @@ class PeriodPoint:
     total_h: float
     output_tokens: int
     cost_usd: float
+    incomplete_usage_agents: list[str] = field(default_factory=list)
 
     def quota_pct(self, monthly_quota_usd: float) -> float:
         """API-equiv cost as % of the prorated monthly quota (1.0 = 100%)."""
@@ -285,6 +286,7 @@ def collect_trend(
             total_h=total_h,
             output_tokens=usage.total_output,
             cost_usd=usage.total_cost_usd,
+            incomplete_usage_agents=usage.incomplete_agents,
         ))
     return points
 

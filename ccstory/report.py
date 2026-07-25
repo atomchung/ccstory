@@ -318,6 +318,13 @@ def _obsidian_frontmatter(
     )
     lines.append(f"cost_usd: {usage.total_cost_usd:.2f}")
     lines.append(f"output_tokens: {usage.total_output}")
+    lines.append(f"usage_complete: {str(usage.usage_complete).lower()}")
+    if usage.incomplete_agents:
+        lines.append(
+            "usage_incomplete_agents: ["
+            + ", ".join(_yaml_scalar(name) for name in usage.incomplete_agents)
+            + "]"
+        )
     lines.append("---")
     return lines
 
@@ -541,6 +548,13 @@ def render_report(
             f"> ⚠️ Cost figures exclude {unpriced_str} — "
             "tokens are counted in usage totals, but rates are missing from the price table so total cost is underestimated."
         )
+    if usage.incomplete_agents:
+        incomplete = ", ".join(usage.incomplete_agents)
+        lines.append(
+            f"> ⚠️ Token and cost totals are incomplete for {incomplete}: "
+            "those providers do not expose complete exact usage in their "
+            "standard session logs."
+        )
 
     lines.append(
         "> For exact cost / billing-window breakdowns, pair with "
@@ -622,6 +636,10 @@ def build_report_json(
             "cache_savings_usd": round(usage.cache_savings_usd, 2),
         },
         "pricing_snapshot": get_snapshot_date(),
+        "usage_coverage": {
+            "complete": usage.usage_complete,
+            "incomplete_agents": usage.incomplete_agents,
+        },
         "buckets": [
             {
                 "name": r.category,
@@ -759,6 +777,11 @@ def build_trend_json(
 ) -> dict:
     """Machine-readable trend series (per-period totals + bucket hours)."""
     agent_scope = _report_agent_scope(agent, [])
+    incomplete_agents = sorted({
+        name
+        for point in points
+        for name in point.incomplete_usage_agents
+    })
     return {
         "schema_version": JSON_SCHEMA_VERSION,
         "kind": "trend",
@@ -766,6 +789,10 @@ def build_trend_json(
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "period": period,
         "pricing_snapshot": get_snapshot_date(),
+        "usage_coverage": {
+            "complete": not incomplete_agents,
+            "incomplete_agents": incomplete_agents,
+        },
         "points": [
             {
                 "label": p.label,
@@ -940,6 +967,15 @@ def render_terminal_card(
         unpriced_str = ", ".join(usage.unpriced_models)
         parts.append(
             Text(f"Cost excludes {unpriced_str} (missing from price table).", style="dim yellow")
+        )
+    if usage.incomplete_agents:
+        incomplete = ", ".join(usage.incomplete_agents)
+        parts.append(
+            Text(
+                f"Token/cost totals incomplete for {incomplete} "
+                "(exact usage unavailable).",
+                style="yellow",
+            )
         )
 
     if overall_narrative:
@@ -1210,6 +1246,20 @@ def render_trend_card(
         Text(""),
         axis_hint,
     ]
+    incomplete_agents = sorted({
+        name
+        for point in points
+        for name in point.incomplete_usage_agents
+    })
+    if incomplete_agents:
+        body_parts.extend((
+            Text(""),
+            Text(
+                "⚠️ Token/cost totals incomplete for "
+                f"{', '.join(incomplete_agents)} (exact usage unavailable).",
+                style="yellow",
+            ),
+        ))
     pricing_warning = pricing_snapshot_warning(points[-1].until)
     if pricing_warning:
         body_parts.extend((
@@ -1275,6 +1325,17 @@ def render_trend_markdown(
             f"{p.output_tokens/1_000_000:.2f} | ${p.cost_usd:,.0f} |"
         )
     lines.append("")
+    incomplete_agents = sorted({
+        name
+        for point in points
+        for name in point.incomplete_usage_agents
+    })
+    if incomplete_agents:
+        lines.append(
+            "> ⚠️ Token and cost totals are incomplete for "
+            f"{', '.join(incomplete_agents)}: those providers do not expose "
+            "complete exact usage in their standard session logs."
+        )
     lines.append(f"> Pricing snapshot: `{get_snapshot_date()}`.")
     pricing_warning = pricing_snapshot_warning(points[-1].until)
     if pricing_warning:

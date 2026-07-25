@@ -5,12 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Literal
 
 from ..time_tracking import SessionStat
 from .base import BaseAgentProvider
 from .claude import ClaudeCodeProvider
 from .codex import CodexProvider
+
+
+UsageCoverage = Literal["complete", "partial", "unavailable"]
 
 
 @dataclass(frozen=True)
@@ -20,12 +23,15 @@ class AgentProviderSpec:
     Registering one spec is the only cross-provider edit a new bundled source
     should need. CLI choices, MCP validation, display labels, transcript
     preflight, session collection, and usage aggregation all derive from this
-    registry.
+    registry. ``usage_coverage`` declares whether ``collect_usage`` sees every
+    exact token record; non-complete providers remain usable, but reports must
+    disclose that their aggregate token and cost totals are incomplete.
     """
 
     name: str
     label: str
     factory: Callable[[], BaseAgentProvider]
+    usage_coverage: UsageCoverage = "complete"
 
 
 _PROVIDER_SPECS: dict[str, AgentProviderSpec] = {}
@@ -44,6 +50,11 @@ def register_provider(spec: AgentProviderSpec, *, replace: bool = False) -> None
         raise ValueError("Provider names cannot contain surrounding whitespace")
     if name in _PROVIDER_SPECS and not replace:
         raise ValueError(f"Provider '{name}' is already registered")
+    if spec.usage_coverage not in ("complete", "partial", "unavailable"):
+        raise ValueError(
+            f"Provider '{name}' has invalid usage coverage "
+            f"'{spec.usage_coverage}'"
+        )
     _PROVIDER_SPECS[name] = spec
 
 

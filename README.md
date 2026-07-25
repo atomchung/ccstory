@@ -258,10 +258,10 @@ own one-off project.
 
 The source boundary is registry-driven. A bundled provider supplies one
 descriptor plus its data roots, transcript parser, narrative-excerpt extractor,
-and usage collector; CLI choices, MCP filtering, availability checks, and
-report labels derive from that descriptor. This keeps future transcript formats
-inside their provider instead of adding agent-specific branches across every
-output surface.
+usage collector, and exact-usage coverage status; CLI choices, MCP filtering,
+availability checks, report labels, and incomplete-cost warnings derive from
+that descriptor. This keeps future transcript formats inside their provider
+instead of adding agent-specific branches across every output surface.
 
 **Time is reported once, not per agent.** Agents run concurrently: a Codex
 review and a Claude Code session routinely occupy the same ten minutes. Summing

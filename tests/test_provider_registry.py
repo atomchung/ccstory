@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from rich.console import Console
 
 from ccstory import cli, recap
 from ccstory.providers import (
@@ -18,10 +19,18 @@ from ccstory.providers import (
 )
 from ccstory.providers import _PROVIDER_SPECS
 from ccstory.providers.base import BaseAgentProvider
-from ccstory.report import _agent_title
+from ccstory.report import (
+    _agent_title,
+    build_report_json,
+    build_trend_json,
+    render_report,
+    render_terminal_card,
+    render_trend_markdown,
+)
 from ccstory.session_summarizer import summarize_session
 from ccstory.time_tracking import SessionStat
 from ccstory.token_usage import collect_usage
+from ccstory.trends import PeriodPoint
 
 
 class _ThirdProvider(BaseAgentProvider):
@@ -61,6 +70,7 @@ def third_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "antigravity",
         "Google Antigravity",
         lambda: _ThirdProvider(root),
+        usage_coverage="unavailable",
     )
     monkeypatch.setitem(_PROVIDER_SPECS, spec.name, spec)
     return root
@@ -78,6 +88,57 @@ def test_descriptor_drives_registry_preflight_usage_and_titles(third_provider):
     now = datetime.now().astimezone()
     usage = collect_usage(now, now, agent="antigravity")
     assert usage.assistant_turns == 0
+    assert usage.incomplete_agents == ["antigravity"]
+    assert not usage.usage_complete
+
+    markdown = render_report(
+        "week", now, now, [], [], usage, {}, agent="antigravity"
+    )
+    assert "Token and cost totals are incomplete for antigravity" in markdown
+    obsidian = render_report(
+        "week",
+        now,
+        now,
+        [],
+        [],
+        usage,
+        {},
+        flavor="obsidian",
+        agent="antigravity",
+    )
+    assert "usage_complete: false" in obsidian
+    assert "usage_incomplete_agents: [antigravity]" in obsidian
+    console = Console(record=True, width=100)
+    console.print(
+        render_terminal_card(
+            now, now, [], [], usage, agent="antigravity"
+        )
+    )
+    assert "Token/cost totals incomplete for antigravity" in console.export_text()
+    payload = build_report_json(
+        "week", now, now, [], [], usage, {}, agent="antigravity"
+    )
+    assert payload["usage_coverage"] == {
+        "complete": False,
+        "incomplete_agents": ["antigravity"],
+    }
+
+    point = PeriodPoint(
+        "2026-W30",
+        now,
+        now,
+        [],
+        0,
+        0,
+        0,
+        incomplete_usage_agents=usage.incomplete_agents,
+    )
+    assert "incomplete for antigravity" in render_trend_markdown(
+        [point], "week", agent="antigravity"
+    )
+    assert build_trend_json(
+        [point], "week", agent="antigravity"
+    )["usage_coverage"]["complete"] is False
 
 
 def test_provider_owned_excerpt_reaches_summary_cache(
@@ -136,3 +197,15 @@ def test_factory_agent_name_must_match_descriptor(monkeypatch):
 
     with pytest.raises(ValueError, match="wrong-id.*antigravity"):
         create_providers("wrong-id")
+
+
+def test_registration_rejects_invalid_usage_coverage():
+    with pytest.raises(ValueError, match="invalid usage coverage"):
+        register_provider(
+            AgentProviderSpec(
+                "invalid-coverage",
+                "Invalid",
+                lambda: _ThirdProvider(Path()),
+                usage_coverage="estimated",  # type: ignore[arg-type]
+            )
+        )

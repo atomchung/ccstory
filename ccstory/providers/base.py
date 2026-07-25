@@ -67,7 +67,10 @@ class BaseAgentProvider(ABC):
     ) -> int:
         """Collect token usage for sessions in [since, until] into by_model dictionary.
 
-        Returns the count of assistant turns processed.
+        Returns the count of assistant turns with exact usage processed. Never
+        synthesize tokens from character counts or other heuristics. A provider
+        whose normal logs lack exact usage returns zero and declares partial or
+        unavailable coverage in its ``AgentProviderSpec``.
         """
 
     def transcript_path(self, sess: SessionStat) -> Path | None:
