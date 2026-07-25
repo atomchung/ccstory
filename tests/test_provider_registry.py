@@ -1,0 +1,138 @@
+"""A third provider should plug in without editing shared product surfaces."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+
+import pytest
+
+from ccstory import cli, recap
+from ccstory.providers import (
+    AgentProviderSpec,
+    TranscriptResolver,
+    agent_label,
+    create_providers,
+    list_providers,
+    register_provider,
+)
+from ccstory.providers import _PROVIDER_SPECS
+from ccstory.providers.base import BaseAgentProvider
+from ccstory.report import _agent_title
+from ccstory.session_summarizer import summarize_session
+from ccstory.time_tracking import SessionStat
+from ccstory.token_usage import collect_usage
+
+
+class _ThirdProvider(BaseAgentProvider):
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    @property
+    def agent_name(self) -> str:
+        return "antigravity"
+
+    def data_roots(self) -> tuple[Path, ...]:
+        return (self.root,)
+
+    def extract_excerpt(self, path: Path) -> tuple[str, str]:
+        return "-Users-me-demo", "[USER 1]\nship the provider adapter"
+
+    def collect_sessions(
+        self,
+        since: datetime,
+        until: datetime | None = None,
+        engaged_only: bool = True,
+    ) -> list[SessionStat]:
+        return []
+
+    def parse_session(self, path: Path) -> SessionStat | None:
+        return None
+
+    def collect_usage(self, since: datetime, until: datetime, by_model: dict) -> int:
+        return 0
+
+
+@pytest.fixture
+def third_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    root = tmp_path / "antigravity" / "sessions"
+    root.mkdir(parents=True)
+    spec = AgentProviderSpec(
+        "antigravity",
+        "Google Antigravity",
+        lambda: _ThirdProvider(root),
+    )
+    monkeypatch.setitem(_PROVIDER_SPECS, spec.name, spec)
+    return root
+
+
+def test_descriptor_drives_registry_preflight_usage_and_titles(third_provider):
+    assert "antigravity" in list_providers()
+    assert agent_label("antigravity") == "Google Antigravity"
+    assert create_providers("antigravity")[0].agent_name == "antigravity"
+    assert recap._agent_data_roots("antigravity") == [
+        ("antigravity", third_provider)
+    ]
+    assert _agent_title("antigravity", "Recap") == "Google Antigravity Recap"
+
+    now = datetime.now().astimezone()
+    usage = collect_usage(now, now, agent="antigravity")
+    assert usage.assistant_turns == 0
+
+
+def test_provider_owned_excerpt_reaches_summary_cache(
+    third_provider, tmp_path: Path
+):
+    transcript = third_provider / "session.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    now = datetime.now().astimezone()
+    session = SessionStat(
+        project="-Users-me-demo",
+        category="coding",
+        session_id="antigravity-1",
+        start=now,
+        end=now,
+        active_sec=0,
+        msg_count=1,
+        user_msg_count=1,
+        agent="antigravity",
+        path=transcript,
+    )
+    resolver = TranscriptResolver()
+
+    result = summarize_session(
+        session.session_id,
+        transcript,
+        provider=resolver.provider_for(session),
+    )
+
+    assert result is not None
+    assert result.source == "fallback"
+    assert "ship the provider adapter" in result.summary
+
+
+def test_cli_help_lists_registered_provider(third_provider, capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["--help"])
+    assert excinfo.value.code == 0
+    assert "antigravity" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("name", ["", "all", " antigravity"])
+def test_registration_rejects_reserved_or_ambiguous_names(name):
+    with pytest.raises(ValueError):
+        register_provider(
+            AgentProviderSpec(name, "Invalid", lambda: _ThirdProvider(Path()))
+        )
+
+
+def test_factory_agent_name_must_match_descriptor(monkeypatch):
+    spec = AgentProviderSpec(
+        "wrong-id",
+        "Wrong ID",
+        lambda: _ThirdProvider(Path()),
+    )
+    monkeypatch.setitem(_PROVIDER_SPECS, spec.name, spec)
+
+    with pytest.raises(ValueError, match="wrong-id.*antigravity"):
+        create_providers("wrong-id")

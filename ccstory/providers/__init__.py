@@ -2,44 +2,102 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from ..time_tracking import SessionStat
 from .base import BaseAgentProvider
 from .claude import ClaudeCodeProvider
 from .codex import CodexProvider
 
-_PROVIDERS: dict[str, type[BaseAgentProvider]] = {
-    "claude": ClaudeCodeProvider,
-    "codex": CodexProvider,
-}
 
-# Display names for the report's agent breakdown.
-AGENT_LABELS = {
-    "claude": "Claude Code",
-    "codex": "OpenAI Codex",
-}
+@dataclass(frozen=True)
+class AgentProviderSpec:
+    """Shared metadata and factory for one coding-agent session source.
+
+    Registering one spec is the only cross-provider edit a new bundled source
+    should need. CLI choices, MCP validation, display labels, transcript
+    preflight, session collection, and usage aggregation all derive from this
+    registry.
+    """
+
+    name: str
+    label: str
+    factory: Callable[[], BaseAgentProvider]
+
+
+_PROVIDER_SPECS: dict[str, AgentProviderSpec] = {}
+
+
+def register_provider(spec: AgentProviderSpec, *, replace: bool = False) -> None:
+    """Register one provider descriptor.
+
+    ``replace`` exists for controlled embedding and tests; bundled providers
+    must not silently shadow an existing agent id.
+    """
+    name = spec.name.strip()
+    if not name or name == "all":
+        raise ValueError("Provider name must be non-empty and cannot be 'all'")
+    if name != spec.name:
+        raise ValueError("Provider names cannot contain surrounding whitespace")
+    if name in _PROVIDER_SPECS and not replace:
+        raise ValueError(f"Provider '{name}' is already registered")
+    _PROVIDER_SPECS[name] = spec
+
+
+register_provider(AgentProviderSpec("claude", "Claude Code", ClaudeCodeProvider))
+register_provider(AgentProviderSpec("codex", "OpenAI Codex", CodexProvider))
+
+
+def provider_specs(agent: str = "all") -> list[AgentProviderSpec]:
+    """Descriptors selected by ``all`` or a concrete registered agent id."""
+    if agent == "all":
+        return list(_PROVIDER_SPECS.values())
+    spec = _PROVIDER_SPECS.get(agent)
+    if spec is None:
+        raise ValueError(
+            f"Unsupported agent filter '{agent}'. "
+            f"Expected 'all' or one of {list_providers()}"
+        )
+    return [spec]
+
+
+def create_providers(agent: str = "all") -> list[BaseAgentProvider]:
+    """Instantiate the provider population selected for one operation."""
+    providers: list[BaseAgentProvider] = []
+    for spec in provider_specs(agent):
+        provider = spec.factory()
+        if provider.agent_name != spec.name:
+            raise ValueError(
+                f"Provider descriptor '{spec.name}' created an adapter with "
+                f"agent_name '{provider.agent_name}'"
+            )
+        providers.append(provider)
+    return providers
 
 
 def get_provider(agent_name: str) -> BaseAgentProvider:
     """Instantiate a provider by name."""
-    if agent_name not in _PROVIDERS:
+    try:
+        return create_providers(agent_name)[0]
+    except ValueError as exc:
         raise ValueError(
             f"Unknown agent provider: '{agent_name}'. "
-            f"Available: {list(_PROVIDERS)}"
-        )
-    return _PROVIDERS[agent_name]()
+            f"Available: {list_providers()}"
+        ) from exc
 
 
 def list_providers() -> list[str]:
     """Return available provider names."""
-    return list(_PROVIDERS)
+    return list(_PROVIDER_SPECS)
 
 
 def agent_label(agent_name: str) -> str:
     """Human-readable name for an agent, falling back to the raw id."""
-    return AGENT_LABELS.get(agent_name, agent_name)
+    spec = _PROVIDER_SPECS.get(agent_name)
+    return spec.label if spec else agent_name
 
 
 class TranscriptResolver:
@@ -55,8 +113,8 @@ class TranscriptResolver:
     def __init__(self) -> None:
         self._providers: dict[str, BaseAgentProvider] = {}
 
-    def path_for(self, sess: SessionStat) -> Path | None:
-        """Transcript backing ``sess``, or None when it is gone."""
+    def provider_for(self, sess: SessionStat) -> BaseAgentProvider | None:
+        """Cached provider selected by the session's registered agent id."""
         name = getattr(sess, "agent", "claude") or "claude"
         provider = self._providers.get(name)
         if provider is None:
@@ -65,7 +123,24 @@ class TranscriptResolver:
             except ValueError:
                 return None
             self._providers[name] = provider
+        return provider
+
+    def path_for(self, sess: SessionStat) -> Path | None:
+        """Transcript backing ``sess``, or None when it is gone."""
+        provider = self.provider_for(sess)
+        if provider is None:
+            return None
         return provider.transcript_path(sess)
+
+    def excerpt_for(self, sess: SessionStat) -> tuple[str, str] | None:
+        """Provider-owned narrative excerpt for ``sess``, or None if missing."""
+        provider = self.provider_for(sess)
+        if provider is None:
+            return None
+        path = provider.transcript_path(sess)
+        if path is None:
+            return None
+        return provider.extract_excerpt(path)
 
 
 def collect_multi_agent_sessions(
@@ -75,18 +150,8 @@ def collect_multi_agent_sessions(
     agent: str = "all",
 ) -> list[SessionStat]:
     """Collect sessions across one or all registered agent providers."""
-    if agent == "all":
-        providers_to_run = [cls() for cls in _PROVIDERS.values()]
-    elif agent in _PROVIDERS:
-        providers_to_run = [_PROVIDERS[agent]()]
-    else:
-        raise ValueError(
-            f"Unsupported agent filter '{agent}'. "
-            f"Expected 'all' or one of {list_providers()}"
-        )
-
     all_stats: list[SessionStat] = []
-    for provider in providers_to_run:
+    for provider in create_providers(agent):
         all_stats.extend(
             provider.collect_sessions(since, until, engaged_only=engaged_only)
         )

@@ -1,4 +1,4 @@
-"""Parse ~/.claude/projects/**/*.jsonl to estimate active time per category.
+"""Estimate active time per category across registered coding-agent providers.
 
 Active minutes heuristic: sum gaps between consecutive messages capped at 5 min.
 Gaps > 5 min treated as "stepped away". Not precise — good enough to see
@@ -125,9 +125,9 @@ def collect_sessions(
     cli._parse_arg) should pass tz-aware datetimes.
 
     `agent` selects which coding agent's sessions to include: ``all``
-    (default), or a single provider name (``claude`` / ``codex``). Sessions
-    from different agents overlap in wall-clock time — sum `.active_sec`
-    across them and you get parallel work counted twice; use
+    (default), or any id from ``providers.list_providers()``. Sessions from
+    different agents overlap in wall-clock time — sum `.active_sec` across
+    them and you get parallel work counted twice; use
     `wall_clock_active_sec` for any figure presented as a duration.
     """
     from .providers import collect_multi_agent_sessions
@@ -143,16 +143,35 @@ def _is_subagent_path(path: PurePath) -> bool:
 
 
 def wall_clock_active_sec(stats: list[SessionStat]) -> int:
-    """Dedup overlapping active periods across all sessions."""
-    all_ts = sorted(t for s in stats for t in s.timestamps)
-    if len(all_ts) < 2:
+    """Return the union of every session's inferred active intervals.
+
+    Each adjacent timestamp pair contributes at most ``GAP_CAP_SEC`` starting
+    at the earlier event. Building intervals per session first is essential:
+    flattening all timestamps and then measuring adjacent gaps invents active
+    time between unrelated sessions and can make ``wall_clock`` exceed the raw
+    sum (which in turn produces an impossible parallelism factor below 1).
+    """
+    intervals: list[tuple[float, float]] = []
+    for session in stats:
+        timestamps = sorted(set(session.timestamps))
+        for prev, curr in zip(timestamps, timestamps[1:]):
+            if curr <= prev:
+                continue
+            intervals.append((prev, min(curr, prev + GAP_CAP_SEC)))
+
+    if not intervals:
         return 0
-    active = 0
-    for prev, curr in zip(all_ts, all_ts[1:]):
-        gap = curr - prev
-        if gap <= 0:
+
+    intervals.sort()
+    active = 0.0
+    merged_start, merged_end = intervals[0]
+    for start, end in intervals[1:]:
+        if start <= merged_end:
+            merged_end = max(merged_end, end)
             continue
-        active += min(gap, GAP_CAP_SEC)
+        active += merged_end - merged_start
+        merged_start, merged_end = start, end
+    active += merged_end - merged_start
     return int(active)
 
 

@@ -171,9 +171,8 @@ class TestWallClockDedup:
     def test_no_overlap_sums_normally(self):
         a = self._stat_with_ts([0.0, 60.0, 120.0])      # 2×60s = 120s
         b = self._stat_with_ts([300.0, 360.0])          # 60s
-        # Combined: gaps are 60, 60, 180-capped-to-300, 60 → 60+60+180+60 = 360
-        # But 180 < cap, so all gaps under cap → sum = 60+60+180+60 = 360
-        assert wall_clock_active_sec([a, b]) == 360
+        # The 3-minute gap between sessions is idle, not inferred activity.
+        assert wall_clock_active_sec([a, b]) == 180
 
     def test_overlapping_timestamps_deduped(self):
         # Two sessions with identical timestamps — should dedup, not double count
@@ -185,6 +184,16 @@ class TestWallClockDedup:
 
     def test_empty_returns_zero(self):
         assert wall_clock_active_sec([]) == 0
+
+    def test_interleaved_long_gaps_never_exceed_raw_time(self):
+        # The old flattened-timestamp algorithm bridged these two capped idle
+        # gaps and reported 900s wall-clock from only 600s of raw activity.
+        a = self._stat_with_ts([0.0, 600.0])
+        b = self._stat_with_ts([300.0, 900.0])
+        raw = 2 * GAP_CAP_SEC
+        wall = wall_clock_active_sec([a, b])
+        assert wall == raw
+        assert wall <= raw
 
 
 class TestRollupByCategory:

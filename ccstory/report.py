@@ -19,7 +19,7 @@ from rich.text import Text
 
 from .artifacts import ArtifactsReport
 from .categorizer import colors_for, load_settings, normalize_project_name
-from .providers import agent_label
+from .providers import agent_label, list_providers
 from .session_summarizer import SessionSummary
 from .time_tracking import CategoryRollup, SessionStat, wall_clock_active_sec
 from .token_usage import (
@@ -59,7 +59,7 @@ class AgentShare:
 
 def _report_agent_scope(agent: str | None, sessions: list[SessionStat]) -> str:
     """Resolve a display scope while keeping direct legacy callers useful."""
-    if agent in ("all", "claude", "codex"):
+    if agent == "all" or agent in list_providers():
         return agent
     names = {
         getattr(session, "agent", "claude") or "claude"
@@ -71,11 +71,7 @@ def _report_agent_scope(agent: str | None, sessions: list[SessionStat]) -> str:
 
 
 def _agent_title(scope: str, noun: str) -> str:
-    prefix = {
-        "claude": "Claude Code",
-        "codex": "OpenAI Codex",
-        "all": "AI Coding",
-    }.get(scope, "AI Coding")
+    prefix = "AI Coding" if scope == "all" else agent_label(scope)
     return f"{prefix} {noun}"
 
 
@@ -762,7 +758,7 @@ def build_trend_json(
     points: list[PeriodPoint], period: str, agent: str | None = None,
 ) -> dict:
     """Machine-readable trend series (per-period totals + bucket hours)."""
-    agent_scope = agent if agent in ("all", "claude", "codex") else "claude"
+    agent_scope = _report_agent_scope(agent, [])
     return {
         "schema_version": JSON_SCHEMA_VERSION,
         "kind": "trend",
@@ -1221,7 +1217,7 @@ def render_trend_card(
             Text(f"⚠️ {pricing_warning}", style="yellow"),
         ))
     body = Group(*body_parts)
-    agent_scope = agent if agent in ("all", "claude", "codex") else "claude"
+    agent_scope = _report_agent_scope(agent, [])
     return Panel(
         body,
         title=f"[bold]{_agent_title(agent_scope, 'Trend')}[/bold] "
@@ -1239,7 +1235,7 @@ def render_trend_markdown(
     """Markdown table mirroring the trend card."""
     if not points:
         return "# ccstory trend\n\nNo data.\n"
-    agent_scope = agent if agent in ("all", "claude", "codex") else "claude"
+    agent_scope = _report_agent_scope(agent, [])
     cat_series = trend_by_category(points)
     labels = [p.label for p in points]
     lines = [

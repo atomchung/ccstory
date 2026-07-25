@@ -55,7 +55,7 @@ mcp = FastMCP("ccstory")
 
 Window = Literal["week", "month", "all"] | str
 Classify = Literal["folder", "content", "hybrid"]
-Agent = Literal["all", "claude", "codex"]
+Agent = str
 
 # "folder" is the only classify mode that never fires an LLM call (content/
 # hybrid batch-classify claude -p on cache misses) — same choice
@@ -189,7 +189,7 @@ def get_recap(
     `narrative` are null unless `allow_llm=True`. Pass `classify="content"`
     or `"hybrid"`, and/or `allow_llm=True`, to opt into LLM-assisted
     classification / narrative synthesis (slower, may cost tokens).
-    `agent` selects all providers or only Claude Code / OpenAI Codex data.
+    `agent` selects all providers or one registered provider id.
     """
     try:
         result = build_recap(

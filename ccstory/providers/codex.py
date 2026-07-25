@@ -24,6 +24,7 @@ from pathlib import Path
 
 from ..time_tracking import GAP_CAP_SEC, SessionStat, _parse_ts
 from .base import BaseAgentProvider
+from .excerpts import build_excerpt, include_message
 
 # Payload types whose timestamps count as "the agent was working". Bookkeeping
 # events (`token_count`, `task_started`, ...) are skipped so the gap-sum stays
@@ -154,11 +155,64 @@ class CodexProvider(BaseAgentProvider):
     def agent_name(self) -> str:
         return "codex"
 
+    def data_roots(self) -> tuple[Path, ...]:
+        return (
+            self.codex_dir / "sessions",
+            self.codex_dir / "archived_sessions",
+        )
+
+    def extract_excerpt(self, jsonl_path: Path) -> tuple[str, str]:
+        user_msgs: list[str] = []
+        assistant_msgs: list[str] = []
+        cwd = ""
+
+        try:
+            with jsonl_path.open(encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    payload = record.get("payload")
+                    if not isinstance(payload, dict):
+                        continue
+                    if not cwd and isinstance(payload.get("cwd"), str):
+                        cwd = payload["cwd"]
+
+                    kind = record.get("type")
+                    ptype = payload.get("type")
+                    role: str | None = None
+                    text = ""
+                    if kind == "event_msg" and ptype == "user_message":
+                        role = "user"
+                        text = strip_task_wrapper(
+                            _codex_text(payload.get("message", ""))
+                        )
+                    elif (
+                        kind == "response_item"
+                        and ptype == "message"
+                        and payload.get("role") == "assistant"
+                    ):
+                        role = "assistant"
+                        text = _codex_text(payload.get("content", ""))
+
+                    text = text.strip()
+                    if role is None or not include_message(text):
+                        continue
+                    if role == "user":
+                        user_msgs.append(text[:500])
+                    else:
+                        assistant_msgs.append(text[:500])
+        except OSError:
+            return jsonl_path.parent.name, ""
+
+        project = jsonl_path.parent.name
+        if cwd:
+            project = _encode_project_dir(_worktree_origin(cwd)) or project
+        return project, build_excerpt(user_msgs, assistant_msgs)
+
     def _transcript_globs(self) -> list[str]:
-        return [
-            str(self.codex_dir / "sessions" / "**" / "*.jsonl"),
-            str(self.codex_dir / "archived_sessions" / "**" / "*.jsonl"),
-        ]
+        return [str(root / "**" / "*.jsonl") for root in self.data_roots()]
 
     def parse_session(self, jsonl_path: Path) -> SessionStat | None:
         """Parse one Codex rollout transcript into a SessionStat."""

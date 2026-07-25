@@ -477,7 +477,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(
         prog="ccstory",
-        description="Claude Code usage recap with narrative. "
+        description="AI coding-agent usage recap with narrative. "
                     "ccusage tells you the bill; ccstory tells the story.",
         epilog=(
             "Subcommands:\n"
@@ -597,7 +597,8 @@ def _dispatch(argv: list[str] | None = None) -> int:
     parser.add_argument("--agent", choices=["all", *list_providers()],
                         default="all",
                         help="Which coding agent's sessions to include: "
-                             "`all` (default), `claude`, or `codex`.")
+                             f"`all` (default), or one of "
+                             f"{', '.join(list_providers())}.")
     parser.add_argument("--version", action="version",
                         version=f"ccstory {__version__}")
     parser.add_argument("-v", "--verbose", action="store_true")

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Coding-agent sources now register one provider descriptor and own their data
+  roots plus narrative-excerpt parsing. CLI, MCP, reports, session collection,
+  usage aggregation, and availability checks derive from the same registry, so
+  a new bundled agent no longer needs parallel edits across every surface.
+- Source/editable builds now read the canonical development version from
+  `pyproject.toml`; post-0.7 development identifies itself as `0.8.0.dev0`
+  instead of impersonating the latest release.
+
+### Changed
+
+- Narrative and classification prompts describe agent-neutral coding sessions.
+  Provider-specific transcript knowledge no longer lives in the summarizer.
+
+### Fixed
+
+- Cross-session wall-clock time now unions provider-owned activity intervals
+  instead of bridging idle gaps between unrelated sessions. The reported wall
+  clock can no longer exceed raw agent time and produce impossible `<1×`
+  parallelism.
+- Codex availability checks include `archived_sessions`, matching collection;
+  archived-only users are no longer rejected before parsing begins.
+
 ## [0.7.0] - 2026-07-23
 
 ### Added

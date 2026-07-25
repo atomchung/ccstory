@@ -1,4 +1,4 @@
-"""Aggregate Claude token usage from ~/.claude/projects/**/*.jsonl.
+"""Aggregate token usage across registered coding-agent providers.
 
 Each assistant message carries a `usage` block with input / cache_creation /
 cache_read / output token counts. We sum these per model over a date range,
@@ -390,7 +390,7 @@ def collect_usage(
     UTC timestamps in jsonl. Naive inputs are treated as UTC (not system
     local) so test behavior is deterministic across hosts.
     """
-    from .providers import _PROVIDERS, list_providers
+    from .providers import create_providers
 
     if since.tzinfo is None:
         since = since.replace(tzinfo=timezone.utc)
@@ -403,20 +403,10 @@ def collect_usage(
     else:
         until = until.astimezone(timezone.utc)
 
-    if agent == "all":
-        providers_to_run = [cls() for cls in _PROVIDERS.values()]
-    elif agent in _PROVIDERS:
-        providers_to_run = [_PROVIDERS[agent]()]
-    else:
-        raise ValueError(
-            f"Unsupported agent filter '{agent}'. "
-            f"Expected 'all' or one of {list_providers()}"
-        )
-
     by_model: dict[str, ModelUsage] = {}
     assistant_turns = 0
 
-    for provider in providers_to_run:
+    for provider in create_providers(agent):
         assistant_turns += provider.collect_usage(since, until, by_model)
 
     return UsageReport(

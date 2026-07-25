@@ -1,8 +1,8 @@
 # ccstory
 
-> **Your Claude Code week, in plain English.**
-> Reads `~/.claude/projects/**/*.jsonl` locally and writes a categorized recap
-> with active hours, costs, and a per-bucket narrative.
+> **Your AI coding-agent week, in plain English.**
+> Reads local Claude Code and OpenAI Codex session logs and writes a categorized
+> recap with active hours, costs, and a per-bucket narrative.
 
 Sibling to [ccusage](https://github.com/ryoppippi/ccusage):
 **ccusage tells you how much you spent · ccstory tells you what on.**
@@ -256,6 +256,13 @@ the same rules Claude Code project folders get — including git worktrees, so a
 detached checkout counts toward the repo it came from rather than becoming its
 own one-off project.
 
+The source boundary is registry-driven. A bundled provider supplies one
+descriptor plus its data roots, transcript parser, narrative-excerpt extractor,
+and usage collector; CLI choices, MCP filtering, availability checks, and
+report labels derive from that descriptor. This keeps future transcript formats
+inside their provider instead of adding agent-specific branches across every
+output surface.
+
 **Time is reported once, not per agent.** Agents run concurrently: a Codex
 review and a Claude Code session routinely occupy the same ten minutes. Summing
 their active time double-counts that overlap — on a real week here, raw
@@ -272,10 +279,12 @@ per-agent time added up to 177h against a deduplicated wall clock of 64h. So:
 - **`N× parallel`** is raw agent time ÷ wall clock: how much of the work
   overlapped.
 
-Token counts and costs still cover Claude Code only — Codex usage appears in the
-time breakdown but not in the cost numbers, and the report says so inline.
+Token usage and costs cover both shipped providers. Claude Code and OpenAI
+Codex input, cache, and output tokens are converted through the vendored model
+price table; models without a known rate remain visible and make the cost
+estimate warn that it is incomplete.
 
-Use `--agent claude` to get the pre-multi-agent numbers back.
+Use `--agent claude` or `--agent codex` to isolate one provider.
 
 ## What shipped
 
@@ -487,7 +496,9 @@ ccstory month
 ccstory never sends your conversation data to its own service or to the
 What-shipped metadata providers. There is no ccstory telemetry or account.
 
-- **Data source**: `~/.claude/projects/**/*.jsonl` — Claude Code's own logs.
+- **Data source**: Claude Code logs under
+  `~/.claude/projects/**/*.jsonl`, plus Codex live and archived rollouts under
+  `~/.codex/{sessions,archived_sessions}/**/*.jsonl`.
 - **Narratives and classification**: subprocess-call your locally installed
   `claude -p`. The Claude CLI contacts Anthropic using your signed-in session
   and plan quota; ccstory does not use your API key or operate a proxy.
