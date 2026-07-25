@@ -143,6 +143,42 @@ class TestCodexExcerpt:
         assert "refactor the auth middleware" in excerpt
         assert "Extracted token validation." in excerpt
 
+    def test_antigravity_transcript_yields_a_non_empty_excerpt(self, tmp_home):
+        brain_dir = (
+            tmp_home
+            / ".gemini"
+            / "antigravity"
+            / "brain"
+            / "ag-sid"
+            / ".system_generated"
+            / "logs"
+        )
+        brain_dir.mkdir(parents=True, exist_ok=True)
+        path = brain_dir / "transcript.jsonl"
+        with path.open("w", encoding="utf-8") as f:
+            f.write(
+                json.dumps({
+                    "step_index": 0,
+                    "source": "USER_EXPLICIT",
+                    "type": "USER_INPUT",
+                    "created_at": _ts(0),
+                    "content": "<USER_REQUEST>\nBuild Antigravity provider integration\n</USER_REQUEST>",
+                }) + "\n"
+            )
+            f.write(
+                json.dumps({
+                    "step_index": 1,
+                    "source": "MODEL",
+                    "type": "PLANNER_RESPONSE",
+                    "created_at": _ts(1),
+                    "content": "Implemented Antigravity provider and test suite.",
+                }) + "\n"
+            )
+        project, excerpt = _extract_excerpt(path)
+        assert project == "antigravity"
+        assert "Build Antigravity provider integration" in excerpt
+        assert "Implemented Antigravity provider and test suite." in excerpt
+
 
 def _stat(agent: str, sid: str, start_min: int, minutes: int) -> SessionStat:
     """A session whose timestamps tick once a minute, so gaps never hit the cap."""

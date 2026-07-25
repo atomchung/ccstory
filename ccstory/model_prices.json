@@ -1,8 +1,56 @@
 {
   "generated_at": "2026-07-23",
   "source_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
-  "entry_count": 66,
+  "entry_count": 74,
   "prices": {
+    "gemini-3.6-flash": {
+      "inp": 0.15,
+      "out": 0.6,
+      "cw": 0.15,
+      "cr": 0.0375
+    },
+    "gemini-3.6-flash-high": {
+      "inp": 0.15,
+      "out": 0.6,
+      "cw": 0.15,
+      "cr": 0.0375
+    },
+    "gemini-3-flash": {
+      "inp": 0.15,
+      "out": 0.6,
+      "cw": 0.15,
+      "cr": 0.0375
+    },
+    "gemini-2.5-pro": {
+      "inp": 1.25,
+      "out": 5.0,
+      "cw": 1.25,
+      "cr": 0.3125
+    },
+    "gemini-1.5-pro": {
+      "inp": 1.25,
+      "out": 5.0,
+      "cw": 1.25,
+      "cr": 0.3125
+    },
+    "gemini-2.5-flash": {
+      "inp": 0.075,
+      "out": 0.3,
+      "cw": 0.075,
+      "cr": 0.01875
+    },
+    "gemini-flash": {
+      "inp": 0.15,
+      "out": 0.6,
+      "cw": 0.15,
+      "cr": 0.0375
+    },
+    "gemini-pro": {
+      "inp": 1.25,
+      "out": 5.0,
+      "cw": 1.25,
+      "cr": 0.3125
+    },
     "claude-haiku-4-5-20251001": {
       "inp": 1.0,
       "out": 5.0,

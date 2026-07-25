@@ -663,11 +663,27 @@ def _codex_content_text(content) -> str:
     return ""
 
 
+def _antigravity_record_text(d: dict) -> tuple[str | None, str]:
+    """(role, text) for one Antigravity transcript record."""
+    from .providers.antigravity import extract_user_request_text
+
+    stype = d.get("type")
+    source = d.get("source")
+    content = d.get("content", "") or ""
+
+    if stype == "USER_INPUT" or source == "USER_EXPLICIT":
+        return "user", extract_user_request_text(content)
+    if stype == "PLANNER_RESPONSE" or source == "MODEL":
+        return "assistant", content
+    return None, ""
+
+
 def _extract_excerpt(jsonl_path: Path) -> tuple[str, str]:
     """Extract user-facing text excerpt for summarization. Returns (project, excerpt).
 
     Handles every agent's transcript format (#133): a record carrying a dict
-    ``payload`` is Codex, anything else is Claude Code. Format sniffing per
+    ``payload`` is Codex, a record carrying ``step_index`` or Antigravity step
+    types is Antigravity, anything else is Claude Code. Format sniffing per
     record rather than per file keeps this working for a caller that only has
     a path — `summarize_session` is reached from cache-repair paths that have
     no `SessionStat` to ask.
@@ -696,6 +712,12 @@ def _extract_excerpt(jsonl_path: Path) -> tuple[str, str]:
                     if not detected_cwd and isinstance(payload.get("cwd"), str):
                         detected_cwd = payload["cwd"]
                     role, text = _codex_record_text(payload, d.get("type"))
+                elif (
+                    "step_index" in d
+                    or d.get("type") in ("USER_INPUT", "PLANNER_RESPONSE")
+                    or d.get("source") in ("USER_EXPLICIT", "MODEL")
+                ):
+                    role, text = _antigravity_record_text(d)
                 else:
                     role, text = _claude_record_text(d)
 
@@ -716,14 +738,30 @@ def _extract_excerpt(jsonl_path: Path) -> tuple[str, str]:
     except OSError:
         return project, ""
 
+    if not detected_cwd and "antigravity" in str(jsonl_path):
+        parts = jsonl_path.parts
+        if "brain" in parts:
+            idx = parts.index("brain")
+            if idx + 1 < len(parts):
+                session_id = parts[idx + 1]
+                from .providers.antigravity import extract_cwd_from_db
+                db_path = (
+                    Path.home()
+                    / ".gemini"
+                    / "antigravity"
+                    / "conversations"
+                    / f"{session_id}.db"
+                )
+                detected_cwd = extract_cwd_from_db(db_path)
+
     if detected_cwd:
-        # Codex transcripts live in a date tree, not a project folder, so the
-        # cache row's project has to come from the recorded cwd — encoded the
-        # way the Claude provider names project dirs so both agents' rows land
-        # under the same project.
+        # Codex & Antigravity transcripts live in date/brain trees, so project identity
+        # is derived from CWD — encoded the way Claude Code names project dirs.
         from .providers.codex import _encode_project_dir, _worktree_origin
 
         project = _encode_project_dir(_worktree_origin(detected_cwd)) or project
+    elif "antigravity" in str(jsonl_path):
+        project = "antigravity"
 
     parts: list[str] = []
     head_set = set(user_msgs[:N_USER_HEAD])

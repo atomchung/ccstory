@@ -55,7 +55,7 @@ mcp = FastMCP("ccstory")
 
 Window = Literal["week", "month", "all"] | str
 Classify = Literal["folder", "content", "hybrid"]
-Agent = Literal["all", "claude", "codex"]
+Agent = Literal["all", "claude", "codex", "antigravity"]
 
 # "folder" is the only classify mode that never fires an LLM call (content/
 # hybrid batch-classify claude -p on cache misses) — same choice

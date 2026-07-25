@@ -483,6 +483,7 @@ def _backfill_summaries(
 _DATA_ROOTS: dict[str, Callable[[], Path]] = {
     "claude": lambda: CLAUDE_PROJECTS,
     "codex": lambda: Path.home() / ".codex" / "sessions",
+    "antigravity": lambda: Path.home() / ".gemini" / "antigravity" / "brain",
 }
 
 

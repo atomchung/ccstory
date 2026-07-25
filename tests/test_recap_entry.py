@@ -167,7 +167,7 @@ class TestBuildRecap:
 
     def test_unknown_agent_raises_value_error(self, tmp_home):
         with pytest.raises(ValueError, match="Unsupported agent filter"):
-            build_recap("week", agent="antigravity")
+            build_recap("week", agent="bogus-agent")
 
     def test_every_registered_provider_has_a_data_root(self):
         """Registering a provider without a root here would report "no session

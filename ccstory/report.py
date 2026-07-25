@@ -59,7 +59,7 @@ class AgentShare:
 
 def _report_agent_scope(agent: str | None, sessions: list[SessionStat]) -> str:
     """Resolve a display scope while keeping direct legacy callers useful."""
-    if agent in ("all", "claude", "codex"):
+    if agent in ("all", "claude", "codex", "antigravity"):
         return agent
     names = {
         getattr(session, "agent", "claude") or "claude"
@@ -74,6 +74,7 @@ def _agent_title(scope: str, noun: str) -> str:
     prefix = {
         "claude": "Claude Code",
         "codex": "OpenAI Codex",
+        "antigravity": "Google Antigravity",
         "all": "AI Coding",
     }.get(scope, "AI Coding")
     return f"{prefix} {noun}"
@@ -762,7 +763,7 @@ def build_trend_json(
     points: list[PeriodPoint], period: str, agent: str | None = None,
 ) -> dict:
     """Machine-readable trend series (per-period totals + bucket hours)."""
-    agent_scope = agent if agent in ("all", "claude", "codex") else "claude"
+    agent_scope = agent if agent in ("all", "claude", "codex", "antigravity") else "claude"
     return {
         "schema_version": JSON_SCHEMA_VERSION,
         "kind": "trend",
@@ -1239,7 +1240,7 @@ def render_trend_markdown(
     """Markdown table mirroring the trend card."""
     if not points:
         return "# ccstory trend\n\nNo data.\n"
-    agent_scope = agent if agent in ("all", "claude", "codex") else "claude"
+    agent_scope = agent if agent in ("all", "claude", "codex", "antigravity") else "claude"
     cat_series = trend_by_category(points)
     labels = [p.label for p in points]
     lines = [

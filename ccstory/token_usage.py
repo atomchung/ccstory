@@ -31,11 +31,13 @@ PRICES_SNAPSHOT_DATE = "2026-07"
 PRICING_SNAPSHOT_STALE_DAYS = 90
 
 DEFAULT_PRICES: dict[str, dict[str, float]] = {
-    "fable":  dict(inp=10.00, out=50.00, cw=12.50, cr=1.00),
-    "mythos": dict(inp=10.00, out=50.00, cw=12.50, cr=1.00),
-    "opus":   dict(inp=5.00,  out=25.00, cw=6.25,  cr=0.50),
-    "sonnet": dict(inp=3.00,  out=15.00, cw=3.75,  cr=0.30),
-    "haiku":  dict(inp=1.00,  out=5.00,  cw=1.25,  cr=0.10),
+    "fable":        dict(inp=10.00, out=50.00, cw=12.50, cr=1.00),
+    "mythos":       dict(inp=10.00, out=50.00, cw=12.50, cr=1.00),
+    "opus":         dict(inp=5.00,  out=25.00, cw=6.25,  cr=0.50),
+    "sonnet":       dict(inp=3.00,  out=15.00, cw=3.75,  cr=0.30),
+    "haiku":        dict(inp=1.00,  out=5.00,  cw=1.25,  cr=0.10),
+    "gemini-flash": dict(inp=0.15,  out=0.60,  cw=0.15,  cr=0.0375),
+    "gemini-pro":   dict(inp=1.25,  out=5.00,  cw=1.25,  cr=0.3125),
 }
 
 # Lazy loading cache for vendored model prices table (packaged data)

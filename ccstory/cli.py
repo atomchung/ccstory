@@ -629,9 +629,12 @@ def _dispatch(argv: list[str] | None = None) -> int:
     # `build_recap` re-checks this per --agent; the early exit here is only so
     # a first-time user with no data at all gets the message before the
     # first-run preview prints.
-    if not CLAUDE_PROJECTS.exists() and not (Path.home() / ".codex").exists():
-        sys.exit(f"No session data at {CLAUDE_PROJECTS}. "
-                 "Have you used Claude Code or Codex yet?")
+    if (
+        not CLAUDE_PROJECTS.exists()
+        and not (Path.home() / ".codex").exists()
+        and not (Path.home() / ".gemini" / "antigravity").exists()
+    ):
+        sys.exit("No session data found for Claude Code, Codex, or Antigravity.")
 
     _print_first_run_preview(console)
 

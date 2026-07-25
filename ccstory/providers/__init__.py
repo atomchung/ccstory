@@ -7,18 +7,21 @@ from pathlib import Path
 
 from ..time_tracking import SessionStat
 from .base import BaseAgentProvider
+from .antigravity import AntigravityProvider
 from .claude import ClaudeCodeProvider
 from .codex import CodexProvider
 
 _PROVIDERS: dict[str, type[BaseAgentProvider]] = {
     "claude": ClaudeCodeProvider,
     "codex": CodexProvider,
+    "antigravity": AntigravityProvider,
 }
 
 # Display names for the report's agent breakdown.
 AGENT_LABELS = {
     "claude": "Claude Code",
     "codex": "OpenAI Codex",
+    "antigravity": "Google Antigravity",
 }
 
 
