@@ -61,7 +61,8 @@ python -m pip install -e ".[test,mcp]"
 Run focused tests while iterating, then the complete suite before handoff:
 
 ```bash
-pytest tests/test_target_area.py
+# Example: replace with the relevant existing test file for the changed area.
+pytest tests/test_antigravity_provider.py
 pytest
 ```
 
