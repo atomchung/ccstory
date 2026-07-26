@@ -27,7 +27,7 @@ import tomllib
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from .time_tracking import SessionStat, _parse_ts
@@ -40,9 +40,10 @@ GIT_TIMEOUT_SEC = 5
 GH_TIMEOUT_SEC = 10
 HTTP_TIMEOUT_SEC = 10
 
-# gh pr list pagination ceiling. A personal window with >200 merged PRs in
-# one repo is out of scope; hitting the cap logs a warning instead of lying.
-_GH_PR_LIMIT = 200
+# GitHub's issue/PR search API returns at most 1,000 results for one query.
+# Date-range queries are recursively split before accepting a capped result,
+# so lifetime PR volume cannot hide PRs from the requested report window.
+_GH_PR_SEARCH_LIMIT = 1000
 
 _GITHUB_REMOTE_RE = re.compile(
     r"github\.com[:/](?P<owner>[^/]+)/(?P<repo>[^/\s]+?)(?:\.git)?/?$"
@@ -183,11 +184,28 @@ def _gh_available() -> bool:
     return shutil.which("gh") is not None
 
 
-def count_merged_prs(slug: str, since: datetime, until: datetime) -> int | None:
+def _search_merged_prs(
+    slug: str,
+    start_day: date,
+    end_day: date,
+) -> list[dict] | None:
+    """Merged PR rows for an inclusive UTC date range.
+
+    GitHub search has a hard 1,000-result ceiling. Split a capped multi-day
+    query until each slice is below the ceiling; only a single day with 1,000+
+    merged PRs remains genuinely incomplete.
+    """
+    date_query = (
+        start_day.isoformat()
+        if start_day == end_day
+        else f"{start_day.isoformat()}..{end_day.isoformat()}"
+    )
     out = _run(
         [
             "gh", "pr", "list", "--repo", slug, "--state", "merged",
-            "--json", "mergedAt", "--limit", str(_GH_PR_LIMIT),
+            "--search", f"merged:{date_query}",
+            "--json", "number,mergedAt",
+            "--limit", str(_GH_PR_SEARCH_LIMIT),
         ],
         timeout=GH_TIMEOUT_SEC,
     )
@@ -197,10 +215,58 @@ def count_merged_prs(slug: str, since: datetime, until: datetime) -> int | None:
         prs = json.loads(out)
     except json.JSONDecodeError:
         return None
-    if len(prs) >= _GH_PR_LIMIT:
-        LOG.warning("%s: merged-PR list hit the %d cap; count may be low", slug, _GH_PR_LIMIT)
+    if not isinstance(prs, list):
+        return None
+    if len(prs) < _GH_PR_SEARCH_LIMIT:
+        return prs
+
+    if start_day == end_day:
+        LOG.warning(
+            "%s: merged-PR search hit GitHub's %d-result cap for %s; "
+            "count may be low",
+            slug,
+            _GH_PR_SEARCH_LIMIT,
+            start_day.isoformat(),
+        )
+        return prs
+
+    midpoint = start_day + timedelta(days=(end_day - start_day).days // 2)
+    left = _search_merged_prs(slug, start_day, midpoint)
+    right = _search_merged_prs(slug, midpoint + timedelta(days=1), end_day)
+    if left is None or right is None:
+        return None
+    return left + right
+
+
+def count_merged_prs(slug: str, since: datetime, until: datetime) -> int | None:
+    """Count merged PRs in the exact half-open report window.
+
+    GitHub performs the coarse UTC-date filter, then exact ``mergedAt``
+    timestamps preserve ccstory's existing ``[since, until)`` semantics.
+    """
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    else:
+        since = since.astimezone(timezone.utc)
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=timezone.utc)
+    else:
+        until = until.astimezone(timezone.utc)
+    if until <= since:
+        return 0
+
+    prs = _search_merged_prs(slug, since.date(), until.date())
+    if prs is None:
+        return None
+
     count = 0
+    seen: set[int] = set()
     for pr in prs:
+        number = pr.get("number")
+        if isinstance(number, int):
+            if number in seen:
+                continue
+            seen.add(number)
         merged = _parse_ts(pr.get("mergedAt"))
         if merged and since <= merged < until:
             count += 1

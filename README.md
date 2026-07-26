@@ -516,8 +516,9 @@ What-shipped metadata providers. There is no ccstory telemetry or account.
   and plan quota; ccstory does not use your API key or operate a proxy.
 - **Pricing**: ccstory makes no pricing network requests. Model prices ship with each release and come from the LiteLLM registry.
 - **What shipped**: local git supplies commit counts. By default, `gh` may send
-  a repo slug and request recent PR/release timestamps plus the current star
-  count from GitHub; ccstory filters timestamps to the report window locally.
+  a repo slug and the report's date range to request matching PR timestamps,
+  plus recent release timestamps and the current star count from GitHub;
+  ccstory applies exact report-window boundaries locally.
   The pypistats request sends a package name to pypistats.org. No conversation
   text, prompt, summary, local path, or commit contents are included.
 - **Cache**: `~/.ccstory/cache.db` (sqlite, per-session summaries).

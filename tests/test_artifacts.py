@@ -150,13 +150,96 @@ class TestGithubSlug:
 class TestGhCollectors:
     def test_merged_prs_filters_window(self, monkeypatch: pytest.MonkeyPatch):
         payload = json.dumps([
-            {"mergedAt": "2026-07-02T10:00:00Z"},   # in
-            {"mergedAt": "2026-06-30T10:00:00Z"},   # before
-            {"mergedAt": "2026-07-08T00:00:00Z"},   # at until → excluded (half-open)
-            {"mergedAt": None},                       # gh oddity
+            {"number": 1, "mergedAt": "2026-07-02T10:00:00Z"},  # in
+            {"number": 2, "mergedAt": "2026-06-30T10:00:00Z"},  # before
+            # At until → excluded (half-open).
+            {"number": 3, "mergedAt": "2026-07-08T00:00:00Z"},
+            {"number": 4, "mergedAt": None},  # gh oddity
         ])
         monkeypatch.setattr(artifacts, "_run", lambda *a, **k: payload)
         assert count_merged_prs("a/b", SINCE, UNTIL) == 1
+
+    def test_merged_pr_search_is_scoped_to_report_dates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        commands: list[list[str]] = []
+
+        def fake_run(cmd, **_kwargs):
+            commands.append(cmd)
+            return "[]"
+
+        monkeypatch.setattr(artifacts, "_run", fake_run)
+
+        assert count_merged_prs("a/b", SINCE, UNTIL) == 0
+        cmd = commands[0]
+        assert cmd[cmd.index("--search") + 1] == (
+            "merged:2026-07-01..2026-07-08"
+        )
+        assert cmd[cmd.index("--json") + 1] == "number,mergedAt"
+        assert cmd[cmd.index("--limit") + 1] == "1000"
+
+    def test_two_hundred_window_rows_no_longer_trigger_lifetime_cap_warning(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        payload = json.dumps([
+            {"number": n, "mergedAt": "2026-07-02T10:00:00Z"}
+            for n in range(1, 201)
+        ])
+        monkeypatch.setattr(artifacts, "_run", lambda *a, **k: payload)
+
+        assert count_merged_prs("a/b", SINCE, UNTIL) == 200
+        assert "cap" not in caplog.text
+
+    def test_capped_multi_day_search_recursively_splits_without_undercounting(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        monkeypatch.setattr(artifacts, "_GH_PR_SEARCH_LIMIT", 3)
+        queries: list[str] = []
+
+        def fake_run(cmd, **_kwargs):
+            query = cmd[cmd.index("--search") + 1]
+            queries.append(query)
+            if query == "merged:2026-07-01..2026-07-08":
+                # Hitting the cap makes this coarse result inadmissible.
+                return json.dumps([
+                    {"number": 90 + n, "mergedAt": "2026-07-02T10:00:00Z"}
+                    for n in range(3)
+                ])
+            if query == "merged:2026-07-01..2026-07-04":
+                return json.dumps([
+                    {"number": 1, "mergedAt": "2026-07-02T10:00:00Z"},
+                    {"number": 2, "mergedAt": "2026-07-03T10:00:00Z"},
+                ])
+            if query == "merged:2026-07-05..2026-07-08":
+                return json.dumps([
+                    {"number": 3, "mergedAt": "2026-07-07T10:00:00Z"},
+                ])
+            raise AssertionError(f"unexpected query: {query}")
+
+        monkeypatch.setattr(artifacts, "_run", fake_run)
+
+        assert count_merged_prs("a/b", SINCE, UNTIL) == 3
+        assert queries == [
+            "merged:2026-07-01..2026-07-08",
+            "merged:2026-07-01..2026-07-04",
+            "merged:2026-07-05..2026-07-08",
+        ]
+        assert "count may be low" not in caplog.text
+
+    def test_single_day_search_cap_still_warns_truthfully(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        monkeypatch.setattr(artifacts, "_GH_PR_SEARCH_LIMIT", 2)
+        payload = json.dumps([
+            {"number": 1, "mergedAt": "2026-07-02T10:00:00Z"},
+            {"number": 2, "mergedAt": "2026-07-02T11:00:00Z"},
+        ])
+        monkeypatch.setattr(artifacts, "_run", lambda *a, **k: payload)
+        since = datetime(2026, 7, 2, 0, 0, tzinfo=timezone.utc)
+        until = datetime(2026, 7, 2, 23, 59, tzinfo=timezone.utc)
+
+        assert count_merged_prs("a/b", since, until) == 2
+        assert "count may be low" in caplog.text
 
     def test_merged_prs_gh_failure(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(artifacts, "_run", lambda *a, **k: None)
