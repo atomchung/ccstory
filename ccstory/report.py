@@ -219,15 +219,32 @@ def _session_summary_text(s: SessionStat, summaries: dict | None = None) -> str:
     return s.first_user_text or ""
 
 
-def _top_session_text(rollup: CategoryRollup, summaries: dict, max_chars: int = 70) -> str:
-    """One-line summary of the longest session in a category. Always single-line."""
+_TERMINAL_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+_TERMINAL_OPEN_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*$")
+
+
+def _terminal_plain_text(value: str) -> str:
+    """Remove lightweight Markdown that is noisy inside Rich card copy."""
+    text = _TERMINAL_MD_LINK_RE.sub(r"\1", value)
+    text = _TERMINAL_OPEN_MD_LINK_RE.sub(r"\1", text)
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    return text.replace("`", "")
+
+
+def _top_session_text(
+    rollup: CategoryRollup,
+    summaries: dict,
+    max_chars: int | None = 70,
+) -> str:
+    """Single-line summary of the longest session, optionally character-capped."""
     if not rollup.top_sessions:
         return ""
     top = rollup.top_sessions[0]
     text = _session_summary_text(top, summaries) or "(no summary)"
+    text = _terminal_plain_text(text)
     # Always collapse to one line — newlines/extra whitespace mangle the panel
     text = " ".join(text.split())
-    if len(text) > max_chars:
+    if max_chars is not None and len(text) > max_chars:
         text = text[: max_chars - 1].rstrip() + "…"
     return text
 
@@ -929,9 +946,9 @@ def render_terminal_card(
         headline.append(f"  {top_r.active_min/60:.1f}h", style="bold")
         headline.append(f"  ({top_pct:.0f}% of active time)", style="dim")
         highlight_block.append(headline)
-        top_text = _top_session_text(top_r, summaries)
+        top_text = _top_session_text(top_r, summaries, max_chars=None)
         if top_text:
-            sub = Text(no_wrap=True, overflow="ellipsis")
+            sub = Text(overflow="fold")
             sub.append("  ↳ ", style="dim")
             sub.append(top_text, style="italic")
             highlight_block.append(sub)
@@ -978,8 +995,8 @@ def render_terminal_card(
     proj_table: Table | None = None
     if split_areas:
         proj_table = Table.grid(padding=(0, 1))
-        proj_table.add_column(width=12, no_wrap=True, overflow="ellipsis")
-        proj_table.add_column(no_wrap=True, overflow="ellipsis", width=52)
+        proj_table.add_column(width=12, no_wrap=True)
+        proj_table.add_column(overflow="fold", width=52)
         for r in split_areas:
             color = colors[r.category]
             top3 = r.projects[:3]
@@ -1005,17 +1022,6 @@ def render_terminal_card(
         parts.append(Text("By project", style="bold underline"))
         parts.append(proj_table)
 
-    if usage.unpriced_models:
-        unpriced_str = ", ".join(usage.unpriced_models)
-        parts.append(
-            Text(f"Cost excludes {unpriced_str} (missing from price table).", style="dim yellow")
-        )
-    coverage_warning = _usage_coverage_message(usage.provider_coverage)
-    if coverage_warning:
-        parts.append(
-            Text(coverage_warning, style="yellow")
-        )
-
     if overall_narrative:
         parts.append(Text(""))
         parts.append(Text("What you did", style="bold underline"))
@@ -1027,7 +1033,7 @@ def render_terminal_card(
             # a hanging indent instead of restarting at column 0.
             did_table = Table.grid(padding=(0, 1))
             did_table.add_column(width=2)
-            did_table.add_column()
+            did_table.add_column(overflow="fold")
             for h in headers:
                 did_table.add_row(Text("•", style="dim"), Text(h, style="bold"))
             parts.append(did_table)
@@ -1059,8 +1065,8 @@ def render_terminal_card(
     shares = agent_breakdown(sessions)
     if len(shares) >= 2:
         agent_table = Table.grid(padding=(0, 1))
-        agent_table.add_column(width=14, no_wrap=True, overflow="ellipsis")
-        agent_table.add_column(no_wrap=True)
+        agent_table.add_column(width=12, no_wrap=True)
+        agent_table.add_column(overflow="fold")
         for a in shares:
             agent_table.add_row(
                 Text(a.label, style="bold"),
@@ -1084,6 +1090,21 @@ def render_terminal_card(
         footer.append("Full report → ", style="dim")
         footer.append(report_path, style="dim underline")
         parts.append(footer)
+
+    # Cost/coverage caveats are report-wide footnotes, not part of the
+    # project or narrative story. Keep them at the bottom of the card.
+    if usage.unpriced_models:
+        unpriced_str = ", ".join(usage.unpriced_models)
+        parts.append(
+            Text(
+                f"Cost excludes {unpriced_str} (missing from price table).",
+                style="dim yellow",
+                overflow="fold",
+            )
+        )
+    coverage_warning = _usage_coverage_message(usage.provider_coverage)
+    if coverage_warning:
+        parts.append(Text(coverage_warning, style="yellow", overflow="fold"))
 
     pricing_warning = pricing_snapshot_warning(until)
     if pricing_warning:

@@ -117,7 +117,8 @@ class TestAgentScopedTitle:
             )
         )
         text = console.export_text()
-        assert "OpenAI Codex Recap" in text
+        assert "Codex Recap" in text
+        assert "OpenAI Codex" not in text
         assert "Claude Code Recap" not in text
 
 
@@ -187,6 +188,64 @@ class TestWhatYouDidCard:
         assert narrative in out
 
 
+class TestCardWrapping:
+    def test_long_highlight_project_and_narrative_text_wrap_without_ellipsis(self):
+        top_session = SessionStat(
+            project="demo",
+            category="輸出",
+            session_id="long-copy",
+            start=SINCE,
+            end=UNTIL,
+            active_sec=3600,
+            msg_count=2,
+            first_user_text=(
+                "Continue reviewing the repository and coordinate several sessions "
+                "before selecting the **next step** "
+                "[$record](/Users/demo/skills/record/SKILL.md) WRAP_END"
+            ),
+        )
+        rollup = CategoryRollup(
+            category="輸出",
+            active_min=60.0,
+            sessions=1,
+            messages=2,
+            top_sessions=[top_session],
+            projects=[
+                ProjectRollup(
+                    "kol-collector-fomo-kernel-with-a-long-project-name",
+                    45.0,
+                    1,
+                    1,
+                ),
+                ProjectRollup("personal-os-project-tail", 15.0, 1, 1),
+            ],
+        )
+        narrative = (
+            "**A long outcome header should remain readable across wrapped lines "
+            "instead of ending in repeated dots HEADER_END**"
+        )
+        console = Console(width=72, record=True)
+        console.print(
+            render_terminal_card(
+                since=SINCE,
+                until=UNTIL,
+                sessions=[top_session],
+                rollups=[rollup],
+                usage=_usage(),
+                overall_narrative=narrative,
+            )
+        )
+
+        text = console.export_text()
+        assert "WRAP_END" in text
+        assert "$record" in text
+        assert "/Users/demo" not in text
+        assert "**" not in text
+        assert "personal-os-project-tail" in text
+        assert "HEADER_END" in text
+        assert "…" not in text
+
+
 class TestUnpricedModelCaveatTerminalCard:
     def test_no_caveat_when_all_models_priced(self):
         usage = UsageReport(since=SINCE, until=UNTIL)
@@ -224,3 +283,42 @@ class TestUnpricedModelCaveatTerminalCard:
         )
         text = console.export_text()
         assert "Cost excludes gpt-5.7-super (missing from price table)." in text
+
+    def test_caveat_is_a_footer_after_agent_breakdown_and_report_link(self):
+        usage = UsageReport(since=SINCE, until=UNTIL)
+        usage.by_model["gpt-5.7-super"] = ModelUsage(
+            model="gpt-5.7-super", turns=5, input_tokens=1000, output_tokens=500
+        )
+        sessions = [
+            SessionStat(
+                project="demo",
+                category="coding",
+                session_id=f"{agent}-1",
+                start=SINCE,
+                end=UNTIL,
+                active_sec=60,
+                msg_count=2,
+                agent=agent,
+            )
+            for agent in ("claude", "codex", "antigravity")
+        ]
+        console = Console(width=72, record=True)
+        console.print(
+            render_terminal_card(
+                since=SINCE,
+                until=UNTIL,
+                sessions=sessions,
+                rollups=_rollups([("coding", 60.0)]),
+                usage=usage,
+                report_path="/tmp/recap.md",
+            )
+        )
+
+        text = console.export_text()
+        assert text.index("Agent Breakdown") < text.index("Full report")
+        assert text.index("Full report") < text.index("Cost excludes")
+        assert "Claude Code" in text
+        assert "Codex" in text
+        assert "Antigravity" in text
+        assert "OpenAI Codex" not in text
+        assert "Google Antigr" not in text

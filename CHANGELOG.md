@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Shortened recap display labels to `Codex` and `Antigravity`, moved
+  report-wide cost/coverage caveats to the card footer, and let long highlight,
+  project, narrative, and agent-breakdown text wrap instead of rendering
+  repeated ellipses.
+
 ## [0.7.2] - 2026-07-26
 
 ### Added
