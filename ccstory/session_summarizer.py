@@ -831,9 +831,13 @@ Below is a breakdown of every AI coding-agent session in a single time window, g
 
 Reframe the period around the user's GOAL THREADS, NOT a category-by-category log. Merge the categories into 2-4 mission threads reflecting what the user is building toward (fold tool-building categories into one "build" thread; keep investing research its own thread). Lead with the thread that took the most time.
 
-For EACH thread write a block with TWO parts:
-1) A SHORT bold header (ONE line): the CONCRETE thing achieved this period AND its payoff (what it now enables). Specific enough to identify THIS week alone, NEVER a generic progress arc reusable for any week. BANNED header styles (generic arcs reusable for ANY week): "laid the foundation", "now live", "from firefighting to foundation", "single-fix to platform", "X 從單點修復邁向地基層", "走向平台化", "全面收斂", "全面補強", "紀律收斂", "可信度全面補強", "維運全面收斂". Abstract progress-verbs used AS the payoff — 「收斂」「全面補強」「全面強化」「補強」「(全面)提升」— are BANNED: the payoff must be a concrete capability or result you can point to, never a process word. If a real version shipped (e.g. "ccstory v0.4.2"), name it. NO issue/PR numbers.
-2) Then 1-3 bullet points (each line starts with "- "): one concrete thing done, phrased as an outcome, not a pile of technical nouns. Use the minimum that covers the thread — most threads need 1-2 bullets; write a 3rd only when there's a genuinely distinct third outcome, never by splitting one outcome into parts to hit the cap.
+Top focus is the core of this report, not a time bucket or a session title. For EACH thread, make the user's intent and progress explicit in this exact four-line shape. Keep the three field labels in English exactly as written below so every report surface can read them reliably; write their values in the requested response language:
+1) A SHORT bold header (ONE line): the concrete mission, specific enough to identify THIS week alone.
+2) `- Goal: ...` — the user's underlying objective. State what they are trying to accomplish, not the implementation task.
+3) `- Target state: ...` — the observable end state that would mean the goal is achieved.
+4) `- Completed: ...` — what was actually completed in THIS time window and how it moves toward that target. Combine related completed outcomes in this one line; do not turn planned, attempted, or merely discussed work into completion.
+
+The Goal, Target state, and Completed lines are all required for every thread. Ground all three in the session summaries. If the desired end state is genuinely not stated or cannot be inferred from the summaries, say that it is not stated in this period rather than inventing one. NEVER use a generic progress arc reusable for any week. BANNED styles include: "laid the foundation", "now live", "from firefighting to foundation", "single-fix to platform", "X 從單點修復邁向地基層", "走向平台化", "全面收斂", "全面補強", "紀律收斂", "可信度全面補強", "維運全面收斂". Abstract progress-verbs used AS the payoff — 「收斂」「全面補強」「全面強化」「補強」「(全面)提升」— are BANNED: use a concrete capability or result instead. If a real version shipped (e.g. "ccstory v0.4.2"), name it. NO issue/PR numbers.
 
 Concrete header examples (mirror this specificity in the response language):
 - Good: "fomo-kernel 現金流與多幣別帳本落地，portfolio 首次能算真實成本基礎"
@@ -842,9 +846,9 @@ Concrete header examples (mirror this specificity in the response language):
 - Bad (abstract progress-verb as payoff): "個人系統維運全面收斂，工具鏈可信度全面補強"
 
 Rules:
-- 2-4 threads total. Header = the key concrete win + its payoff, specific to THIS week. Bullets carry the supporting detail.
-- 1-3 bullets per thread — don't pad to 3 by default; a thread with one clear outcome gets one bullet. NO issue/PR/commit numbers anywhere (no "#162", no "closes #31"); those live in a separate table. Name qualitative outcomes.
-- Ground every claim in the summaries. Never invent a version or outcome. If a thread has no clear "before", just state the concrete win and its payoff; do not fabricate a before/after.
+- 2-4 threads total. The header, Goal, Target state, and Completed fields must each be specific to THIS week. NO issue/PR/commit numbers anywhere (no "#162", no "closes #31"); those live in a separate table.
+- In particular, don't pad or split one completed outcome merely to make the thread look fuller.
+- Ground every claim in the summaries. Never invent a version, user goal, target state, or completed outcome. Do not fabricate a before/after.
 
 Period: {period}
 Categories (hours): {category_summary}
@@ -852,7 +856,7 @@ Categories (hours): {category_summary}
 Session breakdown by category:
 {breakdown}
 
-Output only the thread blocks (bold header + bullet lines) — no preamble, no quotes, no fences."""
+Output only the thread blocks (bold header + exactly the Goal, Target state, and Completed bullet lines) — no preamble, no quotes, no fences."""
 
 OVERALL_KEY = "__overall__"
 
