@@ -789,3 +789,135 @@ class TestAntigravityDBMetadataUsage:
         assert by_model["gemini-3.1-pro-low"].input_tokens == 200
         assert by_model["gemini-3.1-pro-low"].output_tokens == 80
         assert by_model["gemini-3.1-pro-low"].cache_read == 50
+
+
+class TestSessionStatPositionalCompatibility:
+    def test_positional_constructor_backward_compatibility(self):
+        from ccstory.time_tracking import SessionStat
+
+        start = datetime(2026, 7, 22, 12, 0, tzinfo=timezone.utc)
+        end = datetime(2026, 7, 22, 12, 10, tzinfo=timezone.utc)
+        path = Path("/tmp/transcript.jsonl")
+        ts_list = [start.timestamp(), end.timestamp()]
+
+        stat = SessionStat(
+            "proj-a",
+            "coding",
+            "sid-123",
+            start,
+            end,
+            600,
+            10,
+            2,
+            "first prompt",
+            True,
+            "/Users/me/proj-a",
+            ts_list,
+            "user_rule",
+            "antigravity",
+            path,
+        )
+
+        assert stat.project == "proj-a"
+        assert stat.category == "coding"
+        assert stat.session_id == "sid-123"
+        assert stat.start == start
+        assert stat.end == end
+        assert stat.active_sec == 600
+        assert stat.msg_count == 10
+        assert stat.user_msg_count == 2
+        assert stat.first_user_text == "first prompt"
+        assert stat.is_scheduled is True
+        assert stat.cwd == "/Users/me/proj-a"
+        assert stat.timestamps == ts_list
+        assert stat.category_source == "user_rule"
+        assert stat.agent == "antigravity"
+        assert stat.path == path
+        assert stat.native_title == ""
+
+
+class TestStrictProtobufFailClosed:
+    @pytest.mark.parametrize(
+        "trailing_bytes",
+        [
+            b"\x12\x50\x01\x02",
+            b"\x0f",
+            b"\x80" * 11,
+            b"\x00",
+        ],
+    )
+    def test_parse_gen_metadata_blob_fail_closed_on_trailing_corrupt_data(
+        self, trailing_bytes
+    ):
+        from ccstory.providers.antigravity import parse_gen_metadata_blob
+
+        valid_blob = make_gen_metadata_blob("gemini-3.6-flash", 100, 40)
+        corrupt_blob = valid_blob + trailing_bytes
+        assert parse_gen_metadata_blob(corrupt_blob) is None
+
+    def test_title_proto_bad_entry_does_not_corrupt_other_entries(
+        self, tmp_path
+    ):
+        from ccstory.providers.antigravity import _read_title_map
+
+        pb_path = tmp_path / "agyhub_summaries_proto.pb"
+        bad_entry = encode_bytes(
+            1, encode_tag(1, 2) + encode_varint(50) + b"truncated"
+        )
+        valid_entry = encode_bytes(
+            1,
+            encode_string(1, "sid-valid")
+            + encode_bytes(2, encode_string(1, "Valid Native Title")),
+        )
+        pb_path.write_bytes(bad_entry + valid_entry)
+
+        title_map = _read_title_map(pb_path)
+        assert "sid-valid" in title_map
+        assert title_map["sid-valid"] == "Valid Native Title"
+
+
+class TestDuplicateIdxDefense:
+    def test_gen_metadata_duplicate_idx_counted_only_once(
+        self, antigravity_factory, tmp_home
+    ):
+        sid = "dup-idx-session-789"
+        rec2 = _planner("Turn 2", 2)
+        antigravity_factory(
+            sid,
+            [_user("Prompt", 1), rec2],
+            cwd="/Users/x/demo",
+        )
+
+        conv_dir = tmp_home / ".gemini" / "antigravity" / "conversations"
+        conv_dir.mkdir(parents=True, exist_ok=True)
+        db_path = conv_dir / f"{sid}.db"
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute(
+            "CREATE TABLE gen_metadata (idx INTEGER, data BLOB, size INTEGER);"
+        )
+        blob1 = make_gen_metadata_blob("gemini-3.6-flash", 100, 40)
+        blob2 = make_gen_metadata_blob("gemini-3.6-flash", 999, 999)
+        c.execute(
+            "INSERT INTO gen_metadata VALUES (2, ?, ?);", (blob1, len(blob1))
+        )
+        c.execute(
+            "INSERT INTO gen_metadata VALUES (2, ?, ?);", (blob2, len(blob2))
+        )
+        conn.commit()
+        conn.close()
+
+        since = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        until = datetime(2026, 7, 30, tzinfo=timezone.utc)
+
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
+        by_model: dict = {}
+        turns = provider.collect_usage(since, until, by_model)
+
+        assert turns == 1
+        assert "gemini-3.6-flash" in by_model
+        assert by_model["gemini-3.6-flash"].turns == 1
+        assert by_model["gemini-3.6-flash"].input_tokens == 100
+        assert by_model["gemini-3.6-flash"].output_tokens == 40

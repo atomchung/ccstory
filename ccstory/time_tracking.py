@@ -41,7 +41,6 @@ class SessionStat:
     msg_count: int
     user_msg_count: int = 0
     first_user_text: str = ""
-    native_title: str = ""
     is_scheduled: bool = False
     # Working directory recorded in the transcript. Drives artifact/repo
     # attribution (artifacts.py); empty for pre-cwd-era transcripts.
@@ -59,6 +58,7 @@ class SessionStat:
     # Transcript this stat was parsed from. Lets the summary backfill find the
     # file without re-deriving each agent's on-disk layout.
     path: Path | None = None
+    native_title: str = ""
 
     @property
     def active_min(self) -> float:

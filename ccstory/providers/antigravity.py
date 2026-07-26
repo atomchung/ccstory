@@ -38,57 +38,47 @@ def decode_varint(data: bytes, pos: int) -> tuple[int, int]:
             return res, pos
         shift += 7
         if shift >= 70 or (pos - start) > 10:
-            raise ValueError("Malformed varint")
-    raise ValueError("Truncated varint")
+            raise ValueError("Malformed varint: exceeds 10 bytes")
+    raise ValueError("Truncated varint: unexpected EOF")
 
 
 def iter_protobuf_fields(data: bytes):
     """Yield (field_number, wire_type, val_or_bytes) for fields in data.
 
-    Stops iteration cleanly if data is truncated, malformed, or has invalid wire type.
+    Raises ValueError if data is truncated, malformed, or has invalid/unsupported wire type or field 0.
     """
     pos = 0
     n = len(data)
     while pos < n:
-        try:
-            key, pos = decode_varint(data, pos)
-        except ValueError:
-            break
+        key, pos = decode_varint(data, pos)
         field_num = key >> 3
         wire_type = key & 0x07
         if field_num == 0:
-            break
+            raise ValueError("Invalid protobuf field number 0")
         if wire_type == 0:  # Varint
-            try:
-                val, pos = decode_varint(data, pos)
-            except ValueError:
-                break
+            val, pos = decode_varint(data, pos)
             yield field_num, wire_type, val
         elif wire_type == 1:  # 64-bit
             if pos + 8 > n:
-                break
+                raise ValueError("Truncated 64-bit field")
             val_bytes = data[pos : pos + 8]
             pos += 8
             yield field_num, wire_type, val_bytes
         elif wire_type == 2:  # Length-delimited
-            try:
-                length, pos = decode_varint(data, pos)
-            except ValueError:
-                break
+            length, pos = decode_varint(data, pos)
             if length < 0 or pos + length > n:
-                break
+                raise ValueError("Truncated length-delimited field")
             val_bytes = data[pos : pos + length]
             pos += length
             yield field_num, wire_type, val_bytes
         elif wire_type == 5:  # 32-bit
             if pos + 4 > n:
-                break
+                raise ValueError("Truncated 32-bit field")
             val_bytes = data[pos : pos + 4]
             pos += 4
             yield field_num, wire_type, val_bytes
         else:
-            # Wire type 3, 4, or unsupported
-            break
+            raise ValueError(f"Unsupported wire type {wire_type}")
 
 
 def _read_title_map(pb_path: Path) -> dict[str, str]:
@@ -101,19 +91,32 @@ def _read_title_map(pb_path: Path) -> dict[str, str]:
         return {}
 
     title_map: dict[str, str] = {}
-    for f_num, w_type, entry_bytes in iter_protobuf_fields(data):
+    it = iter_protobuf_fields(data)
+    while True:
+        try:
+            f_num, w_type, entry_bytes = next(it)
+        except StopIteration:
+            break
+        except ValueError:
+            break
+
         if f_num == 1 and w_type == 2 and isinstance(entry_bytes, bytes):
-            sid = ""
-            title = ""
-            for ef_num, ew_type, eval_bytes in iter_protobuf_fields(entry_bytes):
-                if ef_num == 1 and ew_type == 2 and isinstance(eval_bytes, bytes):
-                    sid = eval_bytes.decode("utf-8", errors="ignore").strip()
-                elif ef_num == 2 and ew_type == 2 and isinstance(eval_bytes, bytes):
-                    for sf_num, sw_type, sval_bytes in iter_protobuf_fields(eval_bytes):
-                        if sf_num == 1 and sw_type == 2 and isinstance(sval_bytes, bytes):
-                            title = sval_bytes.decode("utf-8", errors="ignore").strip()
-            if sid and title:
-                title_map[sid] = title
+            try:
+                sid = ""
+                title = ""
+                e_fields = list(iter_protobuf_fields(entry_bytes))
+                for ef_num, ew_type, eval_bytes in e_fields:
+                    if ef_num == 1 and ew_type == 2 and isinstance(eval_bytes, bytes):
+                        sid = eval_bytes.decode("utf-8", errors="ignore").strip()
+                    elif ef_num == 2 and ew_type == 2 and isinstance(eval_bytes, bytes):
+                        s_fields = list(iter_protobuf_fields(eval_bytes))
+                        for sf_num, sw_type, sval_bytes in s_fields:
+                            if sf_num == 1 and sw_type == 2 and isinstance(sval_bytes, bytes):
+                                title = sval_bytes.decode("utf-8", errors="ignore").strip()
+                if sid and title:
+                    title_map[sid] = title
+            except ValueError:
+                continue
     return title_map
 
 
@@ -125,42 +128,47 @@ def parse_gen_metadata_blob(data: bytes) -> tuple[str, int, int] | None:
     Generation field 4 = usage message.
     Usage field 2 = input_tokens (varint).
     Usage field 3 = output_tokens (varint).
-    Fail closed (return None) if corrupt, missing fields, empty model, or negative tokens.
+    Fail closed (return None) if corrupt, trailing malformed bytes, missing fields, empty model, or negative tokens.
     """
     if not isinstance(data, bytes) or not data:
         return None
 
-    gen_bytes: bytes | None = None
-    for f_num, w_type, val in iter_protobuf_fields(data):
-        if f_num == 1 and w_type == 2 and isinstance(val, bytes):
-            gen_bytes = val
-            break
+    try:
+        root_fields = list(iter_protobuf_fields(data))
+        gen_bytes: bytes | None = None
+        for f_num, w_type, val in root_fields:
+            if f_num == 1 and w_type == 2 and isinstance(val, bytes):
+                gen_bytes = val
 
-    if gen_bytes is None:
+        if gen_bytes is None:
+            return None
+
+        gen_fields = list(iter_protobuf_fields(gen_bytes))
+        model: str | None = None
+        inp: int | None = None
+        out: int | None = None
+
+        for f_num, w_type, val in gen_fields:
+            if f_num == 19 and w_type == 2 and isinstance(val, bytes):
+                m_str = val.decode("utf-8", errors="ignore").strip()
+                if m_str:
+                    model = m_str
+            elif f_num == 4 and w_type == 2 and isinstance(val, bytes):
+                u_fields = list(iter_protobuf_fields(val))
+                for uf_num, uw_type, uval in u_fields:
+                    if uf_num == 2 and uw_type == 0 and isinstance(uval, int):
+                        if uval >= 0:
+                            inp = uval
+                    elif uf_num == 3 and uw_type == 0 and isinstance(uval, int):
+                        if uval >= 0:
+                            out = uval
+
+        if not model or inp is None or out is None:
+            return None
+
+        return model, inp, out
+    except ValueError:
         return None
-
-    model: str | None = None
-    inp: int | None = None
-    out: int | None = None
-
-    for f_num, w_type, val in iter_protobuf_fields(gen_bytes):
-        if f_num == 19 and w_type == 2 and isinstance(val, bytes):
-            m_str = val.decode("utf-8", errors="ignore").strip()
-            if m_str:
-                model = m_str
-        elif f_num == 4 and w_type == 2 and isinstance(val, bytes):
-            for uf_num, uw_type, uval in iter_protobuf_fields(val):
-                if uf_num == 2 and uw_type == 0 and isinstance(uval, int):
-                    if uval >= 0:
-                        inp = uval
-                elif uf_num == 3 and uw_type == 0 and isinstance(uval, int):
-                    if uval >= 0:
-                        out = uval
-
-    if not model or inp is None or out is None:
-        return None
-
-    return model, inp, out
 
 
 def extract_user_request_text(text: str) -> str:
@@ -521,7 +529,11 @@ class AntigravityProvider(BaseAgentProvider):
                         rows = c.execute("SELECT idx, data FROM gen_metadata;").fetchall()
                         for row in rows:
                             idx, blob = row[0], row[1]
-                            if not isinstance(idx, int) or idx not in step_timestamps:
+                            if (
+                                not isinstance(idx, int)
+                                or idx in db_counted_steps
+                                or idx not in step_timestamps
+                            ):
                                 continue
 
                             ts = step_timestamps[idx]
