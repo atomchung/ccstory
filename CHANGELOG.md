@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-07-26
+
 ### Added
 
 - Native protobuf wire decoder reading Google Antigravity native session titles from `agyhub_summaries_proto.pb`. Titles populate `SessionStat.native_title` and take precedence over `first_user_text` across terminal, Markdown, JSON, and MCP recap surfaces while preserving `first_user_text`.
@@ -18,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Updated Google Antigravity provider usage coverage status from `partial` to `complete`.
+- Renamed the multi-agent provenance section to `Agent Breakdown` and moved it
+  below the previous-window comparison so the recap stays focused on work and
+  outcomes before showing provider shares.
 
 ## [0.7.1] - 2026-07-26
 
