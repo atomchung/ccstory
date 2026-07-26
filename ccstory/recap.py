@@ -520,7 +520,7 @@ def build_recap(
       aggregate         --no-aggregate   False skips the overall synthesis
       compare           --no-compare     False skips the vs-previous block
       compare_narrative --no-compare-narrative
-      artifacts         --no-artifacts   False skips the What-shipped scan
+      artifacts         --no-artifacts   False skips the Repo activity scan
       classify          --classify       folder | content | hybrid
       refresh           --refresh        wipe this window's caches first
       refresh_all       --refresh-all    wipe ALL classification caches

@@ -17,7 +17,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from .artifacts import ArtifactsReport
+from .artifacts import ArtifactsReport, MARKDOWN_REPO_LIMIT
 from .categorizer import colors_for, load_settings, normalize_project_name
 from .providers import agent_label, list_providers
 from .session_summarizer import SessionSummary
@@ -406,15 +406,37 @@ def _stars_cell(stars: int | None, delta: int | None) -> str:
     return f"{stars:,} ({sign}{delta})"
 
 
+def _github_coverage_note(arts: ArtifactsReport) -> str | None:
+    if arts.github_repos_total == 0:
+        return None
+    if arts.github_status == "disabled":
+        return "GitHub enrichment is disabled; showing local commit activity only."
+    if arts.github_status == "not_installed":
+        return "GitHub is not connected; showing local commit activity only."
+    if arts.github_status == "not_connected":
+        return (
+            "GitHub access is unavailable or not authorized; "
+            "showing local commit activity only."
+        )
+    if not arts.github_complete:
+        return (
+            f"GitHub activity was available for {arts.github_repos_enriched} of "
+            f"{arts.github_repos_total} repos "
+            f"({arts.github_repos_queried} queried); GitHub totals are partial."
+        )
+    return None
+
+
 def render_artifacts_markdown(arts: ArtifactsReport) -> str:
-    """"What shipped" section: per-repo output metrics + PyPI downloads."""
+    """Repository activity: bounded remote enrichment plus local output."""
     lines: list[str] = []
-    lines.append("## What shipped")
+    lines.append("## Repo activity")
     lines.append("")
     if arts.repos:
         lines.append("| Repo | Commits | PRs merged | Releases | Stars |")
         lines.append("|---|---:|---:|---|---:|")
-        for r in arts.repos:
+        visible_repos = arts.repos[:MARKDOWN_REPO_LIMIT]
+        for r in visible_repos:
             prs = str(r.prs_merged) if r.prs_merged is not None else "–"
             rels = _md_cell(", ".join(r.releases)) if r.releases else "–"
             lines.append(
@@ -422,6 +444,12 @@ def render_artifacts_markdown(arts: ArtifactsReport) -> str:
                 f"{_stars_cell(r.stars, r.stars_delta)} |"
             )
         lines.append("")
+        hidden = len(arts.repos) - len(visible_repos)
+        if hidden > 0:
+            lines.append(
+                f"_{hidden} more active repos are available in `--json` output._"
+            )
+            lines.append("")
     for p in arts.pypi:
         window_label = p.window.replace("_", " ")
         lines.append(
@@ -429,8 +457,13 @@ def render_artifacts_markdown(arts: ArtifactsReport) -> str:
         )
     if arts.pypi:
         lines.append("")
+    coverage_note = _github_coverage_note(arts)
+    if coverage_note:
+        lines.append(f"> {coverage_note}")
+        lines.append("")
     lines.append(
-        "> Commits count all branches (unmerged work is still output). "
+        "> Activity is repo-wide, not author-filtered. "
+        "Commits count all branches (unmerged work is still output). "
         "Stars delta is vs the last snapshot before this window; "
         "PyPI numbers are pypistats.org rolling buckets, not this exact window."
     )
@@ -539,7 +572,7 @@ def render_report(
             lines.append(narrative)
             lines.append("")
 
-    # Shipped-output metrics — the "what did the time produce" half (#90)
+    # Repo-activity metrics — the "what did the time produce" half (#90)
     if artifacts:
         lines.append(render_artifacts_markdown(artifacts))
 
@@ -849,8 +882,22 @@ def build_report_json(
             ],
             "totals": {
                 "commits": artifacts.total_commits,
-                "prs_merged": artifacts.total_prs,
-                "releases": artifacts.total_releases,
+                "prs_merged": (
+                    artifacts.total_prs if artifacts.github_complete else None
+                ),
+                "releases": (
+                    artifacts.total_releases
+                    if artifacts.github_complete
+                    else None
+                ),
+            },
+            "coverage": {
+                "repos_discovered": artifacts.repos_discovered,
+                "github_status": artifacts.github_status,
+                "github_repos_total": artifacts.github_repos_total,
+                "github_repos_queried": artifacts.github_repos_queried,
+                "github_repos_enriched": artifacts.github_repos_enriched,
+                "github_complete": artifacts.github_complete,
             },
         }
     else:
@@ -1041,19 +1088,22 @@ def render_terminal_card(
             # Pre-#98 cached narrative (plain prose) — render as before.
             parts.append(Text(overall_narrative, style="dim"))
 
-    if artifacts and artifacts.repos:
+    if artifacts and (artifacts.repos or artifacts.github_repos_total):
         parts.append(Text(""))
-        shipped = Text()
-        shipped.append("Shipped  ", style="bold")
+        activity = Text()
+        activity.append("Repo activity  ", style="bold")
         bits = [f"{artifacts.total_commits} commits"]
-        if artifacts.total_prs:
+        if artifacts.github_complete and artifacts.total_prs:
             bits.append(f"{artifacts.total_prs} PRs merged")
-        if artifacts.total_releases:
+        if artifacts.github_complete and artifacts.total_releases:
             bits.append(f"{artifacts.total_releases} release"
                         + ("s" if artifacts.total_releases > 1 else ""))
-        shipped.append(" · ".join(bits), style="bold green")
-        shipped.append(f"  across {len(artifacts.repos)} repos", style="dim")
-        parts.append(shipped)
+        activity.append(" · ".join(bits), style="bold green")
+        activity.append(f"  across {len(artifacts.repos)} active repos", style="dim")
+        parts.append(activity)
+        coverage_note = _github_coverage_note(artifacts)
+        if coverage_note:
+            parts.append(Text(coverage_note, style="dim"))
 
     if comparison:
         parts.extend(render_comparison_block(comparison, colors))

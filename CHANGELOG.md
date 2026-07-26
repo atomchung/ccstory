@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Renamed **What shipped** to **Repo activity** so repo-wide commit and GitHub
+  metrics are not mistaken for author-attributed output. GitHub enrichment now
+  checks access once, defaults to the 10 most locally active repos, labels
+  local-only and partial coverage explicitly, and omits incomplete GitHub
+  totals from the terminal card and JSON totals. Markdown shows at most 20
+  repos, with the complete list retained in JSON.
+
 - Shortened recap display labels to `Codex` and `Antigravity`, moved
   report-wide cost/coverage caveats to the card footer, and let long highlight,
   project, narrative, and agent-breakdown text wrap instead of rendering

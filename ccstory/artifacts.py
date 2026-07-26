@@ -1,4 +1,4 @@
-"""Collect shipped-artifact metrics for the report period (#90).
+"""Collect repository-activity metrics for the report period (#90).
 
 time_tracking answers *where the time went*; this module answers *what the
 time produced* — commits, merged PRs, releases, GitHub stars, PyPI downloads
@@ -11,8 +11,8 @@ table in config.toml layers on top (enabled / exclude / pypi), mirroring
 the categorizer's default-rules-plus-override pattern.
 
 Every collector is fail-soft: subprocess and HTTP calls carry timeouts,
-and any failure degrades to "metric unavailable" — the section renders
-with whatever succeeded. Offline, you still get commit counts.
+and any failure degrades to an explicit local-only or partial-coverage state.
+Offline, you still get commit counts.
 """
 
 from __future__ import annotations
@@ -39,6 +39,8 @@ DB_PATH = Path.home() / ".ccstory" / "cache.db"
 GIT_TIMEOUT_SEC = 5
 GH_TIMEOUT_SEC = 10
 HTTP_TIMEOUT_SEC = 10
+DEFAULT_GITHUB_REPO_LIMIT = 10
+MARKDOWN_REPO_LIMIT = 20
 
 # GitHub's issue/PR search API returns at most 1,000 results for one query.
 # Date-range queries are recursively split before accepting a capped result,
@@ -74,6 +76,11 @@ class PyPIDownloads:
 class ArtifactsReport:
     repos: list[RepoArtifacts] = field(default_factory=list)
     pypi: list[PyPIDownloads] = field(default_factory=list)
+    repos_discovered: int = 0
+    github_status: str = "not_needed"
+    github_repos_total: int = 0
+    github_repos_queried: int = 0
+    github_repos_enriched: int = 0
 
     @property
     def total_commits(self) -> int:
@@ -86,6 +93,16 @@ class ArtifactsReport:
     @property
     def total_releases(self) -> int:
         return sum(len(r.releases) for r in self.repos)
+
+    @property
+    def github_complete(self) -> bool:
+        """Whether GitHub-derived totals cover every discovered GitHub repo."""
+        if self.github_repos_total == 0:
+            return True
+        return (
+            self.github_status == "connected"
+            and self.github_repos_enriched == self.github_repos_total
+        )
 
 
 def _run(cmd: list[str], cwd: Path | None = None, timeout: int = GIT_TIMEOUT_SEC) -> str | None:
@@ -182,6 +199,25 @@ def github_slug(root: Path) -> str | None:
 
 def _gh_available() -> bool:
     return shutil.which("gh") is not None
+
+
+def _gh_authenticated() -> bool:
+    """Whether gh has an active GitHub credential.
+
+    Check once before per-repo calls so a machine without GitHub access does
+    not pay one failing network timeout for every discovered repository.
+    """
+    return _run(
+        ["gh", "auth", "status", "--hostname", "github.com"],
+        timeout=GH_TIMEOUT_SEC,
+    ) is not None
+
+
+def _repo_limit(cfg: dict) -> int:
+    raw = cfg.get("github_repo_limit", DEFAULT_GITHUB_REPO_LIMIT)
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+        return raw
+    return DEFAULT_GITHUB_REPO_LIMIT
 
 
 def _search_merged_prs(
@@ -414,7 +450,7 @@ def collect_artifacts(
     until: datetime,
     settings: dict | None = None,
 ) -> ArtifactsReport | None:
-    """Gather the What-shipped metrics for the window. None → nothing to show."""
+    """Gather repo-activity metrics for the window. None → nothing to show."""
     cfg = (settings or {}).get("artifacts") or {}
     if not cfg.get("enabled", True):
         return None
@@ -426,7 +462,8 @@ def collect_artifacts(
     if until.tzinfo is None:
         until = until.replace(tzinfo=timezone.utc)
 
-    gh_ok = _gh_available()
+    gh_installed = _gh_available()
+    repo_limit = _repo_limit(cfg)
     repos: list[RepoArtifacts] = []
     metrics_conn: sqlite3.Connection | None = None
     # dict-as-ordered-set: explicit config packages render first, then
@@ -434,19 +471,49 @@ def collect_artifacts(
     # PyPI lines' order unstable across runs.
     pypi_candidates: dict[str, None] = dict.fromkeys(explicit_pypi)
 
+    discovered: list[tuple[RepoArtifacts, str | None]] = []
     for root in discover_repos(sessions, exclude):
         commits, subjects = count_commits(root, since, until)
         art = RepoArtifacts(
             root=root, name=root.name, commits=commits, commit_subjects=subjects,
         )
-        # Slug lookup is a subprocess; skip it when gh can't use the result
-        # anyway (.github has no other consumer).
-        slug = github_slug(root) if gh_ok else None
+        # Remote lookup is local and cheap. Keep it separate from gh access so
+        # the report can explain that GitHub-backed repos were found but could
+        # not be enriched.
+        discovered.append((art, github_slug(root)))
+
+    # Local activity decides priority. This keeps a 100-repo report bounded
+    # without pretending the GitHub totals cover repositories we did not query.
+    discovered.sort(key=lambda pair: pair[0].commits, reverse=True)
+    github_candidates = [(art, slug) for art, slug in discovered if slug]
+    gh_connected = (
+        bool(github_candidates)
+        and repo_limit > 0
+        and gh_installed
+        and _gh_authenticated()
+    )
+    github_targets = github_candidates[:repo_limit] if gh_connected else []
+    github_target_ids = {id(art) for art, _ in github_targets}
+    github_enriched = 0
+
+    for art, slug in github_targets:
         if slug:
             art.github = slug
             art.prs_merged = count_merged_prs(slug, since, until)
-            art.releases = list_releases(slug, since, until) or []
+            if art.prs_merged is None:
+                # Missing repo permission and offline failures most commonly
+                # surface here. Do not spend two more requests proving the
+                # same repo is unavailable.
+                continue
+            releases = list_releases(slug, since, until)
+            art.releases = releases or []
+            if releases is None:
+                continue
             art.stars = get_stars(slug)
+            # Aggregate PR/release totals are complete only when both core
+            # activity lookups succeeded for this repo. Stars are optional
+            # context and may remain unavailable without invalidating totals.
+            github_enriched += 1
             if art.stars is not None:
                 if metrics_conn is None:
                     metrics_conn = _open_metrics_db()
@@ -454,9 +521,21 @@ def collect_artifacts(
                     art.stars_delta = stars_delta_and_record(
                         slug, art.stars, since, metrics_conn,
                     )
-        if commits or art.prs_merged or art.releases:
+    # Preserve local output for every discovered repo. GitHub-only activity can
+    # add a quiet local repo only when that repo was inside the bounded target
+    # set and the remote lookup found activity.
+    auto_pypi_roots = {
+        art.root for art, _ in discovered[:repo_limit]
+        if art.commits or id(art) in github_target_ids
+    }
+    for art, _slug in discovered:
+        if art.commits or art.prs_merged or art.releases:
             repos.append(art)
-            pkg = detect_pypi_package(root)
+            pkg = (
+                detect_pypi_package(art.root)
+                if art.root in auto_pypi_roots
+                else None
+            )
             if pkg:
                 pypi_candidates.setdefault(pkg)
 
@@ -472,7 +551,24 @@ def collect_artifacts(
         if (hit := pypi_downloads(pkg, window)) is not None
     ]
 
-    repos.sort(key=lambda r: r.commits, reverse=True)
-    if not repos and not pypi:
+    if not repos and not pypi and not github_candidates:
         return None
-    return ArtifactsReport(repos=repos, pypi=pypi)
+    if not github_candidates:
+        github_status = "not_needed"
+    elif repo_limit == 0:
+        github_status = "disabled"
+    elif not gh_installed:
+        github_status = "not_installed"
+    elif not gh_connected:
+        github_status = "not_connected"
+    else:
+        github_status = "connected"
+    return ArtifactsReport(
+        repos=repos,
+        pypi=pypi,
+        repos_discovered=len(discovered),
+        github_status=github_status,
+        github_repos_total=len(github_candidates),
+        github_repos_queried=len(github_targets),
+        github_repos_enriched=github_enriched,
+    )

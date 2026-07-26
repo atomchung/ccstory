@@ -27,7 +27,8 @@ That's it. `init` is a one-time auto-categorize step that scans your
 recent sessions; `ccstory week` produces the recap. Full report saves to
 `~/.ccstory/reports/recap-*.md`.
 
-The default **What shipped** section may query GitHub and PyPI metadata.
+The default **Repo activity** section always reads local git. When GitHub is
+connected, it lightly enriches up to 10 active repos with GitHub metadata.
 For a first run with no network access at all, use:
 
 ```bash
@@ -295,11 +296,11 @@ visible and trigger a missing-price warning.
 Use `--agent claude`, `--agent codex`, or `--agent antigravity` to isolate one
 provider.
 
-## What shipped
+## Repo activity
 
 Time tells half the story; the other half is what the time produced. Each
-report includes a **What shipped** section — per-repo output metrics for the
-repos you actually worked in during the window:
+report includes a **Repo activity** section — repo-wide output metrics for
+repos inferred from sessions in the window:
 
 ```markdown
 | Repo     | Commits | PRs merged | Releases | Stars   |
@@ -313,24 +314,32 @@ repos you actually worked in during the window:
 - **Repos are inferred from session working directories** — no config needed.
   Worktrees collapse into their main repository.
 - **Commits** come from local git (works offline, counts all branches).
-  **PRs merged / releases / stars** need the `gh` CLI; the lookup sends the
-  GitHub repo slug and requests recent merged-PR/release timestamps plus the
-  current star count. ccstory applies the report window locally. Without `gh`,
-  those columns degrade to `–`. **PyPI downloads** send the package name to
-  pypistats.org for packages auto-detected in active repos' `pyproject.toml`.
+  These metrics are repo-wide, not author-filtered.
+- **PRs merged / releases / stars** are optional GitHub enrichment. ccstory
+  checks `gh` once, then queries at most the 10 repos with the most local
+  commits. Missing CLI, authentication, repo permission, or network access
+  never blocks the recap: the card says it is showing local commits only.
+  Partial coverage is labeled and is never presented as a complete GitHub
+  total.
+- **PyPI downloads** send the package name to pypistats.org. Auto-detection is
+  bounded to the same top 10 repos; explicitly configured packages are still
+  queried.
 - The artifacts collector never sends conversation text, prompts, summaries,
   commit contents, or local paths. It uses only repository/package metadata.
 - **Stars delta** compares against the last snapshot taken before the window,
   so it becomes meaningful from your second run onward.
+- The terminal card stays compact. Markdown shows at most 20 repo rows and
+  points to `--json` for the full list.
 
 Skip all GitHub/PyPI metadata calls per run with `--no-artifacts`, or
 persistently via config:
 
 ```toml
 [artifacts]
-enabled = false            # no GitHub/PyPI metadata lookups
-exclude = ["playground"]   # substring match on repo path
-pypi = ["my-package"]      # extra packages beyond auto-detection
+enabled = false              # no repo-activity collection
+exclude = ["playground"]     # substring match on repo path
+github_repo_limit = 10       # 0 = local commits only
+pypi = ["my-package"]        # extra packages beyond auto-detection
 ```
 
 ## Narrative depth
@@ -386,7 +395,7 @@ large first run from fragmenting one theme into several near-duplicate labels.
 If `claude` is absent from `PATH`, LLM classification and synthesis degrade
 gracefully: classification uses folder/fallback rules, per-session prose uses
 the local first/last-message fallback, and Claude quota usage is zero. This does
-not disable What-shipped metadata calls; add `--no-artifacts` for that.
+not disable Repo activity metadata calls; add `--no-artifacts` for that.
 
 ## JSON output
 
@@ -502,7 +511,7 @@ ccstory month
 ## Privacy and network behavior
 
 ccstory never sends your conversation data to its own service or to the
-What-shipped metadata providers. There is no ccstory telemetry or account.
+Repo activity metadata providers. There is no ccstory telemetry or account.
 
 - **Data source**: Claude Code logs under
   `~/.claude/projects/**/*.jsonl`, plus Codex live and archived rollouts under
@@ -515,10 +524,12 @@ What-shipped metadata providers. There is no ccstory telemetry or account.
   `claude -p`. The Claude CLI contacts Anthropic using your signed-in session
   and plan quota; ccstory does not use your API key or operate a proxy.
 - **Pricing**: ccstory makes no pricing network requests. Model prices ship with each release and come from the LiteLLM registry.
-- **What shipped**: local git supplies commit counts. By default, `gh` may send
-  a repo slug and the report's date range to request matching PR timestamps,
-  plus recent release timestamps and the current star count from GitHub;
-  ccstory applies exact report-window boundaries locally.
+- **Repo activity**: local git supplies repo-wide commit counts. If `gh` is
+  installed and authenticated, ccstory sends the repo slug and report date
+  range for at most 10 active repos to request matching PR timestamps, plus
+  recent release timestamps and current star count. Exact report-window
+  boundaries are applied locally. If GitHub is unavailable, the report
+  explicitly remains local-only.
   The pypistats request sends a package name to pypistats.org. No conversation
   text, prompt, summary, local path, or commit contents are included.
 - **Cache**: `~/.ccstory/cache.db` (sqlite, per-session summaries).
@@ -648,7 +659,7 @@ never include raw transcript text, only summaries.
       export flavors
 - [ ] Optional PNG card export
 - [ ] `ccstory year` — annual recap (Spotify-Wrapped style)
-- [x] Git commit / PR correlation — period-level **What shipped** section
+- [x] Git commit / PR correlation — period-level **Repo activity** section
       (per-session attribution still open, #11)
 
 See the [issue tracker](https://github.com/atomchung/ccstory/issues) for the
