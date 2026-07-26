@@ -127,7 +127,7 @@ class TestPlainFlavor:
         [
             ("all", "# AI Coding Recap"),
             ("claude", "# Claude Code Recap"),
-            ("codex", "# OpenAI Codex Recap"),
+            ("codex", "# Codex Recap"),
         ],
     )
     def test_title_and_metadata_preserve_selected_agent_scope(self, agent, title):
@@ -479,4 +479,3 @@ class TestUnpricedModelCaveatMarkdown:
             if line.startswith("- **Without cache it would be**")
         )
         assert lines[idx + 1] == ""
-

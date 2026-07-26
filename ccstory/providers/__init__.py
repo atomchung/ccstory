@@ -77,7 +77,7 @@ register_provider(
 register_provider(
     AgentProviderSpec(
         "codex",
-        "OpenAI Codex",
+        "Codex",
         CodexProvider,
         usage_coverage="complete",
     )
@@ -85,7 +85,7 @@ register_provider(
 register_provider(
     AgentProviderSpec(
         "antigravity",
-        "Google Antigravity",
+        "Antigravity",
         AntigravityProvider,
         usage_coverage="complete",
     )

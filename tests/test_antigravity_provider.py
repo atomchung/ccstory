@@ -612,9 +612,9 @@ class TestAntigravityExcerptExtraction:
 class TestAntigravityRegistryContracts:
     def test_registry_integration(self, tmp_home, capsys):
         assert "antigravity" in list_providers()
-        assert agent_label("antigravity") == "Google Antigravity"
+        assert agent_label("antigravity") == "Antigravity"
         assert create_providers("antigravity")[0].agent_name == "antigravity"
-        assert _agent_title("antigravity", "Recap") == "Google Antigravity Recap"
+        assert _agent_title("antigravity", "Recap") == "Antigravity Recap"
 
         data_roots = _agent_data_roots("antigravity")
         assert any(name == "antigravity" for name, _ in data_roots)
