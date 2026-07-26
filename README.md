@@ -403,8 +403,7 @@ stdout is pure JSON (progress goes to stderr, same as markdown mode), so
 `ccstory week --json | jq .totals.active_hours` just works. The envelope
 carries `schema_version` (currently 1): renames/removals bump it, additive
 fields don't — consumers should tolerate unknown keys. Covers window, totals
-(hours/tokens/cost/cache), buckets, per-session lines, model breakdown,
-narrative, comparison, artifacts, and the pricing snapshot date. The markdown
+(hours/tokens/cost/cache), buckets, per-session lines, model breakdown, unpriced models (`unpriced_models`), provider coverage (`usage_coverage`), narrative, comparison, artifacts, and the pricing snapshot date. The markdown
 report file is still written either way; JSON is a view, not a replacement.
 
 ## Obsidian export

@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Native protobuf wire decoder reading Google Antigravity native session titles from `agyhub_summaries_proto.pb`. Titles populate `SessionStat.native_title` and take precedence over `first_user_text` across terminal, Markdown, JSON, and MCP recap surfaces while preserving `first_user_text`.
 - Authoritative exact token usage extraction for Google Antigravity from `gen_metadata` in `conversations/<session_id>.db`, aligned by step index timestamps with transcript logs and deduplicated per step index (DB priority, transcript exact usage fallback).
+- Disclosed `unpriced_models` and per-period/point `usage_coverage` payloads as additive fields in `--json` recap, comparison, and trend outputs.
 
 ### Changed
 

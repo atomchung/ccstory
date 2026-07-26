@@ -123,6 +123,70 @@ class TestReportJson:
             "delta_min": 30.0, "pct_change": 100.0,
         }
 
+    def test_comparison_unpriced_models_and_coverage(self):
+        cmp = PeriodComparison(
+            current_label="2026-W27",
+            previous_label="2026-W26",
+            deltas=[
+                CategoryDelta(
+                    category="coding", current_min=60.0, previous_min=30.0
+                )
+            ],
+            current_total_h=1.0,
+            previous_total_h=0.5,
+            current_output_tokens=500,
+            previous_output_tokens=250,
+            current_cost_usd=0.0,
+            previous_cost_usd=5.0,
+            current_provider_coverage={"antigravity": "partial"},
+            previous_provider_coverage={"claude": "complete"},
+            current_unpriced_models=["gemini-3.6-flash"],
+            previous_unpriced_models=["claude-legacy-test"],
+        )
+        p = _build(comparison=cmp)
+        c = p["comparison"]
+        assert c["previous_label"] == "2026-W26"
+        assert c["unpriced_models"] == {
+            "current": ["gemini-3.6-flash"],
+            "previous": ["claude-legacy-test"],
+        }
+        assert c["usage_coverage"] == {
+            "current": {"antigravity": "partial"},
+            "previous": {"claude": "complete"},
+        }
+        assert c["deltas"][0] == {
+            "bucket": "coding",
+            "current_min": 60.0,
+            "previous_min": 30.0,
+            "delta_min": 30.0,
+            "pct_change": 100.0,
+        }
+
+    def test_unpriced_models_top_level_recap(self):
+        # Priced happy path -> unpriced_models is []
+        p_priced = _build()
+        assert p_priced["unpriced_models"] == []
+
+        # Unpriced model present -> listed explicitly, cost remains 0
+        u_unpriced = UsageReport(since=SINCE, until=UNTIL)
+        u_unpriced.by_model["gemini-3.6-flash"] = ModelUsage(
+            model="gemini-3.6-flash", turns=3, input_tokens=100, output_tokens=40
+        )
+        u_unpriced.assistant_turns = 3
+        s = _stat()
+        r = [CategoryRollup(category="coding", active_min=1.0, sessions=1, messages=2, top_sessions=[s])]
+        p_unpriced = build_report_json(
+            label="2026-W27",
+            since=SINCE,
+            until=UNTIL,
+            sessions=[s],
+            rollups=r,
+            usage=u_unpriced,
+            summaries={},
+        )
+        assert p_unpriced["unpriced_models"] == ["gemini-3.6-flash"]
+        assert p_unpriced["totals"]["cost_usd"] == 0.0
+
     def test_comparison_none(self):
         assert _build()["comparison"] is None
 
@@ -161,13 +225,22 @@ class TestTrendJson:
                 top_sessions=[s],
             )],
             total_h=1.5, output_tokens=1000, cost_usd=12.0,
+            provider_coverage={"antigravity": "partial"},
+            unpriced_models=["gemini-3.6-flash"],
         )
         p = build_trend_json([pt], "week")
         assert p["schema_version"] == JSON_SCHEMA_VERSION
         assert p["kind"] == "trend"
         assert p["agent"] == "claude"
         assert p["period"] == "week"
+        assert p["unpriced_models"] == ["gemini-3.6-flash"]
         assert p["points"][0]["total_hours"] == 1.5
+        assert p["points"][0]["unpriced_models"] == ["gemini-3.6-flash"]
+        assert p["points"][0]["usage_coverage"] == {
+            "complete": False,
+            "incomplete_agents": ["antigravity"],
+            "providers": {"antigravity": "partial"},
+        }
         assert p["points"][0]["buckets"] == [
             {"name": "coding", "active_hours": 1.5, "sessions": 2},
         ]

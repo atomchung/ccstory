@@ -676,6 +676,7 @@ def build_report_json(
             "cache_savings_usd": round(usage.cache_savings_usd, 2),
         },
         "pricing_snapshot": get_snapshot_date(),
+        "unpriced_models": usage.unpriced_models,
         "usage_coverage": {
             "complete": usage.usage_complete,
             "incomplete_agents": usage.incomplete_agents,
@@ -769,6 +770,14 @@ def build_report_json(
             "current_cost_usd": round(comparison.current_cost_usd, 2),
             "previous_cost_usd": round(comparison.previous_cost_usd, 2),
             "narrative": comparison.narrative,
+            "usage_coverage": {
+                "current": comparison.current_provider_coverage,
+                "previous": comparison.previous_provider_coverage,
+            },
+            "unpriced_models": {
+                "current": comparison.current_unpriced_models,
+                "previous": comparison.previous_unpriced_models,
+            },
             "deltas": [
                 {
                     "bucket": d.category,
@@ -824,6 +833,9 @@ def build_trend_json(
         for name, state in provider_coverage.items()
         if state != "complete"
     )
+    all_unpriced = sorted(
+        list({m for p in points for m in p.unpriced_models})
+    )
     return {
         "schema_version": JSON_SCHEMA_VERSION,
         "kind": "trend",
@@ -836,6 +848,7 @@ def build_trend_json(
             "incomplete_agents": incomplete_agents,
             "providers": provider_coverage,
         },
+        "unpriced_models": all_unpriced,
         "points": [
             {
                 "label": p.label,
@@ -844,6 +857,18 @@ def build_trend_json(
                 "total_hours": round(p.total_h, 2),
                 "output_tokens": p.output_tokens,
                 "cost_usd": round(p.cost_usd, 2),
+                "usage_coverage": {
+                    "complete": not any(
+                        state != "complete" for state in p.provider_coverage.values()
+                    ),
+                    "incomplete_agents": sorted(
+                        name
+                        for name, state in p.provider_coverage.items()
+                        if state != "complete"
+                    ),
+                    "providers": p.provider_coverage,
+                },
+                "unpriced_models": p.unpriced_models,
                 "buckets": [
                     {
                         "name": r.category,
