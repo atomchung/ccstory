@@ -37,7 +37,8 @@ ccstory week --minimal --classify folder --no-artifacts
 ```
 
 `--no-artifacts` alone disables ccstory's GitHub/PyPI lookups while keeping
-the normal narrative flow, which may invoke your installed Claude Code CLI.
+the normal narrative flow, which may invoke one of your configured local
+coding-agent CLIs.
 
 ## Demo
 
@@ -66,7 +67,7 @@ the normal narrative flow, which may invoke your installed Claude Code CLI.
 
 The markdown report adds a **header + 2-4 bullet points per bucket** plus
 per-session one-liners. Run with `--llm-narrative` to upgrade per-session
-lines from the instant first/last-message fallback to claude-polished prose:
+lines from the instant first/last-message fallback to LLM-polished prose:
 
 > **Re-running upgrades retroactively.** If you viewed a window in the
 > default (instant) mode first, re-running it with `--llm-narrative` upgrades
@@ -74,7 +75,7 @@ lines from the instant first/last-message fallback to claude-polished prose:
 > --llm-narrative` polishes weeks you already skimmed. Already-polished
 > sessions are reused (no re-burn) unless their prompt version is stale;
 > add `--refresh` to force every in-window summary to regenerate (e.g. after
-> a `claude` model upgrade you want reflected).
+> a narrator model-policy change you want reflected).
 
 ```
 ### coding
@@ -120,7 +121,7 @@ flow after the live debug session on Wednesday.
 | Flag | What it does |
 |---|---|
 | `--minimal` | Numbers only, no per-session lines |
-| `--llm-narrative` | `claude -p` per-session prose (slow, opt-in) |
+| `--llm-narrative` | Per-session prose through the configured local narrator (slow, opt-in) |
 | `--no-aggregate` | Skip the per-bucket synthesis |
 
 **Comparison block** (vs-previous, auto-attached to week/month)
@@ -148,7 +149,7 @@ for what the numbers mean once more than one agent is in the window.
 | Flag | What it does |
 |---|---|
 | `--classify folder` | Folder-name rules only |
-| `--classify content` | `claude -p` reads each session |
+| `--classify content` | Configured narrator reads each session |
 | `--classify hybrid` | User rule wins, else content (default) |
 
 **Export**
@@ -247,7 +248,7 @@ more than one folder name:
 ```
 
 **Area overrides.** Folder rules can be overridden per-session by content
-(`--classify content` / `hybrid`), where one batched `claude -p` call
+(`--classify content` / `hybrid`), where one batched local narrator call
 re-buckets sessions by what they were actually about. An override changes a
 session's *area* only — its project is the physical fact of which folder the
 work happened in, never reassigned. Results cache in `~/.ccstory/cache.db` so
@@ -357,20 +358,48 @@ ccstory week --narrative per-category   # header + bullets per bucket instead
 ccstory week --narrative both           # overall first, then per-bucket
 ```
 
-Each bucket costs one `claude -p` call, cached until its exact input or prompt
-changes — rerunning the same window is normally free. A bucket whose synthesis
-fails (or that has no real summaries) is simply omitted; the report never
-blocks on it. In `--json` mode the same text lands in `buckets[].narrative`.
+Each bucket costs one configured local-narrator call, cached until its exact
+input, prompt, or narrator policy changes — rerunning the same window is
+normally free. A bucket whose synthesis fails (or that has no real summaries)
+is simply omitted; the report never blocks on it. In `--json` mode the same
+text lands in `buckets[].narrative`.
 
-## Claude CLI calls, latency, and quota
+## Narrative backends, latency, and quota
+
+ccstory tries available local backends in this default order. Every backend
+has an explicit low-cost model; no model is inferred from a source transcript.
+
+```toml
+# ~/.ccstory/config.toml
+[narrative]
+providers = ["claude", "codex", "antigravity"]
+
+[narrative.claude]
+model = "sonnet"
+
+[narrative.codex]
+model = "gpt-5.6-terra"
+
+[narrative.antigravity]
+model = "gemini-3.6-flash-low"
+effort = "low"
+```
+
+Set `providers = []` to disable every LLM path, or select a subset/order for
+an organization. A failed or unavailable backend advances to the next one.
+Codex calls run with `--ephemeral --sandbox read-only`; Claude calls use
+`--no-session-persistence`. Antigravity has no equivalent ephemeral mode, so
+it may retain local CLI session metadata. JSON records `summary_narrator` for each LLM summary and
+`narrative.provenance` for aggregate prose; Markdown identifies each aggregate
+narrator. Existing unprovenanced cache rows refresh on the next
+`--llm-narrative` run.
 
 There is no single fixed call total: it depends on init mode, uncached
-sessions, narrative depth, and which cache entries already exist. Every
-`claude -p` call runs through your installed Claude Code CLI and uses that
-CLI's signed-in plan/quota; ccstory does not use an API key or add a separate
-API charge.
+sessions, narrative depth, and which cache entries already exist. Calls use
+the signed-in plan/quota of the backend that actually answered; ccstory does
+not use an API key or add a separate API charge.
 
-| Operation | Fresh `claude -p` calls | Cache behavior |
+| Operation | Fresh local-narrator calls | Cache behavior |
 |---|---:|---|
 | `ccstory init --quick` | 1 (usually ~10s) | One-time config proposal |
 | `ccstory init --deep` | 1 per 80 sampled sessions (up to 3 with the default cap of 200) | Writes per-session classification cache |
@@ -386,20 +415,20 @@ previous-window narrative; per-session LLM prose remains opt-in. Use
 `--narrative per-category|both` to trade the overall call for, or add, bucket
 calls. `--no-aggregate`, `--no-compare-narrative`, and `--classify folder`
 remove those call types; `--minimal --classify folder` makes the recap itself
-use zero Claude calls.
+use zero local-narrator calls.
 
 Deep/content classification is batched; per-session `--llm-narrative` work is
 linear and the CLI budgets roughly 40 seconds per cold session, showing an ETA
-before it starts. Aggregate call latency varies with Claude CLI startup and
+before it starts. Aggregate call latency varies with the selected CLI startup and
 input size. A same-window rerun is usually cache-only, but new sessions,
 changed inputs/config, `--refresh`, or a newer prompt version can trigger fresh
 calls. Content classification carries accepted bucket names into later
 80-session batches and enforces one run-wide vocabulary cap, preventing a
 large first run from fragmenting one theme into several near-duplicate labels.
 
-If `claude` is absent from `PATH`, LLM classification and synthesis degrade
+If no configured local narrator is available, LLM classification and synthesis degrade
 gracefully: classification uses folder/fallback rules, per-session prose uses
-the local first/last-message fallback, and Claude quota usage is zero. This does
+the local first/last-message fallback, and no narrator quota is used. This does
 not disable Repo activity metadata calls; add `--no-artifacts` for that.
 
 ## JSON output
@@ -443,9 +472,9 @@ valid even for `client: acme, inc`.
 
 ## Narrative language
 
-ccstory delegates narrative writing to your local `claude -p`. By default
-it inherits whatever language Claude Code itself responds in; override it
-per run, per shell, or persist a per-tool choice.
+ccstory delegates narrative writing to the first available configured local
+backend. Language is set in the prompt, so the same override applies to Claude,
+Codex, and Antigravity; Claude Code preferences remain a compatibility fallback.
 
 Precedence (high → low):
 
@@ -500,7 +529,7 @@ brand-new model (`[prices.custom]`) with only some keys defaults the rest to
 | Role | The bill | The story |
 | Active hours (5-min gap heuristic) | — | ✅ |
 | Activity categories | — | ✅ folder rules + content-aware |
-| Per-session narrative | — | ✅ via local `claude -p` |
+| Per-session narrative | — | ✅ via configured local narrator |
 | Per-bucket synthesis | — | ✅ |
 | Cross-period narrative | — | ✅ |
 | Conversation logs stay local / no telemetry | ✅ | ✅ |
@@ -525,9 +554,12 @@ Repo activity metadata providers. There is no ccstory telemetry or account.
   `~/.gemini/antigravity/brain/*/.system_generated/logs/transcript.jsonl`
   and companion project metadata under
   `~/.gemini/antigravity/conversations/*.db`.
-- **Narratives and classification**: subprocess-call your locally installed
-  `claude -p`. The Claude CLI contacts Anthropic using your signed-in session
-  and plan quota; ccstory does not use your API key or operate a proxy.
+- **Narratives and classification**: subprocess-call the configured local
+  backend in order: `claude -p --model sonnet`, `codex exec --ephemeral
+  --sandbox read-only --model gpt-5.6-terra`, then `agy -p --model
+  gemini-3.6-flash-low --effort low`. The selected CLI contacts its provider
+  using your signed-in session and plan quota; ccstory does not use your API
+  key or operate a proxy.
 - **Pricing**: ccstory makes no pricing network requests. Model prices ship with each release and come from the LiteLLM registry.
 - **Repo activity**: local git supplies repo-wide commit counts. If `gh` is
   installed and authenticated, ccstory sends the repo slug and report date
@@ -542,7 +574,7 @@ Repo activity metadata providers. There is no ccstory telemetry or account.
 
 Disable GitHub/PyPI metadata calls with `--no-artifacts` or persistent
 `[artifacts] enabled = false`. For a fully no-network report, also avoid
-Claude CLI calls with `--minimal --classify folder` (and initialize with
+local narrator calls with `--minimal --classify folder` (and initialize with
 `ccstory init --skip`). Relevant implementations are
 [ccstory/artifacts.py](ccstory/artifacts.py) and
 [ccstory/session_summarizer.py](ccstory/session_summarizer.py).
@@ -551,8 +583,9 @@ Claude CLI calls with `--minimal --classify folder` (and initialize with
 
 - **Python 3.11+** and **pipx**
   (`brew install pipx` on macOS, [other platforms](https://pipx.pypa.io/stable/installation/)).
-- **Claude Code CLI** on `PATH` — required for `--llm-narrative`, content
-  classification, and the cross-period synthesis. Without it, narratives
+- **At least one configured narrative CLI** — Claude Code (`claude`), Codex
+  (`codex`), or Antigravity (`~/.local/bin/agy`) for `--llm-narrative`, content
+  classification, and cross-period synthesis. Without all of them, narratives
   fall back to first/last user-message excerpts and `--classify` falls back to
   folder rules.
 
@@ -612,7 +645,7 @@ envelope (`--json`, `schema_version: 1`) is the other supported contract.
 
 ```bash
 pip install 'ccstory[mcp]'
-ccstory mcp   # stdio MCP server — read-only, no fresh `claude -p` by default
+ccstory mcp   # stdio MCP server — read-only, no fresh narrator call by default
 ```
 
 Point any MCP-aware client (Claude Desktop, Claude Code, or another local
@@ -643,7 +676,7 @@ Four read-only tools:
 
 `window` accepts `week` / `month` / `all` / `YYYY-MM`, same as the CLI;
 `period` is `week` or `month`. Default `classify="folder"` and
-`allow_llm=False` never trigger a fresh `claude -p` call — an MCP client
+`allow_llm=False` never triggers a fresh narrator call — an MCP client
 may call these tools opportunistically mid-conversation, so nothing here
 should cost you latency or tokens unless you explicitly ask for it
 (`classify="content"` / `"hybrid"`, or `allow_llm=True` on `get_recap`;

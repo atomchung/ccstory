@@ -592,6 +592,7 @@ def render_report(
     artifacts: ArtifactsReport | None = None,
     category_narratives: dict[str, str] | None = None,
     agent: str | None = None,
+    narrative_provenance: dict | None = None,
 ) -> str:
     """Produce the full markdown report.
 
@@ -679,6 +680,22 @@ def render_report(
     if overall_narrative:
         lines.append("## Goal threads")
         lines.append("")
+        overall_provenance = (narrative_provenance or {}).get("overall")
+        provider = (
+            overall_provenance.get("provider")
+            if isinstance(overall_provenance, dict)
+            else None
+        )
+        model = (
+            overall_provenance.get("model")
+            if isinstance(overall_provenance, dict)
+            else None
+        )
+        if isinstance(provider, str) and isinstance(model, str):
+            lines.append(
+                f"> Narrated by `{provider}` / `{model}`."
+            )
+            lines.append("")
         lines.append(overall_narrative)
         lines.append("")
 
@@ -692,6 +709,22 @@ def render_report(
                 continue
             lines.append(f"### {r.category}")
             lines.append("")
+            category_provenance = (
+                (narrative_provenance or {}).get("categories", {}).get(r.category)
+            )
+            provider = (
+                category_provenance.get("provider")
+                if isinstance(category_provenance, dict)
+                else None
+            )
+            model = (
+                category_provenance.get("model")
+                if isinstance(category_provenance, dict)
+                else None
+            )
+            if isinstance(provider, str) and isinstance(model, str):
+                lines.append(f"> Narrated by `{provider}` / `{model}`.")
+                lines.append("")
             lines.append(narrative)
             lines.append("")
 
@@ -827,6 +860,7 @@ def build_report_json(
     artifacts: ArtifactsReport | None = None,
     category_narratives: dict[str, str] | None = None,
     agent: str | None = None,
+    narrative_provenance: dict | None = None,
 ) -> dict:
     """Machine-readable envelope mirroring the markdown report's content.
 
@@ -835,6 +869,7 @@ def build_report_json(
     """
     total_min = sum(r.active_min for r in rollups)
     category_narratives = category_narratives or {}
+    narrative_provenance = narrative_provenance or {}
     agent_scope = _report_agent_scope(agent, sessions)
     top_thread = top_focus_thread(overall_narrative)
     payload: dict = {
@@ -917,6 +952,17 @@ def build_report_json(
                     if summaries and s.session_id in summaries
                     else ("native_title" if getattr(s, "native_title", "") else "first_message")
                 ),
+                "summary_narrator": (
+                    {
+                        "provider": summaries[s.session_id].narrator_provider,
+                        "model": summaries[s.session_id].narrator_model,
+                    }
+                    if summaries
+                    and s.session_id in summaries
+                    and summaries[s.session_id].narrator_provider
+                    and summaries[s.session_id].narrator_model
+                    else None
+                ),
             }
             for s in sorted(sessions, key=lambda x: x.start)
         ],
@@ -952,6 +998,7 @@ def build_report_json(
         # new consumers can rely on stable fields instead of parsing prose.
         "narrative": {
             "overall": overall_narrative,
+            "provenance": narrative_provenance,
             "top_focus": (
                 {
                     "title": top_thread.title,

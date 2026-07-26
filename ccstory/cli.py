@@ -7,7 +7,7 @@
     python -m ccstory all
 
 Flags:
-    --llm-narrative    Polish per-session narratives via `claude -p`
+    --llm-narrative    Polish per-session narratives via configured local narrator
                        (slow, opt-in; shows ETA before batch). Re-run on a
                        past window to upgrade cached fallbacks / stale auto
                        summaries; add --refresh to force-regenerate all.
@@ -135,7 +135,7 @@ def _run_init(argv: list[str], console: Console) -> int:
             "Set up classification. Three modes — picked interactively when no\n"
             "flag is given, or selected via flag:\n"
             "  Quick   Infer categories from folder names + sample messages\n"
-            "          (~10s, 1 claude -p call). Best when folder names are\n"
+            "          (~10s, 1 configured narrator call). Best when folder names are\n"
             "          descriptive.\n"
             "  Deep    Classify recent sessions individually, write per-session\n"
             "          cache + majority-vote folder rules (~1 min, last 7d,\n"
@@ -497,7 +497,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
             "Examples:\n"
             "  ccstory week                  # last 7 days, instant fallback\n"
             "                                # narratives + overall synthesis\n"
-            "  ccstory week --llm-narrative  # polish per-session via claude -p\n"
+            "  ccstory week --llm-narrative  # polish per-session via configured narrator\n"
             "                                # (slow; shows ETA before batch)\n"
             "  ccstory week --no-aggregate   # skip overall synthesis\n"
             "  ccstory week --refresh        # re-classify cached sessions in window\n"
@@ -517,7 +517,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-summary", action="store_true",
                         help=argparse.SUPPRESS)  # deprecated alias for --minimal
     parser.add_argument("--llm-narrative", action="store_true",
-                        help="Polish per-session narratives via `claude -p` "
+                        help="Polish per-session narratives via configured local narrator "
                              "(slow ~40s/session cold start; shows ETA "
                              "before batch). Default is an instant "
                              "first/last-message fallback. Re-run on a past "
@@ -527,7 +527,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
                              "--refresh to force-regenerate them all.")
     parser.add_argument("--no-aggregate", action="store_true",
                         help="Skip the overall goal-thread narrative "
-                             "(one claude -p call across all buckets)")
+                             "(one configured narrator call across all buckets)")
     parser.add_argument("--no-compare", action="store_true",
                         help="Skip the vs-previous-window comparison block")
     parser.add_argument("--narrative", choices=["overall", "per-category", "both"],
@@ -535,7 +535,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
                         help="Narrative depth. `overall` (default) = 2-4 "
                              "goal threads (bold header + bullets) across "
                              "all buckets. `per-category` = a header + "
-                             "bullets per bucket instead (one claude -p per "
+                             "bullets per bucket instead (one configured narrator call per "
                              "bucket, cached until the bucket's session set "
                              "changes). `both` = overall first, then "
                              "per-bucket sections.")
@@ -551,14 +551,14 @@ def _dispatch(argv: list[str] | None = None) -> int:
                              "`obsidian` adds YAML front-matter + [[wikilinks]] "
                              "so the report drops into a PKM vault cleanly.")
     parser.add_argument("--no-compare-narrative", action="store_true",
-                        help="Skip the 1-2 sentence claude -p synthesis "
+                        help="Skip the 1-2 sentence narrator synthesis "
                              "under the comparison table (numeric deltas "
                              "still render)")
     parser.add_argument("--classify", choices=["folder", "content", "hybrid"],
                         default="hybrid",
                         help="How to bucket sessions. `folder` uses only "
                              "config + folder-name rules. `content` runs a "
-                             "batch claude -p over each session's narrative. "
+                             "batch narrator call over each session's narrative. "
                              "`hybrid` (default) keeps the folder bucket when "
                              "a user rule in config.toml matched, otherwise "
                              "falls back to content classification.")
@@ -568,7 +568,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
                              "inside [since, until] (use after editing "
                              "[categories] rules); with --llm-narrative, also "
                              "force-regenerates every per-session summary in "
-                             "the window via `claude -p`.")
+                             "the window via the configured narrator.")
     parser.add_argument("--refresh-all", action="store_true",
                         help="Wipe the entire content-classification cache, "
                              "not just this window. Implies --refresh.")

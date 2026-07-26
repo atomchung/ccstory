@@ -379,7 +379,7 @@ class TestClassifySessionsByContent:
         # Patch run_claude_p (the logical LLM call), not subprocess.run:
         # empty stdout at the subprocess layer would trip #99's broken-flag
         # retry and double-count.
-        def fake_claude(prompt, timeout):
+        def fake_claude(prompt, timeout, model):
             nonlocal calls
             calls += 1
             return subprocess.CompletedProcess(

@@ -236,7 +236,9 @@ class TestRetroactiveRefresh:
     ):
         path = self._jsonl(jsonl_factory)
         upsert("sess-r", "good summary", "auto", project="myapp",
-               prompt_version=ss.PROMPT_VERSION)
+               prompt_version=ss.PROMPT_VERSION,
+               narrator_provider="claude", narrator_model="sonnet",
+               narrator_fingerprint=ss.narrative_config_fingerprint())
 
         def _boom(*a, **k):
             raise AssertionError("claude -p must not run for an up-to-date auto row")
@@ -315,7 +317,11 @@ class TestNeedsLlm:
         assert ss._needs_llm(None) is True
         assert ss._needs_llm(SS("i", "s", "skipped")) is False
         assert ss._needs_llm(SS("i", "s", "fallback")) is True
-        cur = SS("i", "s", "auto", prompt_version=ss.PROMPT_VERSION)
+        cur = SS(
+            "i", "s", "auto", prompt_version=ss.PROMPT_VERSION,
+            narrator_provider="claude", narrator_model="sonnet",
+            narrator_fingerprint=ss.narrative_config_fingerprint(),
+        )
         assert ss._needs_llm(cur) is False
         assert ss._needs_llm(cur, force=True) is True
         stale = SS("i", "s", "auto", prompt_version=ss.PROMPT_VERSION - 1)
@@ -354,13 +360,13 @@ class TestCacheSchemaMigrations:
         )
         raw.commit()
         raw.close()
-        # First ccstory connect must add the column and stamp the legacy row
-        # as *current* (not 0), so adopting the feature doesn't silently
-        # re-burn the existing cache.
+        # First ccstory connect stamps the old prompt version but leaves
+        # narrator provenance blank. That makes the old row stale rather than
+        # presenting a legacy Claude result as a configured explicit model.
         row = get("legacy")
         assert row is not None
         assert row.prompt_version == ss.PROMPT_VERSION
-        assert ss._needs_llm(row) is False
+        assert ss._needs_llm(row) is True
         conn = sqlite3.connect(str(ss.DB_PATH))
         try:
             assert conn.execute("PRAGMA user_version").fetchone()[0] == (
