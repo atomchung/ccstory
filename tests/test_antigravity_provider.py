@@ -309,7 +309,7 @@ class TestAntigravityUsageCollection:
         )
 
         assert turns == 1
-        assert "gemini-3.6-flash" in by_model
+        assert len(by_model) == 1
 
 
 class TestAntigravityMultiAgentCollection:

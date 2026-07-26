@@ -32,12 +32,11 @@ def extract_user_request_text(text: str) -> str:
         else:
             stripped = parts
 
-    # Strip system envelope tags like <ADDITIONAL_METADATA> and <USER_SETTINGS_CHANGE>
+    # Safely remove well-formed system envelope blocks
     stripped = re.sub(
-        r"<(ADDITIONAL_METADATA|USER_SETTINGS_CHANGE)>.*?</\1>",
+        r"<(ADDITIONAL_METADATA|USER_SETTINGS_CHANGE)>[\s\S]*?</\1>",
         "",
         stripped,
-        flags=re.DOTALL,
     )
     return stripped.strip()
 
@@ -47,8 +46,8 @@ def _is_subagent_transcript(jsonl_path: Path, first_content: str = "") -> bool:
     if "subagents" in jsonl_path.parts:
         return True
     if first_content:
-        lowered = first_content.lower()
-        if "<identity>" in lowered or "you are a subagent" in lowered or "conversation id:" in lowered:
+        stripped = first_content.strip().lower()
+        if stripped.startswith("<identity>") or stripped.startswith("<subagents>"):
             return True
     return False
 
@@ -299,89 +298,77 @@ class AntigravityProvider(BaseAgentProvider):
 
                         stype = d.get("type")
                         source = d.get("source")
+                        content = _content_text(d.get("content"))
+                        thinking = _content_text(d.get("thinking"))
 
                         is_user = _is_user_step(stype, source)
                         is_assistant = _is_assistant_step(stype, source)
 
-                        if is_user:
-                            content = _content_text(d.get("content"))
-                            accumulated_inp += len(content)
-
-                        if is_assistant:
-                            content = _content_text(d.get("content"))
-                            thinking = _content_text(d.get("thinking"))
-
-                            ts_raw = d.get("created_at")
-                            in_window = False
-                            if ts_raw:
-                                ts = _parse_ts(ts_raw)
-                                if ts and since <= ts <= until:
-                                    in_window = True
-
-                            if in_window:
-                                usage = d.get("usage")
-                                explicit_success = False
-
-                                if isinstance(usage, dict):
-                                    inp_raw = (
-                                        usage.get("input_tokens")
-                                        if "input_tokens" in usage
-                                        else usage.get("prompt_tokens")
-                                    )
-                                    out_raw = (
-                                        usage.get("output_tokens")
-                                        if "output_tokens" in usage
-                                        else usage.get("completion_tokens")
-                                    )
-                                    cache_read_raw = (
-                                        usage.get("cache_read_input_tokens")
-                                        if "cache_read_input_tokens" in usage
-                                        else usage.get("cached_input_tokens")
-                                        if "cached_input_tokens" in usage
-                                        else usage.get("cached_content_token_count")
-                                    )
-                                    inp = _exact_token_count(inp_raw)
-                                    out = _exact_token_count(out_raw)
-                                    cache_read = _exact_token_count(cache_read_raw) or 0
-                                    model = usage.get("model") or d.get("model")
-
-                                    if (
-                                        inp is not None
-                                        and out is not None
-                                        and isinstance(model, str)
-                                        and model.strip()
-                                    ):
-                                        model = model.strip()
-                                        mu = by_model.setdefault(
-                                            model, ModelUsage(model=model)
-                                        )
-                                        mu.turns += 1
-                                        mu.input_tokens += inp
-                                        mu.output_tokens += out
-                                        mu.cache_read += cache_read
-                                        assistant_turns += 1
-                                        explicit_success = True
-
-                                if not explicit_success:
-                                    raw_model = d.get("model")
-                                    model = (
-                                        raw_model.strip()
-                                        if isinstance(raw_model, str) and raw_model.strip()
-                                        else "gemini-3.6-flash"
-                                    )
-                                    out_tokens = max(1, (len(content) + len(thinking)) // 4)
-                                    inp_tokens = max(1, accumulated_inp // 4)
-
-                                    mu = by_model.setdefault(
-                                        model, ModelUsage(model=model)
-                                    )
-                                    mu.turns += 1
-                                    mu.input_tokens += inp_tokens
-                                    mu.output_tokens += out_tokens
-                                    assistant_turns += 1
-
-                            # Context accumulator must update for every assistant turn regardless of window
+                        if not is_assistant:
+                            # Accumulate user prompts, tool outputs, system inputs into context length
                             accumulated_inp += len(content) + len(thinking)
+                            continue
+
+                        # Assistant turn
+                        ts_raw = d.get("created_at")
+                        in_window = False
+                        if ts_raw:
+                            ts = _parse_ts(ts_raw)
+                            if ts and since <= ts <= until:
+                                in_window = True
+
+                        if in_window:
+                            usage = d.get("usage")
+                            inp_raw = None
+                            out_raw = None
+                            cache_read_raw = None
+                            model_raw = d.get("model")
+
+                            if isinstance(usage, dict):
+                                inp_raw = (
+                                    usage.get("input_tokens")
+                                    if "input_tokens" in usage
+                                    else usage.get("prompt_tokens")
+                                )
+                                out_raw = (
+                                    usage.get("output_tokens")
+                                    if "output_tokens" in usage
+                                    else usage.get("completion_tokens")
+                                )
+                                cache_read_raw = (
+                                    usage.get("cache_read_input_tokens")
+                                    if "cache_read_input_tokens" in usage
+                                    else usage.get("cached_input_tokens")
+                                    if "cached_input_tokens" in usage
+                                    else usage.get("cached_content_token_count")
+                                )
+                                if isinstance(usage.get("model"), str) and usage["model"].strip():
+                                    model_raw = usage["model"]
+
+                            inp = _exact_token_count(inp_raw)
+                            out = _exact_token_count(out_raw)
+                            cache_read = _exact_token_count(cache_read_raw) or 0
+
+                            model = (
+                                model_raw.strip()
+                                if isinstance(model_raw, str) and model_raw.strip()
+                                else "gemini-3.6-flash"
+                            )
+
+                            final_inp = inp if inp is not None else max(1, accumulated_inp // 4)
+                            final_out = out if out is not None else max(1, (len(content) + len(thinking)) // 4)
+
+                            mu = by_model.setdefault(
+                                model, ModelUsage(model=model)
+                            )
+                            mu.turns += 1
+                            mu.input_tokens += final_inp
+                            mu.output_tokens += final_out
+                            mu.cache_read += cache_read
+                            assistant_turns += 1
+
+                        # Context accumulator includes current assistant response & thinking for subsequent turns
+                        accumulated_inp += len(content) + len(thinking)
             except OSError:
                 continue
 
