@@ -30,7 +30,6 @@ from ccstory.mcp_server import (  # noqa: E402
     list_categories,
 )
 from ccstory.token_usage import ModelUsage, UsageReport  # noqa: E402
-from ccstory.time_tracking import CategoryRollup, SessionStat  # noqa: E402
 from ccstory.trends import PeriodComparison, PeriodPoint  # noqa: E402
 
 
@@ -274,38 +273,7 @@ class TestGetRecap:
         out = get_recap(window="week", allow_llm=True)
         assert calls == {"overall": 1, "categories": 1}
         assert out["top_focus"] == "fake overall narrative"
-        assert out["top_focus_detail"] is None
         assert out["categories"][0]["narrative"] == "fake category narrative"
-
-    def test_compact_recap_exposes_structured_top_focus(self):
-        now = datetime.now(timezone.utc)
-        session = SessionStat(
-            project="demo", category="coding", session_id="s1",
-            start=now, end=now, active_sec=60, msg_count=1,
-        )
-        result = SimpleNamespace(
-            agent="all", label="week", since=now, until=now,
-            sessions=[session],
-            rollups=[CategoryRollup(
-                category="coding", active_min=1, sessions=1, messages=1,
-                top_sessions=[session],
-            )],
-            summaries={}, category_narratives={},
-            overall_narrative=(
-                "**Make recap useful**\n"
-                "- Goal: Give the user a meaningful weekly status.\n"
-                "- Target state: Top focus explains intent and progress.\n"
-                "- Completed: Added the structured projection.\n"
-            ),
-            usage=UsageReport(since=now, until=now), report_path=None,
-        )
-        out = _compact_recap(result)
-        assert out["top_focus_detail"] == {
-            "title": "Make recap useful",
-            "goal": "Give the user a meaningful weekly status.",
-            "target_state": "Top focus explains intent and progress.",
-            "completed": "Added the structured projection.",
-        }
 
     def test_agent_filters_and_breakdown_cover_all_providers(
         self, tmp_home, jsonl_factory, codex_factory,
