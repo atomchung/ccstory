@@ -22,6 +22,147 @@ from .excerpts import build_excerpt, include_message
 from .projects import encode_project_dir, worktree_origin
 
 
+def decode_varint(data: bytes, pos: int) -> tuple[int, int]:
+    """Decode a varint starting at pos. Returns (val, new_pos).
+    Raises ValueError on unexpected EOF or malformed varint (varint > 10 bytes).
+    """
+    res = 0
+    shift = 0
+    start = pos
+    n = len(data)
+    while pos < n:
+        b = data[pos]
+        pos += 1
+        res |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            return res, pos
+        shift += 7
+        if shift >= 70 or (pos - start) > 10:
+            raise ValueError("Malformed varint")
+    raise ValueError("Truncated varint")
+
+
+def iter_protobuf_fields(data: bytes):
+    """Yield (field_number, wire_type, val_or_bytes) for fields in data.
+
+    Stops iteration cleanly if data is truncated, malformed, or has invalid wire type.
+    """
+    pos = 0
+    n = len(data)
+    while pos < n:
+        try:
+            key, pos = decode_varint(data, pos)
+        except ValueError:
+            break
+        field_num = key >> 3
+        wire_type = key & 0x07
+        if field_num == 0:
+            break
+        if wire_type == 0:  # Varint
+            try:
+                val, pos = decode_varint(data, pos)
+            except ValueError:
+                break
+            yield field_num, wire_type, val
+        elif wire_type == 1:  # 64-bit
+            if pos + 8 > n:
+                break
+            val_bytes = data[pos : pos + 8]
+            pos += 8
+            yield field_num, wire_type, val_bytes
+        elif wire_type == 2:  # Length-delimited
+            try:
+                length, pos = decode_varint(data, pos)
+            except ValueError:
+                break
+            if length < 0 or pos + length > n:
+                break
+            val_bytes = data[pos : pos + length]
+            pos += length
+            yield field_num, wire_type, val_bytes
+        elif wire_type == 5:  # 32-bit
+            if pos + 4 > n:
+                break
+            val_bytes = data[pos : pos + 4]
+            pos += 4
+            yield field_num, wire_type, val_bytes
+        else:
+            # Wire type 3, 4, or unsupported
+            break
+
+
+def _read_title_map(pb_path: Path) -> dict[str, str]:
+    """Parse agyhub_summaries_proto.pb to map session_id -> native_title."""
+    if not pb_path.exists():
+        return {}
+    try:
+        data = pb_path.read_bytes()
+    except OSError:
+        return {}
+
+    title_map: dict[str, str] = {}
+    for f_num, w_type, entry_bytes in iter_protobuf_fields(data):
+        if f_num == 1 and w_type == 2 and isinstance(entry_bytes, bytes):
+            sid = ""
+            title = ""
+            for ef_num, ew_type, eval_bytes in iter_protobuf_fields(entry_bytes):
+                if ef_num == 1 and ew_type == 2 and isinstance(eval_bytes, bytes):
+                    sid = eval_bytes.decode("utf-8", errors="ignore").strip()
+                elif ef_num == 2 and ew_type == 2 and isinstance(eval_bytes, bytes):
+                    for sf_num, sw_type, sval_bytes in iter_protobuf_fields(eval_bytes):
+                        if sf_num == 1 and sw_type == 2 and isinstance(sval_bytes, bytes):
+                            title = sval_bytes.decode("utf-8", errors="ignore").strip()
+            if sid and title:
+                title_map[sid] = title
+    return title_map
+
+
+def parse_gen_metadata_blob(data: bytes) -> tuple[str, int, int] | None:
+    """Decode gen_metadata data blob into (response_model, input_tokens, output_tokens).
+
+    Outer field 1 = generation message.
+    Generation field 19 = response_model (string).
+    Generation field 4 = usage message.
+    Usage field 2 = input_tokens (varint).
+    Usage field 3 = output_tokens (varint).
+    Fail closed (return None) if corrupt, missing fields, empty model, or negative tokens.
+    """
+    if not isinstance(data, bytes) or not data:
+        return None
+
+    gen_bytes: bytes | None = None
+    for f_num, w_type, val in iter_protobuf_fields(data):
+        if f_num == 1 and w_type == 2 and isinstance(val, bytes):
+            gen_bytes = val
+            break
+
+    if gen_bytes is None:
+        return None
+
+    model: str | None = None
+    inp: int | None = None
+    out: int | None = None
+
+    for f_num, w_type, val in iter_protobuf_fields(gen_bytes):
+        if f_num == 19 and w_type == 2 and isinstance(val, bytes):
+            m_str = val.decode("utf-8", errors="ignore").strip()
+            if m_str:
+                model = m_str
+        elif f_num == 4 and w_type == 2 and isinstance(val, bytes):
+            for uf_num, uw_type, uval in iter_protobuf_fields(val):
+                if uf_num == 2 and uw_type == 0 and isinstance(uval, int):
+                    if uval >= 0:
+                        inp = uval
+                elif uf_num == 3 and uw_type == 0 and isinstance(uval, int):
+                    if uval >= 0:
+                        out = uval
+
+    if not model or inp is None or out is None:
+        return None
+
+    return model, inp, out
+
+
 def extract_user_request_text(text: str) -> str:
     """Extract user prompt text, unwrapping ``<USER_REQUEST>`` and cleaning system envelopes."""
     stripped = text.strip()
@@ -123,6 +264,13 @@ class AntigravityProvider(BaseAgentProvider):
 
     def __init__(self, antigravity_dir: Path | None = None) -> None:
         self._antigravity_dir = antigravity_dir
+        self._title_map: dict[str, str] | None = None
+
+    def _get_title_map(self) -> dict[str, str]:
+        if self._title_map is None:
+            pb_path = self.antigravity_dir / "agyhub_summaries_proto.pb"
+            self._title_map = _read_title_map(pb_path)
+        return self._title_map
 
     @property
     def antigravity_dir(self) -> Path:
@@ -293,6 +441,8 @@ class AntigravityProvider(BaseAgentProvider):
             encode_project_dir(worktree_origin(cwd)) if cwd else "antigravity"
         )
 
+        native_title = self._get_title_map().get(session_id, "")
+
         return SessionStat(
             project=project,
             category="",
@@ -303,6 +453,7 @@ class AntigravityProvider(BaseAgentProvider):
             msg_count=msg_count,
             user_msg_count=user_msg_count,
             first_user_text=first_user_text,
+            native_title=native_title,
             is_scheduled=False,
             cwd=cwd,
             timestamps=[t.timestamp() for t in timestamps],
@@ -327,98 +478,149 @@ class AntigravityProvider(BaseAgentProvider):
             if self._is_child_session(jsonl_path, child_ids):
                 continue
 
-            try:
-                with jsonl_path.open("r", encoding="utf-8", errors="ignore") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            d = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
+            session_id = _extract_session_id(jsonl_path)
+            step_timestamps: dict[int, datetime] = {}
+            transcript_steps: list[dict] = []
 
-                        stype = d.get("type")
-                        source = d.get("source")
+            logs_dir = jsonl_path.parent
+            full_path = logs_dir / "transcript_full.jsonl"
+            paths_to_read = [full_path, jsonl_path] if full_path.exists() and full_path != jsonl_path else [jsonl_path]
 
-                        if not _is_assistant_step(stype, source):
-                            continue
+            for p in paths_to_read:
+                try:
+                    with p.open("r", encoding="utf-8", errors="ignore") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                d = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
 
-                        ts_raw = d.get("created_at")
-                        if not ts_raw:
-                            continue
-                        ts = _parse_ts(ts_raw)
-                        if not ts or not (since <= ts <= until):
-                            continue
+                            step_idx = d.get("step_index")
+                            ts_raw = d.get("created_at")
+                            if isinstance(step_idx, int) and ts_raw:
+                                ts = _parse_ts(ts_raw)
+                                if ts and step_idx not in step_timestamps:
+                                    step_timestamps[step_idx] = ts
 
-                        usage = d.get("usage")
-                        inp_raw = None
-                        out_raw = None
-                        cache_read_raw = None
-                        model_raw = d.get("model")
+                            if p == jsonl_path:
+                                transcript_steps.append(d)
+                except OSError:
+                    continue
 
-                        if isinstance(usage, dict):
-                            if "input_tokens" in usage:
-                                inp_raw = usage["input_tokens"]
-                            elif "prompt_tokens" in usage:
-                                inp_raw = usage["prompt_tokens"]
+            db_counted_steps: set[int] = set()
+            db_path = self.antigravity_dir / "conversations" / f"{session_id}.db"
 
-                            if "output_tokens" in usage:
-                                out_raw = usage["output_tokens"]
-                            elif "completion_tokens" in usage:
-                                out_raw = usage["completion_tokens"]
+            if db_path.exists():
+                try:
+                    uri = f"{db_path.resolve().as_uri()}?mode=ro"
+                    with contextlib.closing(sqlite3.connect(uri, uri=True)) as conn:
+                        c = conn.cursor()
+                        rows = c.execute("SELECT idx, data FROM gen_metadata;").fetchall()
+                        for row in rows:
+                            idx, blob = row[0], row[1]
+                            if not isinstance(idx, int) or idx not in step_timestamps:
+                                continue
 
-                            if "cache_read_input_tokens" in usage:
-                                cache_read_raw = usage["cache_read_input_tokens"]
-                            elif "cached_input_tokens" in usage:
-                                cache_read_raw = usage["cached_input_tokens"]
-                            elif "cached_content_token_count" in usage:
-                                cache_read_raw = usage["cached_content_token_count"]
+                            ts = step_timestamps[idx]
+                            parsed = parse_gen_metadata_blob(blob)
+                            if parsed is None:
+                                continue
 
-                            if isinstance(usage.get("model"), str) and usage["model"].strip():
-                                model_raw = usage["model"]
-                        else:
-                            if "input_tokens" in d:
-                                inp_raw = d["input_tokens"]
-                            elif "prompt_tokens" in d:
-                                inp_raw = d["prompt_tokens"]
+                            db_counted_steps.add(idx)
+                            if since <= ts <= until:
+                                model, inp, out = parsed
+                                mu = by_model.setdefault(model, ModelUsage(model=model))
+                                mu.turns += 1
+                                mu.input_tokens += inp
+                                mu.output_tokens += out
+                                assistant_turns += 1
+                except (sqlite3.Error, OSError):
+                    pass
 
-                            if "output_tokens" in d:
-                                out_raw = d["output_tokens"]
-                            elif "completion_tokens" in d:
-                                out_raw = d["completion_tokens"]
+            for d in transcript_steps:
+                stype = d.get("type")
+                source = d.get("source")
+                if not _is_assistant_step(stype, source):
+                    continue
 
-                            if "cache_read_input_tokens" in d:
-                                cache_read_raw = d["cache_read_input_tokens"]
-                            elif "cached_input_tokens" in d:
-                                cache_read_raw = d["cached_input_tokens"]
-                            elif "cached_content_token_count" in d:
-                                cache_read_raw = d["cached_content_token_count"]
+                ts_raw = d.get("created_at")
+                if not ts_raw:
+                    continue
+                ts = _parse_ts(ts_raw)
+                if not ts or not (since <= ts <= until):
+                    continue
 
-                        inp = _exact_token_count(inp_raw)
-                        out = _exact_token_count(out_raw)
-                        model = (
-                            model_raw.strip()
-                            if isinstance(model_raw, str) and model_raw.strip()
-                            else None
-                        )
+                step_idx = d.get("step_index")
+                if isinstance(step_idx, int) and step_idx in db_counted_steps:
+                    continue
 
-                        if inp is None or out is None or model is None:
-                            continue
+                usage = d.get("usage")
+                inp_raw = None
+                out_raw = None
+                cache_read_raw = None
+                model_raw = d.get("model")
 
-                        cache_read_val = _exact_token_count(cache_read_raw)
-                        cache_read = cache_read_val if cache_read_val is not None else 0
+                if isinstance(usage, dict):
+                    if "input_tokens" in usage:
+                        inp_raw = usage["input_tokens"]
+                    elif "prompt_tokens" in usage:
+                        inp_raw = usage["prompt_tokens"]
 
-                        mu = by_model.setdefault(
-                            model, ModelUsage(model=model)
-                        )
-                        mu.turns += 1
-                        mu.input_tokens += inp
-                        mu.output_tokens += out
-                        mu.cache_read += cache_read
-                        assistant_turns += 1
-            except OSError:
-                continue
+                    if "output_tokens" in usage:
+                        out_raw = usage["output_tokens"]
+                    elif "completion_tokens" in usage:
+                        out_raw = usage["completion_tokens"]
+
+                    if "cache_read_input_tokens" in usage:
+                        cache_read_raw = usage["cache_read_input_tokens"]
+                    elif "cached_input_tokens" in usage:
+                        cache_read_raw = usage["cached_input_tokens"]
+                    elif "cached_content_token_count" in usage:
+                        cache_read_raw = usage["cached_content_token_count"]
+
+                    if isinstance(usage.get("model"), str) and usage["model"].strip():
+                        model_raw = usage["model"]
+                else:
+                    if "input_tokens" in d:
+                        inp_raw = d["input_tokens"]
+                    elif "prompt_tokens" in d:
+                        inp_raw = d["prompt_tokens"]
+
+                    if "output_tokens" in d:
+                        out_raw = d["output_tokens"]
+                    elif "completion_tokens" in d:
+                        out_raw = d["completion_tokens"]
+
+                    if "cache_read_input_tokens" in d:
+                        cache_read_raw = d["cache_read_input_tokens"]
+                    elif "cached_input_tokens" in d:
+                        cache_read_raw = d["cached_input_tokens"]
+                    elif "cached_content_token_count" in d:
+                        cache_read_raw = d["cached_content_token_count"]
+
+                inp = _exact_token_count(inp_raw)
+                out = _exact_token_count(out_raw)
+                model = (
+                    model_raw.strip()
+                    if isinstance(model_raw, str) and model_raw.strip()
+                    else None
+                )
+
+                if inp is None or out is None or model is None:
+                    continue
+
+                cache_read_val = _exact_token_count(cache_read_raw)
+                cache_read = cache_read_val if cache_read_val is not None else 0
+
+                mu = by_model.setdefault(model, ModelUsage(model=model))
+                mu.turns += 1
+                mu.input_tokens += inp
+                mu.output_tokens += out
+                mu.cache_read += cache_read
+                assistant_turns += 1
 
         return assistant_turns
 

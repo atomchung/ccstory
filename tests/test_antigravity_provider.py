@@ -630,3 +630,162 @@ class TestAntigravityRegistryContracts:
         assert excinfo.value.code == 0
         out = capsys.readouterr().out
         assert "antigravity" in out
+
+
+def encode_varint(val: int) -> bytes:
+    res = bytearray()
+    while val >= 0x80:
+        res.append((val & 0x7F) | 0x80)
+        val >>= 7
+    res.append(val & 0x7F)
+    return bytes(res)
+
+
+def encode_tag(field_num: int, wire_type: int) -> bytes:
+    return encode_varint((field_num << 3) | wire_type)
+
+
+def encode_string(field_num: int, text: str) -> bytes:
+    b = text.encode("utf-8")
+    return encode_tag(field_num, 2) + encode_varint(len(b)) + b
+
+
+def encode_bytes(field_num: int, b: bytes) -> bytes:
+    return encode_tag(field_num, 2) + encode_varint(len(b)) + b
+
+
+def encode_varint_field(field_num: int, val: int) -> bytes:
+    return encode_tag(field_num, 0) + encode_varint(val)
+
+
+def make_title_proto(entries: list[tuple[str, str]]) -> bytes:
+    root = bytearray()
+    for sid, title in entries:
+        summary_msg = encode_string(1, title)
+        entry_msg = encode_string(1, sid) + encode_bytes(2, summary_msg)
+        root.extend(encode_bytes(1, entry_msg))
+    return bytes(root)
+
+
+def make_gen_metadata_blob(
+    model: str, input_tokens: int, output_tokens: int, extra_fields: bytes = b""
+) -> bytes:
+    usage_msg = (
+        encode_varint_field(2, input_tokens)
+        + encode_varint_field(3, output_tokens)
+        + extra_fields
+    )
+    gen_msg = encode_string(19, model) + encode_bytes(4, usage_msg)
+    return encode_bytes(1, gen_msg)
+
+
+class TestAntigravityNativeTitle:
+    def test_reads_native_title_map_and_preserves_first_user_text(
+        self, antigravity_factory, tmp_home
+    ):
+        sid = "title-test-session-123"
+        path = antigravity_factory(
+            sid,
+            [
+                _user("Add unit tests for Antigravity native title", 1),
+                _planner("Writing tests.", 2),
+            ],
+            cwd="/Users/x/demo",
+        )
+        pb_path = tmp_home / ".gemini" / "antigravity" / "agyhub_summaries_proto.pb"
+        pb_path.parent.mkdir(parents=True, exist_ok=True)
+        pb_path.write_bytes(
+            make_title_proto([(sid, "Refactor Antigravity metadata parser")])
+        )
+
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
+        stat = provider.parse_session(path)
+
+        assert stat is not None
+        assert stat.native_title == "Refactor Antigravity metadata parser"
+        assert stat.first_user_text == "Add unit tests for Antigravity native title"
+
+
+class TestAntigravityDBMetadataUsage:
+    def test_exact_db_usage_window_filtering_dedup_and_fallback(
+        self, antigravity_factory, tmp_home
+    ):
+        sid = "db-usage-session-456"
+        rec2 = _planner("Turn 2", 2)
+        rec2["usage"] = {
+            "model": "gemini-3.6-flash",
+            "input_tokens": 999,
+            "output_tokens": 999,
+        }
+        rec4 = _planner("Turn 4", 4)
+        rec4["usage"] = {
+            "model": "gemini-3.1-pro-low",
+            "input_tokens": 200,
+            "output_tokens": 80,
+            "cache_read_input_tokens": 50,
+        }
+        rec6 = _planner("Turn 6", 6)
+        rec6["created_at"] = (
+            datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+
+        antigravity_factory(
+            sid,
+            [_user("Prompt", 1), rec2, _user("Next", 3), rec4, rec6],
+            cwd="/Users/x/demo",
+        )
+
+        conv_dir = tmp_home / ".gemini" / "antigravity" / "conversations"
+        conv_dir.mkdir(parents=True, exist_ok=True)
+        db_path = conv_dir / f"{sid}.db"
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute(
+            "CREATE TABLE gen_metadata (idx INTEGER, data BLOB, size INTEGER);"
+        )
+        blob2 = make_gen_metadata_blob(
+            "gemini-3.6-flash",
+            100,
+            40,
+            extra_fields=encode_varint_field(99, 777),
+        )
+        c.execute(
+            "INSERT INTO gen_metadata VALUES (2, ?, ?);", (blob2, len(blob2))
+        )
+        bad_blob = encode_bytes(1, b"corrupt data")
+        c.execute(
+            "INSERT INTO gen_metadata VALUES (4, ?, ?);",
+            (bad_blob, len(bad_blob)),
+        )
+        blob6 = make_gen_metadata_blob("gemini-3.6-flash", 500, 300)
+        c.execute(
+            "INSERT INTO gen_metadata VALUES (6, ?, ?);", (blob6, len(blob6))
+        )
+        conn.commit()
+        conn.close()
+
+        since = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        until = datetime(2026, 7, 30, tzinfo=timezone.utc)
+
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
+        by_model: dict = {}
+        turns = provider.collect_usage(since, until, by_model)
+
+        assert turns == 2
+        assert "gemini-3.6-flash" in by_model
+        assert by_model["gemini-3.6-flash"].turns == 1
+        assert by_model["gemini-3.6-flash"].input_tokens == 100
+        assert by_model["gemini-3.6-flash"].output_tokens == 40
+        assert by_model["gemini-3.6-flash"].cache_read == 0
+
+        assert "gemini-3.1-pro-low" in by_model
+        assert by_model["gemini-3.1-pro-low"].turns == 1
+        assert by_model["gemini-3.1-pro-low"].input_tokens == 200
+        assert by_model["gemini-3.1-pro-low"].output_tokens == 80
+        assert by_model["gemini-3.1-pro-low"].cache_read == 50

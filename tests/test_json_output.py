@@ -92,6 +92,21 @@ class TestReportJson:
         assert cached["sessions"][0]["summary"] == "Fixed the login flow end to end."
         assert cached["sessions"][0]["summary_source"] == "auto"
 
+        # Native title wins over first_user_text when no cached/LLM summary
+        s_native = SessionStat(
+            project="p1", category="coding", session_id="s_native",
+            start=datetime.now(), end=datetime.now(), active_sec=100, msg_count=2,
+            first_user_text="first user message", native_title="Native Title Precedence",
+        )
+        r_native = [CategoryRollup(category="coding", active_min=1.0, sessions=1, messages=2, top_sessions=[s_native])]
+        json_native = build_report_json(
+            label="2026-W27", since=datetime.now(), until=datetime.now(),
+            sessions=[s_native], rollups=r_native, usage=UsageReport(since=datetime.now(), until=datetime.now(), by_model={}, assistant_turns=1, provider_coverage={}),
+            summaries={},
+        )
+        assert json_native["sessions"][0]["summary"] == "Native Title Precedence"
+        assert json_native["sessions"][0]["summary_source"] == "native_title"
+
     def test_comparison_block(self):
         cmp = PeriodComparison(
             current_label="2026-W27", previous_label="2026-W26",

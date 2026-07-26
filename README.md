@@ -282,11 +282,15 @@ per-agent time added up to 177h against a deduplicated wall clock of 64h. So:
 - **`N× parallel`** is raw agent time ÷ wall clock: how much of the work
   overlapped.
 
-Token usage and costs fully cover Claude Code and OpenAI Codex. Standard
-Antigravity step logs do not expose complete exact token usage, so ccstory never
-guesses from character counts; reports mark token and cost totals incomplete
-whenever Antigravity is in scope. Models with exact tokens but no known rate
-remain visible and trigger a separate missing-price warning.
+Token usage and costs fully cover Claude Code and OpenAI Codex. For Google
+Antigravity, native titles are read from `~/.gemini/antigravity/agyhub_summaries_proto.pb`
+and take precedence over `first_user_text` in recaps when LLM summaries are absent.
+Authoritative exact token usage for Antigravity is read from `gen_metadata` in companion
+SQLite databases (`~/.gemini/antigravity/conversations/<session_id>.db`), aligned by step index
+timestamps with transcript logs (with transcript exact usage as fallback for uncounted steps).
+Antigravity provider coverage remains `partial` because some records lack timestamp alignment
+and DB cache fields are unconfirmed without protobuf descriptors; ccstory never guesses cache
+tokens or models. Models with exact tokens but no known rate remain visible and trigger a missing-price warning.
 
 Use `--agent claude`, `--agent codex`, or `--agent antigravity` to isolate one
 provider.

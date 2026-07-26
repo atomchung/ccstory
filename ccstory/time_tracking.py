@@ -41,6 +41,7 @@ class SessionStat:
     msg_count: int
     user_msg_count: int = 0
     first_user_text: str = ""
+    native_title: str = ""
     is_scheduled: bool = False
     # Working directory recorded in the transcript. Drives artifact/repo
     # attribution (artifacts.py); empty for pre-cwd-era transcripts.

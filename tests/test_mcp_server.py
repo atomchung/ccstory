@@ -602,3 +602,24 @@ class TestGetRecapChildren:
         for point in out["points"]:
             for bucket in point["buckets"]:
                 assert "children" not in bucket
+
+    def test_compact_recap_native_title_precedence(self):
+        from ccstory.time_tracking import CategoryRollup, SessionStat
+        from ccstory.recap import RecapResult
+        s = SessionStat(
+            project="p1", category="coding", session_id="s_mcp",
+            start=datetime.now(timezone.utc), end=datetime.now(timezone.utc),
+            active_sec=100, msg_count=2,
+            first_user_text="first user prompt",
+            native_title="MCP Native Title Precedence",
+        )
+        rollups = [CategoryRollup(category="coding", active_min=1.0, sessions=1, messages=2, top_sessions=[s])]
+        usage = UsageReport(since=datetime.now(timezone.utc), until=datetime.now(timezone.utc), by_model={}, assistant_turns=1, provider_coverage={})
+        rec = RecapResult(
+            label="2026-W27", since=datetime.now(timezone.utc), until=datetime.now(timezone.utc),
+            sessions=[s], rollups=rollups, usage=usage, summaries={},
+            category_narratives={}, overall_narrative="Overall focus", agent="all",
+            comparison=None, artifacts=None, markdown="",
+        )
+        compact = _compact_recap(rec)
+        assert compact["top_sessions"][0]["summary"] == "MCP Native Title Precedence"

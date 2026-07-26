@@ -205,13 +205,26 @@ def _format_date_range(since: datetime, until: datetime) -> str:
     return f"{_full(since)} – {_full(until)}"
 
 
+def _session_summary_text(s: SessionStat, summaries: dict | None = None) -> str:
+    """Same one-liner precedence across report formats (terminal, markdown, json, mcp).
+
+    Precedence: LLM/cached summary > native_title > first_user_text > empty string.
+    """
+    if summaries and s.session_id in summaries:
+        summ = summaries[s.session_id]
+        if summ and getattr(summ, "summary", None):
+            return summ.summary
+    if getattr(s, "native_title", ""):
+        return s.native_title
+    return s.first_user_text or ""
+
+
 def _top_session_text(rollup: CategoryRollup, summaries: dict, max_chars: int = 70) -> str:
     """One-line summary of the longest session in a category. Always single-line."""
     if not rollup.top_sessions:
         return ""
     top = rollup.top_sessions[0]
-    summ = summaries.get(top.session_id) if summaries else None
-    text = summ.summary if summ else (top.first_user_text or "(no summary)")
+    text = _session_summary_text(top, summaries) or "(no summary)"
     # Always collapse to one line — newlines/extra whitespace mangle the panel
     text = " ".join(text.split())
     if len(text) > max_chars:
@@ -529,8 +542,7 @@ def render_report(
             lines.append(f"_Projects:_ {proj_bits}")
             lines.append("")
         for s in r.top_sessions:
-            summ = summaries.get(s.session_id)
-            text = summ.summary if summ else s.first_user_text[:100]
+            text = _session_summary_text(s, summaries)[:100]
             time_str = s.start.strftime("%Y-%m-%d %H:%M")
             mins = int(s.active_sec // 60)
             if flavor == "obsidian":
@@ -612,12 +624,6 @@ def render_report(
 # Bump when a field is renamed/removed or its meaning changes. Additive
 # fields do NOT bump the version — consumers must tolerate unknown keys.
 JSON_SCHEMA_VERSION = 1
-
-
-def _session_summary_text(s: SessionStat, summaries: dict) -> str:
-    """Same one-liner precedence the markdown report uses."""
-    summ = summaries.get(s.session_id) if summaries else None
-    return summ.summary if summ else s.first_user_text[:100]
 
 
 def build_report_json(
@@ -719,7 +725,7 @@ def build_report_json(
                 "summary_source": (
                     summaries[s.session_id].source
                     if summaries and s.session_id in summaries
-                    else "first_message"
+                    else ("native_title" if getattr(s, "native_title", "") else "first_message")
                 ),
             }
             for s in sorted(sessions, key=lambda x: x.start)
