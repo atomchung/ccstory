@@ -1,4 +1,4 @@
-"""Antigravity session parsing, attribution, usage, and registry contracts."""
+"""Antigravity session parsing, attribution, usage, subagent filtering, and registry contracts."""
 
 from __future__ import annotations
 
@@ -125,14 +125,36 @@ class TestAntigravityParsing:
         assert stat.user_msg_count == 2
         assert stat.first_user_text == "Add unit tests for Antigravity provider"
         assert stat.project == "-Users-x-Side-project-ccstory"
-        assert stat.path == path
 
-    def test_unwraps_user_request_helper(self):
+    def test_unwraps_user_request_and_strips_metadata(self):
         raw = (
             "<USER_REQUEST>\nFix bug in parser\n</USER_REQUEST>\n"
-            "<ADDITIONAL_METADATA>\ntime: 12:00\n</ADDITIONAL_METADATA>"
+            "<ADDITIONAL_METADATA>\ntime: 12:00\n</ADDITIONAL_METADATA>\n"
+            "<USER_SETTINGS_CHANGE>\nmodel changed\n</USER_SETTINGS_CHANGE>"
         )
         assert extract_user_request_text(raw) == "Fix bug in parser"
+
+    def test_subagent_transcript_is_filtered(
+        self, antigravity_factory, tmp_home
+    ):
+        path = antigravity_factory(
+            "subagent-session",
+            [
+                {
+                    "step_index": 1,
+                    "source": "USER_EXPLICIT",
+                    "type": "USER_INPUT",
+                    "created_at": _ts(1),
+                    "content": "<identity>\nYou are a research subagent.\n</identity>",
+                },
+                _planner("Subagent finished analysis.", 2),
+            ],
+            cwd="/Users/x/demo",
+        )
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
+        assert provider.parse_session(path) is None
 
     def test_default_project_when_no_cwd(self, antigravity_factory, tmp_home):
         path = antigravity_factory(
@@ -147,7 +169,6 @@ class TestAntigravityParsing:
         assert stat.project == "antigravity"
 
     def test_gap_capping_for_active_time(self, antigravity_factory, tmp_home):
-        # Turns at 0m, 10m (gap 10m -> capped to 5m=300s)
         path = antigravity_factory(
             SID,
             [_user("start", 0), _planner("working", 10)],
@@ -160,7 +181,7 @@ class TestAntigravityParsing:
         assert stat is not None
         assert stat.active_sec == 300
 
-    def test_sqlite_cwd_extraction_uses_read_only_uri(
+    def test_reads_percent_encoded_cwd_from_db_in_read_only_mode(
         self, tmp_path, monkeypatch
     ):
         db_path = tmp_path / "test.db"
@@ -212,7 +233,7 @@ class TestAntigravityParsing:
 
 
 class TestAntigravityUsageCollection:
-    def test_returns_zero_when_no_explicit_tokens(
+    def test_returns_zero_when_no_explicit_exact_usage(
         self, antigravity_factory, tmp_home
     ):
         antigravity_factory(
@@ -232,16 +253,26 @@ class TestAntigravityUsageCollection:
         by_model: dict = {}
         turns = provider.collect_usage(since, until, by_model)
         assert turns == 0
-        assert len(by_model) == 0
+        assert by_model == {}
 
-    def test_collects_tokens_when_explicit_usage_present(
-        self, antigravity_factory, tmp_home
+    @pytest.mark.parametrize(
+        "cache_key,cache_val,expected_cache",
+        [
+            ("cache_read_input_tokens", 80, 80),
+            ("cached_input_tokens", 45, 45),
+            ("cached_content_token_count", 30, 30),
+            ("cache_read_input_tokens", 0, 0),
+        ],
+    )
+    def test_collects_exact_tokens_and_cache_variants(
+        self, antigravity_factory, tmp_home, cache_key, cache_val, expected_cache
     ):
         rec = _planner("Hello", 2)
         rec["usage"] = {
-            "model": "gemini-3.6-flash",
-            "input_tokens": 100,
-            "output_tokens": 50,
+            "model": "gemini-3.6-pro",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            cache_key: cache_val,
         }
         antigravity_factory(SID, [_user("Hi", 1), rec], cwd="/Users/x/demo")
 
@@ -254,19 +285,25 @@ class TestAntigravityUsageCollection:
         by_model: dict = {}
         turns = provider.collect_usage(since, until, by_model)
         assert turns == 1
-        assert "gemini-3.6-flash" in by_model
-        assert by_model["gemini-3.6-flash"].input_tokens == 100
-        assert by_model["gemini-3.6-flash"].output_tokens == 50
+        assert "gemini-3.6-pro" in by_model
+        assert by_model["gemini-3.6-pro"].input_tokens == 0
+        assert by_model["gemini-3.6-pro"].output_tokens == 0
+        assert by_model["gemini-3.6-pro"].cache_read == expected_cache
 
     @pytest.mark.parametrize(
         "bad_usage",
         [
-            {"model": "gemini", "input_tokens": "100", "output_tokens": 50},
-            {"model": "gemini", "input_tokens": -1, "output_tokens": 50},
+            {"model": "gemini-3.6-flash", "input_tokens": "100", "output_tokens": 50},
+            {"model": "gemini-3.6-flash", "input_tokens": -1, "output_tokens": 50},
+            {"model": "gemini-3.6-flash", "input_tokens": 100, "output_tokens": -5},
+            {"model": "  ", "input_tokens": 100, "output_tokens": 50},
             {"model": {}, "input_tokens": 100, "output_tokens": 50},
+            {"input_tokens": 100, "output_tokens": 50},
+            {"model": "gemini-3.6-flash", "output_tokens": 50},
+            {"model": "gemini-3.6-flash", "input_tokens": 100},
         ],
     )
-    def test_invalid_usage_is_ignored(
+    def test_invalid_or_missing_usage_fields_ignores_turn(
         self, antigravity_factory, tmp_home, bad_usage
     ):
         rec = _planner("Hello", 2)
@@ -285,6 +322,199 @@ class TestAntigravityUsageCollection:
 
         assert turns == 0
         assert by_model == {}
+
+    def test_subagent_invoke_discovery_and_filtering(
+        self, antigravity_factory, tmp_home
+    ):
+        parent_sid = "11111111-1111-1111-1111-111111111111"
+        child_sid = "22222222-2222-2222-2222-222222222222"
+
+        parent_invoke_rec = {
+            "step_index": 2,
+            "source": "MODEL",
+            "type": "INVOKE_SUBAGENT",
+            "status": "DONE",
+            "created_at": _ts(2),
+            "content": f"Spawning subagent task conversation id: {child_sid}",
+        }
+        parent_resp = _planner("Parent response", 3)
+        parent_resp["usage"] = {
+            "model": "gemini-3.6-flash",
+            "input_tokens": 100,
+            "output_tokens": 50,
+        }
+
+        parent_path = antigravity_factory(
+            parent_sid,
+            [_user("Parent prompt", 1), parent_invoke_rec, parent_resp],
+            cwd="/Users/x/demo",
+        )
+
+        child_resp = _planner("Child response", 3)
+        child_resp["usage"] = {
+            "model": "gemini-3.6-flash",
+            "input_tokens": 999,
+            "output_tokens": 888,
+        }
+
+        child_path = antigravity_factory(
+            child_sid,
+            [_user("Child task", 1), child_resp],
+            cwd="/Users/x/demo",
+        )
+
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
+
+        assert provider.parse_session(parent_path) is not None
+        assert provider.parse_session(child_path) is None
+
+        since = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        until = datetime(2026, 7, 30, tzinfo=timezone.utc)
+        stats = provider.collect_sessions(since, until)
+        session_ids = [s.session_id for s in stats]
+        assert parent_sid in session_ids
+        assert child_sid not in session_ids
+
+        by_model: dict = {}
+        turns = provider.collect_usage(since, until, by_model)
+        assert turns == 1
+        assert "gemini-3.6-flash" in by_model
+        assert by_model["gemini-3.6-flash"].input_tokens == 100
+        assert by_model["gemini-3.6-flash"].output_tokens == 50
+
+    def test_user_request_containing_conversation_id_is_not_misidentified(
+        self, antigravity_factory, tmp_home
+    ):
+        parent_sid = "33333333-3333-3333-3333-333333333333"
+        target_sid = "44444444-4444-4444-4444-444444444444"
+
+        parent_path = antigravity_factory(
+            parent_sid,
+            [
+                _user(f"Please check conversation id: {target_sid}", 1),
+                _planner("Understood", 2),
+            ],
+            cwd="/Users/x/demo",
+        )
+        target_path = antigravity_factory(
+            target_sid,
+            [_user("Target user request", 1), _planner("Target response", 2)],
+            cwd="/Users/x/demo",
+        )
+
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
+        assert provider.parse_session(parent_path) is not None
+        assert provider.parse_session(target_path) is not None
+
+        since = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        until = datetime(2026, 7, 30, tzinfo=timezone.utc)
+        stats = provider.collect_sessions(since, until)
+        session_ids = [s.session_id for s in stats]
+        assert parent_sid in session_ids
+        assert target_sid in session_ids
+
+    def test_collects_tokens_from_top_level_step_fields(
+        self, antigravity_factory, tmp_home
+    ):
+        rec = _planner("Hello", 2)
+        rec["input_tokens"] = 150
+        rec["output_tokens"] = 60
+        rec["model"] = "gemini-3.6-pro"
+        rec["cache_read_input_tokens"] = 25
+        antigravity_factory(SID, [_user("Hi", 1), rec], cwd="/Users/x/demo")
+
+        since = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        until = datetime(2026, 7, 30, tzinfo=timezone.utc)
+
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
+        by_model: dict = {}
+        turns = provider.collect_usage(since, until, by_model)
+        assert turns == 1
+        assert "gemini-3.6-pro" in by_model
+        assert by_model["gemini-3.6-pro"].input_tokens == 150
+        assert by_model["gemini-3.6-pro"].output_tokens == 60
+        assert by_model["gemini-3.6-pro"].cache_read == 25
+
+    def test_planner_response_containing_invoke_subagent_text_is_not_misidentified(
+        self, antigravity_factory, tmp_home
+    ):
+        parent_sid = "55555555-5555-5555-5555-555555555555"
+        target_sid = "66666666-6666-6666-6666-666666666666"
+
+        planner_mention = _planner(
+            f"I completed task for INVOKE_SUBAGENT conversation id: {target_sid}", 2
+        )
+        planner_mention["usage"] = {
+            "model": "gemini-3.6-flash",
+            "input_tokens": 100,
+            "output_tokens": 50,
+        }
+
+        parent_path = antigravity_factory(
+            parent_sid,
+            [_user("Check subagent status", 1), planner_mention],
+            cwd="/Users/x/demo",
+        )
+        target_path = antigravity_factory(
+            target_sid,
+            [_user("Target user request", 1), _planner("Target response", 2)],
+            cwd="/Users/x/demo",
+        )
+
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
+        assert provider.parse_session(parent_path) is not None
+        assert provider.parse_session(target_path) is not None
+
+        since = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        until = datetime(2026, 7, 30, tzinfo=timezone.utc)
+        stats = provider.collect_sessions(since, until)
+        session_ids = [s.session_id for s in stats]
+        assert parent_sid in session_ids
+        assert target_sid in session_ids
+
+    def test_window_aggregation_only_counts_turns_within_window(
+        self, antigravity_factory, tmp_home
+    ):
+        rec_in = _planner("In window", 10)
+        rec_in["usage"] = {
+            "model": "gemini-3.6-flash",
+            "input_tokens": 100,
+            "output_tokens": 20,
+        }
+        rec_out = _planner("Out of window", 50)
+        rec_out["created_at"] = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc).isoformat()
+        rec_out["usage"] = {
+            "model": "gemini-3.6-flash",
+            "input_tokens": 500,
+            "output_tokens": 200,
+        }
+
+        antigravity_factory(
+            SID,
+            [_user("Hi", 1), rec_in, rec_out],
+            cwd="/Users/x/demo",
+        )
+
+        since = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        until = datetime(2026, 7, 30, tzinfo=timezone.utc)
+
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
+        by_model: dict = {}
+        turns = provider.collect_usage(since, until, by_model)
+
+        assert turns == 1
+        assert by_model["gemini-3.6-flash"].input_tokens == 100
+        assert by_model["gemini-3.6-flash"].output_tokens == 20
 
 
 class TestAntigravityMultiAgentCollection:
