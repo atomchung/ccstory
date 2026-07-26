@@ -1,4 +1,4 @@
-"""Tests for #90 — artifact-level output metrics (What shipped)."""
+"""Tests for #90 — lightweight repository-activity metrics."""
 
 from __future__ import annotations
 
@@ -385,6 +385,124 @@ class TestCollectArtifacts:
         assert [r.name for r in out.repos] == ["repo"]
         assert out.repos[0].commits == 1
         assert out.repos[0].prs_merged is None  # gh unavailable
+        assert out.github_status == "not_needed"
+
+    def test_github_remote_without_gh_is_explicitly_local_only(
+        self, git_repo: Path
+    ):
+        _git(git_repo, "remote", "add", "origin", "git@github.com:a/repo.git")
+        _commit(git_repo, "work", datetime(2026, 7, 2, tzinfo=timezone.utc))
+
+        out = collect_artifacts([_stat(str(git_repo))], SINCE, UNTIL)
+
+        assert out is not None
+        assert out.github_status == "not_installed"
+        assert out.github_repos_total == 1
+        assert out.github_repos_queried == 0
+        assert not out.github_complete
+
+    def test_github_auth_failure_skips_all_per_repo_calls(
+        self, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        _git(git_repo, "remote", "add", "origin", "git@github.com:a/repo.git")
+        _commit(git_repo, "work", datetime(2026, 7, 2, tzinfo=timezone.utc))
+        monkeypatch.setattr(artifacts, "_gh_available", lambda: True)
+        monkeypatch.setattr(artifacts, "_gh_authenticated", lambda: False)
+        monkeypatch.setattr(
+            artifacts, "count_merged_prs",
+            lambda *a, **k: pytest.fail("per-repo GitHub call should be skipped"),
+        )
+
+        out = collect_artifacts([_stat(str(git_repo))], SINCE, UNTIL)
+
+        assert out is not None
+        assert out.github_status == "not_connected"
+        assert out.github_repos_queried == 0
+        assert out.total_commits == 1
+
+    def test_zero_github_limit_is_local_only_without_auth_probe(
+        self, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        _git(git_repo, "remote", "add", "origin", "git@github.com:a/repo.git")
+        _commit(git_repo, "work", datetime(2026, 7, 2, tzinfo=timezone.utc))
+        monkeypatch.setattr(artifacts, "_gh_available", lambda: True)
+        monkeypatch.setattr(
+            artifacts, "_gh_authenticated",
+            lambda: pytest.fail("auth should not be probed for a zero limit"),
+        )
+
+        out = collect_artifacts(
+            [_stat(str(git_repo))],
+            SINCE,
+            UNTIL,
+            settings={"artifacts": {"github_repo_limit": 0}},
+        )
+
+        assert out is not None
+        assert out.github_status == "disabled"
+        assert out.github_repos_queried == 0
+        assert out.total_commits == 1
+
+    def test_one_hundred_repos_query_only_top_ten_by_local_activity(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        roots = [Path(f"/repos/r{n:02d}") for n in range(100)]
+        monkeypatch.setattr(artifacts, "discover_repos", lambda *a, **k: roots)
+        monkeypatch.setattr(
+            artifacts, "count_commits",
+            lambda root, *_: (int(root.name[1:]) + 1, [root.name]),
+        )
+        monkeypatch.setattr(
+            artifacts, "github_slug", lambda root: f"owner/{root.name}",
+        )
+        monkeypatch.setattr(artifacts, "_gh_available", lambda: True)
+        monkeypatch.setattr(artifacts, "_gh_authenticated", lambda: True)
+        queried: list[str] = []
+
+        def prs(slug, *_):
+            queried.append(slug)
+            return 1
+
+        monkeypatch.setattr(artifacts, "count_merged_prs", prs)
+        monkeypatch.setattr(artifacts, "list_releases", lambda *a, **k: [])
+        monkeypatch.setattr(artifacts, "get_stars", lambda *a, **k: None)
+        monkeypatch.setattr(artifacts, "detect_pypi_package", lambda *a: None)
+
+        out = collect_artifacts([_stat("/unused")], SINCE, UNTIL)
+
+        assert out is not None
+        assert queried == [f"owner/r{n:02d}" for n in range(99, 89, -1)]
+        assert out.repos_discovered == 100
+        assert out.github_repos_total == 100
+        assert out.github_repos_queried == 10
+        assert out.github_repos_enriched == 10
+        assert not out.github_complete
+        assert out.total_commits == sum(range(1, 101))
+
+    def test_per_repo_permission_failure_is_partial_not_zero(
+        self, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        _git(git_repo, "remote", "add", "origin", "git@github.com:a/repo.git")
+        _commit(git_repo, "work", datetime(2026, 7, 2, tzinfo=timezone.utc))
+        monkeypatch.setattr(artifacts, "_gh_available", lambda: True)
+        monkeypatch.setattr(artifacts, "_gh_authenticated", lambda: True)
+        monkeypatch.setattr(artifacts, "count_merged_prs", lambda *a, **k: None)
+        monkeypatch.setattr(
+            artifacts, "list_releases",
+            lambda *a, **k: pytest.fail("release lookup should be skipped"),
+        )
+        monkeypatch.setattr(
+            artifacts, "get_stars",
+            lambda *a, **k: pytest.fail("stars lookup should be skipped"),
+        )
+
+        out = collect_artifacts([_stat(str(git_repo))], SINCE, UNTIL)
+
+        assert out is not None
+        assert out.github_status == "connected"
+        assert out.github_repos_queried == 1
+        assert out.github_repos_enriched == 0
+        assert not out.github_complete
 
     def test_quiet_repo_dropped(self, git_repo: Path):
         _commit(git_repo, "old", datetime(2026, 6, 1, tzinfo=timezone.utc))
@@ -476,10 +594,35 @@ class TestRendering:
 
     def test_markdown_section(self):
         md = render_artifacts_markdown(self._arts())
-        assert "## What shipped" in md
+        assert "## Repo activity" in md
         assert "| ccstory | 12 | 3 | v0.4.2 | 41 (+6) |" in md
         assert "| quiet\\|repo | 2 | – | – | – |" in md  # pipe escaped, N/A dashes
         assert "1,234 downloads (last week)" in md
+        assert "repo-wide, not author-filtered" in md
+
+    def test_markdown_explains_missing_github_access(self):
+        arts = ArtifactsReport(
+            repos=[RepoArtifacts(root=Path("/x/p"), name="p", commits=2)],
+            repos_discovered=1,
+            github_status="not_connected",
+            github_repos_total=1,
+        )
+        md = render_artifacts_markdown(arts)
+        assert "GitHub access is unavailable or not authorized" in md
+        assert "local commit activity only" in md
+
+    def test_markdown_caps_repo_rows_and_points_to_json(self):
+        arts = ArtifactsReport(
+            repos=[
+                RepoArtifacts(root=Path(f"/x/r{n}"), name=f"r{n}", commits=1)
+                for n in range(25)
+            ],
+            repos_discovered=25,
+        )
+        md = render_artifacts_markdown(arts)
+        assert "| r19 |" in md
+        assert "| r20 |" not in md
+        assert "5 more active repos are available in `--json` output" in md
 
     def _render(self, artifacts: ArtifactsReport | None) -> str:
         from ccstory.time_tracking import CategoryRollup
@@ -503,8 +646,8 @@ class TestRendering:
 
     def test_report_includes_section(self):
         md = self._render(self._arts())
-        assert "## What shipped" in md
+        assert "## Repo activity" in md
 
     def test_report_omits_section_when_none(self):
         md = self._render(None)
-        assert "What shipped" not in md
+        assert "Repo activity" not in md

@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 
 from rich.console import Console
 
+from ccstory.artifacts import ArtifactsReport, RepoArtifacts
 from ccstory.report import _narrative_headers, render_terminal_card
 from ccstory.time_tracking import CategoryRollup, ProjectRollup, SessionStat
 from ccstory.token_usage import ModelUsage, UsageReport
@@ -120,6 +122,50 @@ class TestAgentScopedTitle:
         assert "Codex Recap" in text
         assert "OpenAI Codex" not in text
         assert "Claude Code Recap" not in text
+
+
+class TestRepoActivityCard:
+    def _render(self, artifacts: ArtifactsReport) -> str:
+        console = Console(width=88, record=True)
+        console.print(render_terminal_card(
+            since=SINCE,
+            until=UNTIL,
+            sessions=[],
+            rollups=_rollups([("coding", 1.0)]),
+            usage=_usage(),
+            artifacts=artifacts,
+        ))
+        return console.export_text()
+
+    def test_missing_github_access_is_explicitly_local_only(self):
+        out = self._render(ArtifactsReport(
+            repos=[RepoArtifacts(root=Path("/x/p"), name="p", commits=4)],
+            repos_discovered=1,
+            github_status="not_connected",
+            github_repos_total=1,
+        ))
+        assert "Repo activity" in out
+        assert "4 commits" in out
+        assert "showing local" in out
+        assert "commit activity only" in out
+        assert "PRs merged" not in out
+
+    def test_partial_github_totals_are_not_rendered_as_complete(self):
+        out = self._render(ArtifactsReport(
+            repos=[RepoArtifacts(
+                root=Path("/x/p"), name="p", commits=4,
+                prs_merged=3, releases=["v1"],
+            )],
+            repos_discovered=12,
+            github_status="connected",
+            github_repos_total=12,
+            github_repos_queried=10,
+            github_repos_enriched=10,
+        ))
+        assert "Repo activity" in out
+        assert "4 commits" in out
+        assert "PRs merged" not in out
+        assert "GitHub totals are partial" in out
 
 
 class TestNarrativeHeaders:

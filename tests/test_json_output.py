@@ -223,6 +223,34 @@ class TestReportJson:
             {"package": "myapp", "downloads": 42, "window": "last_week"},
         ]
         assert a["totals"] == {"commits": 3, "prs_merged": 1, "releases": 1}
+        assert a["coverage"] == {
+            "repos_discovered": 0,
+            "github_status": "not_needed",
+            "github_repos_total": 0,
+            "github_repos_queried": 0,
+            "github_repos_enriched": 0,
+            "github_complete": True,
+        }
+
+    def test_partial_github_totals_are_null_not_misleading(self):
+        arts = ArtifactsReport(
+            repos=[RepoArtifacts(
+                root=Path("/x/myapp"), name="myapp",
+                commits=3, prs_merged=1, releases=["v1.0"],
+            )],
+            repos_discovered=12,
+            github_status="connected",
+            github_repos_total=12,
+            github_repos_queried=10,
+            github_repos_enriched=10,
+        )
+        a = _build(artifacts=arts)["artifacts"]
+        assert a["totals"] == {
+            "commits": 3,
+            "prs_merged": None,
+            "releases": None,
+        }
+        assert a["coverage"]["github_complete"] is False
 
     def test_artifacts_none(self):
         assert _build()["artifacts"] is None

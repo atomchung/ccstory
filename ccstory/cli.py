@@ -540,7 +540,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
                              "changes). `both` = overall first, then "
                              "per-bucket sections.")
     parser.add_argument("--no-artifacts", action="store_true",
-                        help="Skip the What-shipped section (git commits / "
+                        help="Skip the Repo activity section (git commits / "
                              "merged PRs / releases / stars / PyPI downloads "
                              "for repos worked on this window). Also "
                              "disable persistently via config.toml "
