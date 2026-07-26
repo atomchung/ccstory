@@ -258,6 +258,24 @@ class TestTimeSemantics:
 
         assert md.index("## vs previous window") < md.index("## Agent Breakdown")
 
+    def test_integrated_story_precedes_agent_breakdown_in_markdown(
+        self, overlapping_sessions
+    ):
+        from ccstory.time_tracking import rollup_by_category
+
+        md = render_report(
+            "week",
+            SINCE,
+            UNTIL,
+            overlapping_sessions,
+            rollup_by_category(overlapping_sessions),
+            UsageReport(since=SINCE, until=UNTIL),
+            {},
+            overall_narrative="**One integrated story**\n- One outcome",
+        )
+
+        assert md.index("## What you did") < md.index("## Agent Breakdown")
+
     def test_agent_breakdown_follows_previous_window_in_terminal_card(
         self, overlapping_sessions
     ):
@@ -292,7 +310,7 @@ class TestTimeSemantics:
         )
 
         text = output.getvalue()
-        assert text.index("vs previous window") < text.index("Agent Breakdown")
+        assert text.index("vs previous window") < text.index("Claude Code 50%")
 
     def test_json_exposes_shares_and_parallelism(self, overlapping_sessions):
         from ccstory.time_tracking import rollup_by_category

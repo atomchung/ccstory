@@ -18,7 +18,7 @@ from pathlib import Path
 from rich.console import Console
 
 from ccstory.artifacts import ArtifactsReport, RepoArtifacts
-from ccstory.report import FocusThread, _narrative_headers, focus_threads, render_terminal_card, top_focus_thread
+from ccstory.report import _narrative_headers, render_terminal_card
 from ccstory.time_tracking import CategoryRollup, ProjectRollup, SessionStat
 from ccstory.token_usage import ModelUsage, UsageReport
 
@@ -200,45 +200,6 @@ class TestNarrativeHeaders:
         ]
 
 
-class TestTopFocusFields:
-    def test_parses_structured_goal_thread(self):
-        narrative = (
-            "**Make the weekly recap decision-useful**\n"
-            "- Goal: Help the user understand what they are building toward.\n"
-            "- Target state: Top focus names the goal, end state, and progress.\n"
-            "- Completed: Added structured Top focus rendering.\n"
-        )
-        assert focus_threads(narrative) == [
-            FocusThread(
-                title="Make the weekly recap decision-useful",
-                goal="Help the user understand what they are building toward.",
-                target_state="Top focus names the goal, end state, and progress.",
-                completed="Added structured Top focus rendering.",
-            )
-        ]
-
-    def test_rejects_partial_thread_instead_of_guessing_missing_goal(self):
-        narrative = (
-            "**A thread**\n"
-            "- Goal: Something useful.\n"
-            "- Completed: Something happened.\n"
-        )
-        assert focus_threads(narrative) == []
-
-    def test_top_focus_does_not_skip_a_malformed_first_thread(self):
-        narrative = (
-            "**Malformed first thread**\n"
-            "- Goal: A useful goal.\n"
-            "- Completed: Work happened.\n"
-            "\n"
-            "**Valid second thread**\n"
-            "- Goal: Another goal.\n"
-            "- Target state: A clear state.\n"
-            "- Completed: Another completed outcome.\n"
-        )
-        assert top_focus_thread(narrative) is None
-
-
 class TestWhatYouDidCard:
     def _card_text(self, narrative: str) -> str:
         rollups = _rollups([("輸出", 600.0)])
@@ -272,24 +233,30 @@ class TestWhatYouDidCard:
         out = self._card_text(narrative)
         assert narrative in out
 
-    def test_structured_top_focus_names_goal_target_and_completed_work(self):
+    def test_top_focus_remains_category_first_while_story_stays_integrated(self):
         narrative = (
             "**Make the weekly recap decision-useful**\n"
             "- Goal: Help the user see the work that serves their real objective.\n"
             "- Target state: The primary recap explains intent, done state, and progress.\n"
             "- Completed: Replaced the time-bucket-only highlight with a structured focus.\n"
+            "\n"
+            "**Keep the remaining goals visible without another full card**\n"
+            "- Goal: Preserve the rest of the weekly story.\n"
+            "- Target state: Supporting goals remain scannable.\n"
+            "- Completed: Moved them below the primary focus.\n"
         )
         out = self._card_text(narrative)
-        assert "User goal" in out
-        assert "Target state" in out
-        assert "Completed" in out
-        assert "Help the user see the work that serves their real" in out
-        assert "objective." in out
-        assert "Replaced the time-bucket-only highlight" in out
+        assert "★ Top focus  輸出  10.0h" in out
+        assert "Make the weekly recap decision-useful" in out
+        assert "What you did" in out
+        assert "User goal" not in out
+        assert "Target state" not in out
+        assert "Completed" not in out
+        assert "Keep the remaining goals visible" in out
 
 
 class TestCardWrapping:
-    def test_long_highlight_project_and_narrative_text_wrap_without_ellipsis(self):
+    def test_highlight_is_bounded_while_project_and_narrative_text_can_wrap(self):
         top_session = SessionStat(
             project="demo",
             category="輸出",
@@ -299,9 +266,8 @@ class TestCardWrapping:
             active_sec=3600,
             msg_count=2,
             first_user_text=(
-                "Continue reviewing the repository and coordinate several sessions "
-                "before selecting the **next step** "
-                "[$record](/Users/demo/skills/record/SKILL.md) WRAP_END"
+                "Review [$record](/Users/demo/skills/record/SKILL.md) and coordinate "
+                "several sessions before selecting the **next step** WRAP_END"
             ),
         )
         rollup = CategoryRollup(
@@ -337,13 +303,13 @@ class TestCardWrapping:
         )
 
         text = console.export_text()
-        assert "WRAP_END" in text
         assert "$record" in text
         assert "/Users/demo" not in text
         assert "**" not in text
+        assert "WRAP_END" not in text
+        assert "…" in text
         assert "personal-os-project-tail" in text
         assert "HEADER_END" in text
-        assert "…" not in text
 
 
 class TestUnpricedModelCaveatTerminalCard:
@@ -415,10 +381,19 @@ class TestUnpricedModelCaveatTerminalCard:
         )
 
         text = console.export_text()
-        assert text.index("Agent Breakdown") < text.index("Full report")
+        assert text.index("Claude Code") < text.index("Full report")
         assert text.index("Full report") < text.index("Cost excludes")
         assert "Claude Code" in text
         assert "Codex" in text
         assert "Antigravity" in text
+        agent_lines = [
+            line for line in text.splitlines() if "1.0× parallel" in line
+        ]
+        assert len(agent_lines) == 1
+        assert all(
+            label in agent_lines[0]
+            for label in ("Claude Code 33%", "Codex 33%", "Antigravity 33%")
+        )
+        assert "sessions (" not in text
         assert "OpenAI Codex" not in text
         assert "Google Antigr" not in text

@@ -45,13 +45,10 @@ coding-agent CLIs.
 
 ```
 
-╭────────────── AI Coding-Agent Recap · May 5 – 12, 2026 ──────────────╮
+╭──────────────── ccstory Recap · May 5 – 12, 2026 ────────────────────╮
 │                                                                      │
-│  ★ Top focus  Make scheduled-task output easy to inspect              │
-│    Time focus  coding  10.9h  (53% of active time)                   │
-│    User goal     Make scheduled-task output easy to inspect           │
-│    Target state  A slash command shows the current routine on demand  │
-│    Completed     Built the command and the routine-detail flow        │
+│  ★ Top focus  coding  10.9h  (53% of active time)                    │
+│    ↳ Built /show-routine slash command using bash+python to fetch…   │
 │                                                                      │
 │  Active  20.6h  Sessions  74   Output  2.92M                         │
 │  Turns   3,692  Cache     96%  Cost    $1,608                        │
@@ -282,12 +279,13 @@ per-agent time added up to 177h against a deduplicated wall clock of 64h. So:
 
 - **Total active time** is the wall clock across every session, deduplicated —
   the same number ccstory has always reported, now spanning all agents.
-- **The `Agent Breakdown` section reports shares, not hours.** Each agent's share is
-  its raw interaction time relative to the others'. Shares are not durations and
-  do not add up to the total.
-- **Session share is shown next to time share, and they disagree on purpose.**
-  Many short Codex reviews against fewer long Claude Code sessions shows up as
-  75% / 25% of time but 51% / 49% of sessions — that gap is the finding.
+- **The terminal card keeps agent provenance to one compact share line.** Each
+  agent's share is its raw interaction time relative to the others'. Shares are
+  not durations and do not add up to the total.
+- **The Markdown `Agent Breakdown` retains time share and session share.** Many
+  short Codex reviews against fewer long Claude Code sessions can show up as
+  75% / 25% of time but 51% / 49% of sessions — that gap remains available
+  without taking over the screenshot card.
 - **`N× parallel`** is raw agent time ÷ wall clock: how much of the work
   overlapped.
 
@@ -354,10 +352,10 @@ pypi = ["my-package"]        # extra packages beyond auto-detection
 
 ## Narrative depth
 
-`Top focus` is the primary goal thread, not merely the largest time bucket. It
-states the user's goal, the observable target state, and what was completed in
-the report window. The full `## Goal threads` section contains 2-4 such
-evidence-backed threads. For real retrospectives, `--narrative` goes deeper:
+`Top focus` is the largest Category and its representative session. `## What
+you did` is the separate cross-Category integration: 2-4 goal threads (bold
+header + bullets) that explain what the period added up to. For real
+retrospectives, `--narrative` goes deeper:
 
 ```bash
 ccstory week --narrative per-category   # header + bullets per bucket instead
@@ -501,6 +499,7 @@ Precedence (high → low):
 | English | Final fallback |
 
 ```bash
+ccstory week --lang en                       # one-off English (also accepts "English")
 ccstory week --lang "Traditional Chinese"   # one-off
 export CCSTORY_LANG="日本語"                  # shell-scoped
 # or in ~/.ccstory/config.toml:

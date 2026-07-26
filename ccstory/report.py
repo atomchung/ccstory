@@ -71,7 +71,9 @@ def _report_agent_scope(agent: str | None, sessions: list[SessionStat]) -> str:
 
 
 def _agent_title(scope: str, noun: str) -> str:
-    prefix = "AI Coding" if scope == "all" else agent_label(scope)
+    # The combined view is the product's primary surface. Individual-agent
+    # filters retain their provider labels so the selected scope stays clear.
+    prefix = "ccstory" if scope == "all" else agent_label(scope)
     return f"{prefix} {noun}"
 
 
@@ -247,113 +249,6 @@ def _top_session_text(
     if max_chars is not None and len(text) > max_chars:
         text = text[: max_chars - 1].rstrip() + "…"
     return text
-
-
-@dataclass(frozen=True)
-class FocusThread:
-    """One parsed goal thread, suitable for the Top focus surface.
-
-    The narrative itself remains the cached, human-readable source of truth.
-    This small projection lets the terminal, Markdown, JSON, and MCP surfaces
-    consistently show the first (highest-priority) thread's goal, target, and
-    completed work without making consumers parse model prose themselves.
-    """
-
-    title: str
-    goal: str
-    target_state: str
-    completed: str
-
-
-_FOCUS_FIELD_RE = re.compile(
-    r"^\s*-\s*(?P<label>[^:：]+)\s*[:：]\s*(?P<value>.+?)\s*$"
-)
-_FOCUS_FIELD_NAMES = {
-    "goal": "goal",
-    "usergoal": "goal",
-    "目標": "goal",
-    "目标": "goal",
-    "targetstate": "target_state",
-    "desiredstate": "target_state",
-    "desiredoutcome": "target_state",
-    "目標狀態": "target_state",
-    "目标状态": "target_state",
-    "想達成的狀態": "target_state",
-    "想达成的状态": "target_state",
-    "completed": "completed",
-    "completedthisperiod": "completed",
-    "done": "completed",
-    "已完成": "completed",
-    "已完成內容": "completed",
-    "已完成内容": "completed",
-}
-
-
-def _focus_field_name(label: str) -> str | None:
-    """Map localized prompt labels to stable Top focus field names."""
-    normalized = re.sub(r"[\s_\-]", "", label).casefold()
-    return _FOCUS_FIELD_NAMES.get(normalized)
-
-
-def focus_threads(narrative: str | None) -> list[FocusThread]:
-    """Parse current-format goal threads; return [] for legacy cache prose.
-
-    A narrative is deliberately accepted only when all three promised fields
-    are present. That prevents a partial/drifted LLM response from being
-    presented as an authoritative statement of the user's goal.
-    """
-    if not narrative:
-        return []
-    threads: list[FocusThread] = []
-    title: str | None = None
-    fields: dict[str, str] = {}
-
-    def flush() -> None:
-        if title and {"goal", "target_state", "completed"} <= fields.keys():
-            threads.append(FocusThread(
-                title=title,
-                goal=fields["goal"],
-                target_state=fields["target_state"],
-                completed=fields["completed"],
-            ))
-
-    for line in narrative.splitlines():
-        header = _BOLD_HEADER_RE.match(line.strip())
-        if header:
-            flush()
-            title = _INNER_BOLD_RE.sub(r"\1", header.group(1)).strip()
-            fields = {}
-            continue
-        if title:
-            match = _FOCUS_FIELD_RE.match(line)
-            if match:
-                field = _focus_field_name(match.group("label"))
-                if field and field not in fields:
-                    fields[field] = match.group("value").strip()
-    flush()
-    return threads
-
-
-def top_focus_thread(narrative: str | None) -> FocusThread | None:
-    """Return the first goal thread only when its three fields are complete.
-
-    The prompt orders the highest-priority thread first. If that first block
-    drifts from the required shape, selecting a later well-formed block would
-    silently label the wrong goal as Top focus. Fail closed instead; the
-    existing session-summary fallback remains more honest in that case.
-    """
-    if not narrative:
-        return None
-    block: list[str] = []
-    for line in narrative.splitlines():
-        if _BOLD_HEADER_RE.match(line.strip()):
-            if block:
-                break
-            block.append(line)
-        elif block:
-            block.append(line)
-    parsed = focus_threads("\n".join(block))
-    return parsed[0] if parsed else None
 
 
 _BOLD_HEADER_RE = re.compile(r"^\*\*(.+)\*\*$")
@@ -630,27 +525,13 @@ def render_report(
     if rollups:
         top_r = rollups[0]
         top_pct = (top_r.active_min / total_min * 100) if total_min else 0
-        top_thread = top_focus_thread(overall_narrative)
-        if top_thread:
-            lines.append(f"**★ Top focus: {top_thread.title}**")
-            lines.append(
-                f"> Time focus: `{top_r.category}` — {top_r.active_min/60:.1f}h "
-                f"({top_pct:.0f}% of active time)"
-            )
-            lines.append(f"- **User goal:** {top_thread.goal}")
-            lines.append(f"- **Target state:** {top_thread.target_state}")
-            lines.append(f"- **Completed:** {top_thread.completed}")
-        else:
-            # Existing cached narratives may predate the structured Top focus
-            # prompt. Keep their card/report useful until the next automatic
-            # cache refresh rather than showing an empty primary surface.
-            lines.append(
-                f"**★ Top focus: `{top_r.category}` — {top_r.active_min/60:.1f}h "
-                f"({top_pct:.0f}% of active time)**"
-            )
-            top_text = _top_session_text(top_r, summaries)
-            if top_text:
-                lines.append(f"> {top_text}")
+        lines.append(
+            f"**★ Top focus: `{top_r.category}` — {top_r.active_min/60:.1f}h "
+            f"({top_pct:.0f}% of active time)**"
+        )
+        top_text = _top_session_text(top_r, summaries)
+        if top_text:
+            lines.append(f"> {top_text}")
         lines.append("")
 
     # Time distribution
@@ -669,16 +550,10 @@ def render_report(
     if comparison:
         lines.append(render_comparison_markdown(comparison))
 
-    # Agent provenance is useful context, but not the recap's story. Keep it
-    # beneath the cross-window view rather than interrupting the work-focused
-    # time distribution above.
-    lines.extend(render_agent_breakdown_markdown(sessions))
-
-    # Overall narrative (goal-thread synthesis across the whole period).
-    # The primary thread is projected above as Top focus; retaining all raw
-    # threads here preserves the full evidence-backed story in the report.
+    # Overall narrative: the cross-category story complements the category-
+    # first Top focus above, rather than replacing it.
     if overall_narrative:
-        lines.append("## Goal threads")
+        lines.append("## What you did")
         lines.append("")
         overall_provenance = (narrative_provenance or {}).get("overall")
         provider = (
@@ -698,6 +573,11 @@ def render_report(
             lines.append("")
         lines.append(overall_narrative)
         lines.append("")
+
+    # Agent provenance is useful context, but not the recap's story. Keep it
+    # after the integrated cross-category narrative so every human-facing
+    # recap surface preserves the same category-first information hierarchy.
+    lines.extend(render_agent_breakdown_markdown(sessions))
 
     # Per-bucket narratives (#57) — rollup order so the biggest bucket leads
     if category_narratives:
@@ -871,7 +751,6 @@ def build_report_json(
     category_narratives = category_narratives or {}
     narrative_provenance = narrative_provenance or {}
     agent_scope = _report_agent_scope(agent, sessions)
-    top_thread = top_focus_thread(overall_narrative)
     payload: dict = {
         "schema_version": JSON_SCHEMA_VERSION,
         "kind": "recap",
@@ -993,22 +872,9 @@ def build_report_json(
                 usage.by_model.items(), key=lambda x: -x[1].total_tokens
             )
         ],
-        # Additive structured projection of the first goal thread. The raw
-        # overall narrative remains available for existing consumers, while
-        # new consumers can rely on stable fields instead of parsing prose.
         "narrative": {
             "overall": overall_narrative,
             "provenance": narrative_provenance,
-            "top_focus": (
-                {
-                    "title": top_thread.title,
-                    "goal": top_thread.goal,
-                    "target_state": top_thread.target_state,
-                    "completed": top_thread.completed,
-                }
-                if top_thread
-                else None
-            ),
         },
     }
     if comparison:
@@ -1167,49 +1033,24 @@ def render_terminal_card(
         all_categories += [d.category for d in comparison.deltas]
     colors = colors_for(all_categories)
 
-    # --- Highlight row: biggest bucket + primary goal thread ---
+    # --- Highlight row: biggest category + its representative session ---
     highlight_block: list = []
     if rollups:
         top_r = rollups[0]
         top_color = colors[top_r.category]
         top_pct = (top_r.active_min / total_min * 100) if total_min else 0
-        top_thread = top_focus_thread(overall_narrative)
         headline = Text()
         headline.append("★ Top focus  ", style="bold")
-        if top_thread:
-            headline.append(top_thread.title, style="bold")
-        else:
-            headline.append(top_r.category, style=f"bold {top_color}")
-            headline.append(f"  {top_r.active_min/60:.1f}h", style="bold")
-            headline.append(f"  ({top_pct:.0f}% of active time)", style="dim")
+        headline.append(top_r.category, style=f"bold {top_color}")
+        headline.append(f"  {top_r.active_min/60:.1f}h", style="bold")
+        headline.append(f"  ({top_pct:.0f}% of active time)", style="dim")
         highlight_block.append(headline)
-        if top_thread:
-            time_focus = Text()
-            time_focus.append("  Time focus  ", style="dim")
-            time_focus.append(top_r.category, style=f"bold {top_color}")
-            time_focus.append(f"  {top_r.active_min/60:.1f}h", style="bold")
-            time_focus.append(f"  ({top_pct:.0f}% of active time)", style="dim")
-            highlight_block.append(time_focus)
-            focus_table = Table.grid(padding=(0, 1))
-            focus_table.add_column(width=15, no_wrap=True)
-            focus_table.add_column(overflow="fold")
-            for label, value in (
-                ("User goal", top_thread.goal),
-                ("Target state", top_thread.target_state),
-                ("Completed", top_thread.completed),
-            ):
-                focus_table.add_row(
-                    Text(f"  {label}", style="bold"), Text(value),
-                )
-            highlight_block.append(focus_table)
-        else:
-            # Legacy/unstructured cached narrative fallback.
-            top_text = _top_session_text(top_r, summaries, max_chars=None)
-            if top_text:
-                sub = Text(overflow="fold")
-                sub.append("  ↳ ", style="dim")
-                sub.append(top_text, style="italic")
-                highlight_block.append(sub)
+        top_text = _top_session_text(top_r, summaries)
+        if top_text:
+            sub = Text(no_wrap=True, overflow="ellipsis")
+            sub.append("  ↳ ", style="dim")
+            sub.append(top_text, style="italic")
+            highlight_block.append(sub)
         highlight_block.append(Text(""))
 
     # --- Metrics row ---
@@ -1282,7 +1123,7 @@ def render_terminal_card(
 
     if overall_narrative:
         parts.append(Text(""))
-        parts.append(Text("Goal threads", style="bold underline"))
+        parts.append(Text("What you did", style="bold underline"))
         headers = _narrative_headers(overall_narrative)
         if headers:
             # Goal-thread narrative (#98): show each thread's bold header
@@ -1325,25 +1166,21 @@ def render_terminal_card(
     # above agent_breakdown().
     shares = agent_breakdown(sessions)
     if len(shares) >= 2:
-        agent_table = Table.grid(padding=(0, 1))
-        agent_table.add_column(width=12, no_wrap=True)
-        agent_table.add_column(overflow="fold")
-        for a in shares:
-            agent_table.add_row(
-                Text(a.label, style="bold"),
-                Text(
-                    f"{a.time_share*100:.0f}% of agent time · "
-                    f"{a.sessions} sessions ({a.session_share*100:.0f}%)",
-                    style="dim",
-                ),
+        agent_line = Text()
+        for index, share in enumerate(shares):
+            if index:
+                agent_line.append(" · ", style="dim")
+            agent_line.append(share.label, style="bold")
+            agent_line.append(
+                f" {share.time_share*100:.0f}%",
+                style="dim",
             )
+        agent_line.append(
+            f" · {parallelism_factor(sessions):.1f}× parallel",
+            style="dim",
+        )
         parts.append(Text(""))
-        parts.append(Text("Agent Breakdown", style="bold underline"))
-        parts.append(agent_table)
-        note = Text()
-        note.append(f"{parallelism_factor(sessions):.1f}× parallel", style="bold")
-        note.append("  time shares, not hours", style="dim")
-        parts.append(note)
+        parts.append(agent_line)
 
     if report_path:
         parts.append(Text(""))

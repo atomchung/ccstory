@@ -17,12 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Top focus now states the user's goal, the observable target state, and work
-  completed in the report window. The same structured first goal thread is
-  rendered in terminal and Markdown recaps, and is available additively as
-  `narrative.top_focus` in JSON and `top_focus_detail` in MCP. Existing cached
-  prose safely falls back to the previous session-summary highlight until its
-  prompt fingerprint regenerates it.
+- Restored the category-centered recap structure: `Top focus` shows the
+  largest Category, its time share, and a representative session; `What you
+  did` remains the separate cross-Category integration of 2-4 goal threads.
+- Combined-agent cards and reports are branded `ccstory Recap` rather than
+  `AI Coding Recap`. `--lang en` and other common language codes now expand to
+  unambiguous language names before narrative generation.
 
 - Renamed **What shipped** to **Repo activity** so repo-wide commit and GitHub
   metrics are not mistaken for author-attributed output. GitHub enrichment now
@@ -32,9 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repos, with the complete list retained in JSON.
 
 - Shortened recap display labels to `Codex` and `Antigravity`, moved
-  report-wide cost/coverage caveats to the card footer, and let long highlight,
-  project, narrative, and agent-breakdown text wrap instead of rendering
-  repeated ellipses.
+  report-wide cost/coverage caveats to the card footer, bounded the Top focus
+  excerpt, and let project and narrative text wrap cleanly.
 - Scoped GitHub merged-PR queries to the report window and recursively split
   capped date ranges, preventing repositories with more than 200 lifetime PRs
   from emitting false warnings or undercounting current-window shipped work.

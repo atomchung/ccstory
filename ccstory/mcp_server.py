@@ -44,7 +44,7 @@ from . import recap  # noqa: E402 — module import so recap.CONFIG_PATH reads l
 from .categorizer import load_rules, load_settings, normalize_project_name  # noqa: E402
 from .session_summarizer import CacheUnavailable  # noqa: E402
 from .recap import RecapUnavailable, build_recap, parse_window  # noqa: E402
-from .report import _session_summary_text, agent_breakdown, top_focus_thread  # noqa: E402
+from .report import _session_summary_text, agent_breakdown  # noqa: E402
 from .time_tracking import collect_sessions, rollup_by_category  # noqa: E402
 from .token_usage import apply_prices, collect_usage, load_prices_config  # noqa: E402
 from .trends import _resolve_sessions_from_cache  # noqa: E402
@@ -115,7 +115,6 @@ def _merge_point_coverage(points) -> dict[str, str]:
 
 def _compact_recap(result) -> dict:
     top = sorted(result.sessions, key=lambda s: -s.active_min)[:5]
-    focus = top_focus_thread(result.overall_narrative)
     narrative_provenance = getattr(result, "narrative_provenance", {}) or {}
     category_provenance = narrative_provenance.get("categories", {})
     return {
@@ -147,18 +146,6 @@ def _compact_recap(result) -> dict:
         ],
         "top_focus": result.overall_narrative,
         "top_focus_narrator": narrative_provenance.get("overall"),
-        # Keep the existing prose field stable and add a structured Top focus
-        # so MCP clients do not need to reverse-engineer LLM Markdown.
-        "top_focus_detail": (
-            {
-                "title": focus.title,
-                "goal": focus.goal,
-                "target_state": focus.target_state,
-                "completed": focus.completed,
-            }
-            if focus
-            else None
-        ),
         "top_sessions": [
             {
                 "id": s.session_id,
