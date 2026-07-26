@@ -616,9 +616,9 @@ Four read-only tools:
 
 | Tool | Returns |
 |---|---|
-| `get_recap(window, classify, allow_llm)` | Totals, per-category active hours + narrative + a `children` per-project breakdown (name + hours), the overall narrative, top 5 sessions, cost. |
-| `compare_to_previous(window, classify)` | Active-hours and cost deltas vs. the immediately preceding same-length window. |
-| `get_trend(period, count, classify)` | Per-period series over the last `count` weeks/months (oldest first): active hours, cost, per-category hours. `count` clamped to 1..24. |
+| `get_recap(window, classify, allow_llm, agent)` | Totals, per-category active hours + narrative + a `children` per-project breakdown (name + hours), the overall narrative, top 5 sessions, cost, usage coverage, and unpriced models. |
+| `compare_to_previous(window, classify, agent)` | Active-hours and cost deltas vs. the immediately preceding same-length window, with current/previous usage coverage and unpriced models. |
+| `get_trend(period, count, classify, agent)` | Per-period series over the last `count` weeks/months (oldest first): active hours, cost, per-category hours, usage coverage, and unpriced models. `count` clamped to 1..24. |
 | `list_categories()` | The bucket rules ccstory classifies sessions into (user + built-in defaults). |
 
 `window` accepts `week` / `month` / `all` / `YYYY-MM`, same as the CLI;

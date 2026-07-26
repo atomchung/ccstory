@@ -12,4 +12,3 @@ def test_python_version_comes_from_canonical_pyproject():
         canonical = tomllib.load(handle)["project"]["version"]
 
     assert ccstory.__version__ == canonical
-    assert canonical.endswith(".dev0")

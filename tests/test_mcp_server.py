@@ -11,6 +11,7 @@ installed `mcp` SDK), so these call `get_recap` / `compare_to_previous` /
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,11 +22,15 @@ from ccstory import session_summarizer as ss  # noqa: E402
 from tests.conftest import make_assistant_msg, make_user_msg  # noqa: E402
 
 from ccstory.mcp_server import (  # noqa: E402
+    _compact_comparison,
+    _compact_recap,
     compare_to_previous,
     get_recap,
     get_trend,
     list_categories,
 )
+from ccstory.token_usage import ModelUsage, UsageReport  # noqa: E402
+from ccstory.trends import PeriodComparison, PeriodPoint  # noqa: E402
 
 
 def _recent_ts(hours_ago: float) -> str:
@@ -105,9 +110,52 @@ class TestGetRecap:
         assert out["agent"] == "all"
         assert out["agents"][0]["agent"] == "claude"
         assert out["cost_usd"] >= 0
+        assert out["usage_coverage"] == {
+            "complete": True,
+            "incomplete_agents": [],
+            "providers": {"claude": "complete"},
+        }
+        assert out["unpriced_models"] == []
         # Compact, not the full --json envelope: no per-session id list
         # beyond top_sessions, no raw transcript text anywhere in the shape.
         assert "sessions" not in out
+
+    def test_compact_shape_discloses_partial_usage_and_unpriced_models(self):
+        now = datetime.now(timezone.utc)
+        usage = UsageReport(
+            since=now,
+            until=now,
+            by_model={
+                "future-antigravity-model": ModelUsage(
+                    model="future-antigravity-model",
+                    input_tokens=10,
+                )
+            },
+            provider_coverage={"antigravity": "partial"},
+        )
+        out = _compact_recap(
+            SimpleNamespace(
+                agent="antigravity",
+                label="week",
+                since=now,
+                until=now,
+                sessions=[],
+                rollups=[],
+                summaries={},
+                category_narratives={},
+                overall_narrative=None,
+                usage=usage,
+                report_path=None,
+            )
+        )
+
+        assert out["cost_usd"] == 0
+        assert out["usage_coverage"] == {
+            "complete": False,
+            "incomplete_agents": ["antigravity"],
+            "providers": {"antigravity": "partial"},
+        }
+        assert out["unpriced_models"] == ["future-antigravity-model"]
 
     def test_no_report_file_written(self, tmp_home, jsonl_factory):
         """get_recap must not have report-writing side effects (write_report=False)."""
@@ -249,6 +297,36 @@ class TestGetRecap:
 
 
 class TestCompareToPrevious:
+    def test_compact_shape_discloses_both_windows_usage_limits(self):
+        out = _compact_comparison(
+            PeriodComparison(
+                current_label="current",
+                previous_label="previous",
+                deltas=[],
+                current_total_h=0,
+                previous_total_h=0,
+                current_output_tokens=0,
+                previous_output_tokens=0,
+                current_cost_usd=0,
+                previous_cost_usd=0,
+                current_provider_coverage={"antigravity": "partial"},
+                previous_provider_coverage={"antigravity": "unavailable"},
+                current_unpriced_models=["future-current"],
+                previous_unpriced_models=["future-previous"],
+            )
+        )
+
+        assert out["usage_coverage"]["current"]["complete"] is False
+        assert out["usage_coverage"]["previous"] == {
+            "complete": False,
+            "incomplete_agents": ["antigravity"],
+            "providers": {"antigravity": "unavailable"},
+        }
+        assert out["unpriced_models"] == {
+            "current": ["future-current"],
+            "previous": ["future-previous"],
+        }
+
     def test_happy_path_shape(self, tmp_home, jsonl_factory):
         _seed_session(jsonl_factory, "-Users-me-proj", "sess-cur", hours_ago=2)
         _seed_session(jsonl_factory, "-Users-me-proj", "sess-prev", hours_ago=9 * 24)
@@ -349,12 +427,46 @@ class TestGetTrend:
         assert len(out["points"]) == 2
         for p in out["points"]:
             assert set(p) == {"label", "since", "until", "active_hours",
-                              "cost_usd", "buckets"}
+                              "cost_usd", "usage_coverage",
+                              "unpriced_models", "buckets"}
+        assert out["usage_coverage"]["complete"] is True
+        assert out["unpriced_models"] == []
         # Windows come back oldest first; the seeded sessions put activity
         # in both of them.
         assert out["points"][0]["since"] < out["points"][1]["since"]
         assert out["points"][-1]["active_hours"] > 0
         assert out["points"][-1]["buckets"][0]["sessions"] >= 1
+
+    def test_discloses_partial_coverage_and_unpriced_models(
+        self, tmp_home, monkeypatch,
+    ):
+        now = datetime.now(timezone.utc)
+        point = PeriodPoint(
+            label="2026-W30",
+            since=now - timedelta(days=7),
+            until=now,
+            rollups=[],
+            total_h=0,
+            output_tokens=0,
+            cost_usd=0,
+            provider_coverage={"antigravity": "partial"},
+            unpriced_models=["future-gemini"],
+        )
+        monkeypatch.setattr(
+            "ccstory.mcp_server.collect_trend",
+            lambda **kwargs: [point],
+        )
+
+        out = get_trend(period="week", count=1, agent="antigravity")
+
+        assert out["usage_coverage"] == {
+            "complete": False,
+            "incomplete_agents": ["antigravity"],
+            "providers": {"antigravity": "partial"},
+        }
+        assert out["unpriced_models"] == ["future-gemini"]
+        assert out["points"][0]["usage_coverage"]["complete"] is False
+        assert out["points"][0]["unpriced_models"] == ["future-gemini"]
 
     def test_count_is_clamped(self, tmp_home):
         out = get_trend(period="week", count=999)
