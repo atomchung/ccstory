@@ -151,8 +151,16 @@ class TestReportJson:
             "previous": ["claude-legacy-test"],
         }
         assert c["usage_coverage"] == {
-            "current": {"antigravity": "partial"},
-            "previous": {"claude": "complete"},
+            "current": {
+                "complete": False,
+                "incomplete_agents": ["antigravity"],
+                "providers": {"antigravity": "partial"},
+            },
+            "previous": {
+                "complete": True,
+                "incomplete_agents": [],
+                "providers": {"claude": "complete"},
+            },
         }
         assert c["deltas"][0] == {
             "bucket": "coding",
@@ -160,6 +168,16 @@ class TestReportJson:
             "previous_min": 30.0,
             "delta_min": 30.0,
             "pct_change": 100.0,
+        }
+
+    def test_empty_coverage_payload_defaults_to_complete(self):
+        from ccstory.report import _usage_coverage_payload
+
+        payload = _usage_coverage_payload({})
+        assert payload == {
+            "complete": True,
+            "incomplete_agents": [],
+            "providers": {},
         }
 
     def test_unpriced_models_top_level_recap(self):

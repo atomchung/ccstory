@@ -626,6 +626,18 @@ def render_report(
 JSON_SCHEMA_VERSION = 1
 
 
+def _usage_coverage_payload(provider_coverage: dict[str, str]) -> dict:
+    """Format provider coverage map into full payload {complete, incomplete_agents, providers}."""
+    incomplete = sorted(
+        name for name, state in provider_coverage.items() if state != "complete"
+    )
+    return {
+        "complete": not incomplete,
+        "incomplete_agents": incomplete,
+        "providers": provider_coverage,
+    }
+
+
 def build_report_json(
     label: str,
     since: datetime,
@@ -771,8 +783,12 @@ def build_report_json(
             "previous_cost_usd": round(comparison.previous_cost_usd, 2),
             "narrative": comparison.narrative,
             "usage_coverage": {
-                "current": comparison.current_provider_coverage,
-                "previous": comparison.previous_provider_coverage,
+                "current": _usage_coverage_payload(
+                    comparison.current_provider_coverage
+                ),
+                "previous": _usage_coverage_payload(
+                    comparison.previous_provider_coverage
+                ),
             },
             "unpriced_models": {
                 "current": comparison.current_unpriced_models,
@@ -828,14 +844,7 @@ def build_trend_json(
     """Machine-readable trend series (per-period totals + bucket hours)."""
     agent_scope = _report_agent_scope(agent, [])
     provider_coverage = _trend_provider_coverage(points)
-    incomplete_agents = sorted(
-        name
-        for name, state in provider_coverage.items()
-        if state != "complete"
-    )
-    all_unpriced = sorted(
-        list({m for p in points for m in p.unpriced_models})
-    )
+    all_unpriced = sorted({m for p in points for m in p.unpriced_models})
     return {
         "schema_version": JSON_SCHEMA_VERSION,
         "kind": "trend",
@@ -843,11 +852,7 @@ def build_trend_json(
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "period": period,
         "pricing_snapshot": get_snapshot_date(),
-        "usage_coverage": {
-            "complete": not incomplete_agents,
-            "incomplete_agents": incomplete_agents,
-            "providers": provider_coverage,
-        },
+        "usage_coverage": _usage_coverage_payload(provider_coverage),
         "unpriced_models": all_unpriced,
         "points": [
             {
@@ -857,17 +862,7 @@ def build_trend_json(
                 "total_hours": round(p.total_h, 2),
                 "output_tokens": p.output_tokens,
                 "cost_usd": round(p.cost_usd, 2),
-                "usage_coverage": {
-                    "complete": not any(
-                        state != "complete" for state in p.provider_coverage.values()
-                    ),
-                    "incomplete_agents": sorted(
-                        name
-                        for name, state in p.provider_coverage.items()
-                        if state != "complete"
-                    ),
-                    "providers": p.provider_coverage,
-                },
+                "usage_coverage": _usage_coverage_payload(p.provider_coverage),
                 "unpriced_models": p.unpriced_models,
                 "buckets": [
                     {
