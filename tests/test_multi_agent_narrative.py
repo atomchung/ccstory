@@ -23,7 +23,12 @@ from pathlib import Path
 import pytest
 
 from ccstory import session_summarizer
-from ccstory.report import agent_breakdown, build_report_json, render_report
+from ccstory.report import (
+    agent_breakdown,
+    build_report_json,
+    render_report,
+    render_terminal_card,
+)
 from ccstory.session_summarizer import _extract_excerpt, summarize_session
 from ccstory.time_tracking import SessionStat, wall_clock_active_sec
 from ccstory.token_usage import UsageReport
@@ -206,7 +211,7 @@ class TestTimeSemantics:
         self, overlapping_sessions
     ):
         md = _render(overlapping_sessions)
-        section = md.split("## Coding agents", 1)[1].split("##", 1)[0]
+        section = md.split("## Agent Breakdown", 1)[1].split("##", 1)[0]
 
         # No per-agent duration anywhere in the block — the whole point.
         import re
@@ -221,7 +226,73 @@ class TestTimeSemantics:
 
     def test_single_agent_window_has_no_agent_section(self):
         md = _render([_stat("claude", "c1", 0, 60)])
-        assert "## Coding agents" not in md
+        assert "## Agent Breakdown" not in md
+
+    def test_agent_breakdown_follows_previous_window_in_markdown(
+        self, overlapping_sessions
+    ):
+        from ccstory.time_tracking import rollup_by_category
+        from ccstory.trends import CategoryDelta, PeriodComparison
+
+        comparison = PeriodComparison(
+            current_label="week",
+            previous_label="previous-week",
+            deltas=[CategoryDelta("build", 60, 30)],
+            current_total_h=1.0,
+            previous_total_h=0.5,
+            current_output_tokens=100,
+            previous_output_tokens=50,
+            current_cost_usd=1.0,
+            previous_cost_usd=0.5,
+        )
+        md = render_report(
+            "week",
+            SINCE,
+            UNTIL,
+            overlapping_sessions,
+            rollup_by_category(overlapping_sessions),
+            UsageReport(since=SINCE, until=UNTIL),
+            {},
+            comparison=comparison,
+        )
+
+        assert md.index("## vs previous window") < md.index("## Agent Breakdown")
+
+    def test_agent_breakdown_follows_previous_window_in_terminal_card(
+        self, overlapping_sessions
+    ):
+        from io import StringIO
+
+        from rich.console import Console
+
+        from ccstory.time_tracking import rollup_by_category
+        from ccstory.trends import CategoryDelta, PeriodComparison
+
+        comparison = PeriodComparison(
+            current_label="week",
+            previous_label="previous-week",
+            deltas=[CategoryDelta("build", 60, 30)],
+            current_total_h=1.0,
+            previous_total_h=0.5,
+            current_output_tokens=100,
+            previous_output_tokens=50,
+            current_cost_usd=1.0,
+            previous_cost_usd=0.5,
+        )
+        output = StringIO()
+        Console(file=output, force_terminal=False, width=100).print(
+            render_terminal_card(
+                SINCE,
+                UNTIL,
+                overlapping_sessions,
+                rollup_by_category(overlapping_sessions),
+                UsageReport(since=SINCE, until=UNTIL),
+                comparison=comparison,
+            )
+        )
+
+        text = output.getvalue()
+        assert text.index("vs previous window") < text.index("Agent Breakdown")
 
     def test_json_exposes_shares_and_parallelism(self, overlapping_sessions):
         from ccstory.time_tracking import rollup_by_category
