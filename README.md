@@ -282,11 +282,15 @@ per-agent time added up to 177h against a deduplicated wall clock of 64h. So:
 - **`N× parallel`** is raw agent time ÷ wall clock: how much of the work
   overlapped.
 
-Token usage and costs fully cover Claude Code and OpenAI Codex. Standard
-Antigravity step logs do not expose complete exact token usage, so ccstory never
-guesses from character counts; reports mark token and cost totals incomplete
-whenever Antigravity is in scope. Models with exact tokens but no known rate
-remain visible and trigger a separate missing-price warning.
+Token usage and costs fully cover Claude Code and OpenAI Codex. For Google
+Antigravity, native titles are read from `~/.gemini/antigravity/agyhub_summaries_proto.pb`
+and take precedence over `first_user_text` in recaps when LLM summaries are absent.
+Authoritative exact token usage for Antigravity is read from `gen_metadata` in companion
+SQLite databases (`~/.gemini/antigravity/conversations/<session_id>.db`), aligned by step index
+timestamps with transcript logs (with transcript exact usage as fallback for uncounted steps).
+Antigravity provider coverage remains `partial` because some records lack timestamp alignment
+and DB cache fields are unconfirmed without protobuf descriptors; ccstory never guesses cache
+tokens or models. Models with exact tokens but no known rate remain visible and trigger a missing-price warning.
 
 Use `--agent claude`, `--agent codex`, or `--agent antigravity` to isolate one
 provider.
@@ -399,8 +403,7 @@ stdout is pure JSON (progress goes to stderr, same as markdown mode), so
 `ccstory week --json | jq .totals.active_hours` just works. The envelope
 carries `schema_version` (currently 1): renames/removals bump it, additive
 fields don't — consumers should tolerate unknown keys. Covers window, totals
-(hours/tokens/cost/cache), buckets, per-session lines, model breakdown,
-narrative, comparison, artifacts, and the pricing snapshot date. The markdown
+(hours/tokens/cost/cache), buckets, per-session lines, model breakdown, unpriced models (`unpriced_models`), provider coverage (`usage_coverage`), narrative, comparison, artifacts, and the pricing snapshot date. The markdown
 report file is still written either way; JSON is a view, not a replacement.
 
 ## Obsidian export

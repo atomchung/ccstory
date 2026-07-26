@@ -58,6 +58,7 @@ class SessionStat:
     # Transcript this stat was parsed from. Lets the summary backfill find the
     # file without re-deriving each agent's on-disk layout.
     path: Path | None = None
+    native_title: str = ""
 
     @property
     def active_min(self) -> float:

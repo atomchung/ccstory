@@ -44,7 +44,7 @@ from . import recap  # noqa: E402 — module import so recap.CONFIG_PATH reads l
 from .categorizer import load_rules, load_settings, normalize_project_name  # noqa: E402
 from .session_summarizer import CacheUnavailable  # noqa: E402
 from .recap import RecapUnavailable, build_recap, parse_window  # noqa: E402
-from .report import agent_breakdown  # noqa: E402
+from .report import _session_summary_text, agent_breakdown  # noqa: E402
 from .time_tracking import collect_sessions, rollup_by_category  # noqa: E402
 from .token_usage import apply_prices, collect_usage, load_prices_config  # noqa: E402
 from .trends import _resolve_sessions_from_cache  # noqa: E402
@@ -149,8 +149,7 @@ def _compact_recap(result) -> dict:
                 "project": normalize_project_name(s.project) or s.project,
                 "active_hours": round(s.active_min / 60, 2),
                 "summary": (
-                    result.summaries[s.session_id].summary
-                    if s.session_id in result.summaries else None
+                    _session_summary_text(s, result.summaries) or None
                 ),
             }
             for s in top

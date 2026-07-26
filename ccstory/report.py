@@ -205,13 +205,26 @@ def _format_date_range(since: datetime, until: datetime) -> str:
     return f"{_full(since)} – {_full(until)}"
 
 
+def _session_summary_text(s: SessionStat, summaries: dict | None = None) -> str:
+    """Same one-liner precedence across report formats (terminal, markdown, json, mcp).
+
+    Precedence: LLM/cached summary > native_title > first_user_text > empty string.
+    """
+    if summaries and s.session_id in summaries:
+        summ = summaries[s.session_id]
+        if summ and getattr(summ, "summary", None):
+            return summ.summary
+    if getattr(s, "native_title", ""):
+        return s.native_title
+    return s.first_user_text or ""
+
+
 def _top_session_text(rollup: CategoryRollup, summaries: dict, max_chars: int = 70) -> str:
     """One-line summary of the longest session in a category. Always single-line."""
     if not rollup.top_sessions:
         return ""
     top = rollup.top_sessions[0]
-    summ = summaries.get(top.session_id) if summaries else None
-    text = summ.summary if summ else (top.first_user_text or "(no summary)")
+    text = _session_summary_text(top, summaries) or "(no summary)"
     # Always collapse to one line — newlines/extra whitespace mangle the panel
     text = " ".join(text.split())
     if len(text) > max_chars:
@@ -529,8 +542,7 @@ def render_report(
             lines.append(f"_Projects:_ {proj_bits}")
             lines.append("")
         for s in r.top_sessions:
-            summ = summaries.get(s.session_id)
-            text = summ.summary if summ else s.first_user_text[:100]
+            text = _session_summary_text(s, summaries)[:100]
             time_str = s.start.strftime("%Y-%m-%d %H:%M")
             mins = int(s.active_sec // 60)
             if flavor == "obsidian":
@@ -614,10 +626,16 @@ def render_report(
 JSON_SCHEMA_VERSION = 1
 
 
-def _session_summary_text(s: SessionStat, summaries: dict) -> str:
-    """Same one-liner precedence the markdown report uses."""
-    summ = summaries.get(s.session_id) if summaries else None
-    return summ.summary if summ else s.first_user_text[:100]
+def _usage_coverage_payload(provider_coverage: dict[str, str]) -> dict:
+    """Format provider coverage map into full payload {complete, incomplete_agents, providers}."""
+    incomplete = sorted(
+        name for name, state in provider_coverage.items() if state != "complete"
+    )
+    return {
+        "complete": not incomplete,
+        "incomplete_agents": incomplete,
+        "providers": provider_coverage,
+    }
 
 
 def build_report_json(
@@ -670,6 +688,7 @@ def build_report_json(
             "cache_savings_usd": round(usage.cache_savings_usd, 2),
         },
         "pricing_snapshot": get_snapshot_date(),
+        "unpriced_models": usage.unpriced_models,
         "usage_coverage": {
             "complete": usage.usage_complete,
             "incomplete_agents": usage.incomplete_agents,
@@ -719,7 +738,7 @@ def build_report_json(
                 "summary_source": (
                     summaries[s.session_id].source
                     if summaries and s.session_id in summaries
-                    else "first_message"
+                    else ("native_title" if getattr(s, "native_title", "") else "first_message")
                 ),
             }
             for s in sorted(sessions, key=lambda x: x.start)
@@ -763,6 +782,18 @@ def build_report_json(
             "current_cost_usd": round(comparison.current_cost_usd, 2),
             "previous_cost_usd": round(comparison.previous_cost_usd, 2),
             "narrative": comparison.narrative,
+            "usage_coverage": {
+                "current": _usage_coverage_payload(
+                    comparison.current_provider_coverage
+                ),
+                "previous": _usage_coverage_payload(
+                    comparison.previous_provider_coverage
+                ),
+            },
+            "unpriced_models": {
+                "current": comparison.current_unpriced_models,
+                "previous": comparison.previous_unpriced_models,
+            },
             "deltas": [
                 {
                     "bucket": d.category,
@@ -813,11 +844,7 @@ def build_trend_json(
     """Machine-readable trend series (per-period totals + bucket hours)."""
     agent_scope = _report_agent_scope(agent, [])
     provider_coverage = _trend_provider_coverage(points)
-    incomplete_agents = sorted(
-        name
-        for name, state in provider_coverage.items()
-        if state != "complete"
-    )
+    all_unpriced = sorted({m for p in points for m in p.unpriced_models})
     return {
         "schema_version": JSON_SCHEMA_VERSION,
         "kind": "trend",
@@ -825,11 +852,8 @@ def build_trend_json(
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "period": period,
         "pricing_snapshot": get_snapshot_date(),
-        "usage_coverage": {
-            "complete": not incomplete_agents,
-            "incomplete_agents": incomplete_agents,
-            "providers": provider_coverage,
-        },
+        "usage_coverage": _usage_coverage_payload(provider_coverage),
+        "unpriced_models": all_unpriced,
         "points": [
             {
                 "label": p.label,
@@ -838,6 +862,8 @@ def build_trend_json(
                 "total_hours": round(p.total_h, 2),
                 "output_tokens": p.output_tokens,
                 "cost_usd": round(p.cost_usd, 2),
+                "usage_coverage": _usage_coverage_payload(p.provider_coverage),
+                "unpriced_models": p.unpriced_models,
                 "buckets": [
                     {
                         "name": r.category,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 from datetime import datetime, timezone
@@ -630,3 +631,467 @@ class TestAntigravityRegistryContracts:
         assert excinfo.value.code == 0
         out = capsys.readouterr().out
         assert "antigravity" in out
+
+
+def encode_varint(val: int) -> bytes:
+    res = bytearray()
+    while val >= 0x80:
+        res.append((val & 0x7F) | 0x80)
+        val >>= 7
+    res.append(val & 0x7F)
+    return bytes(res)
+
+
+def encode_tag(field_num: int, wire_type: int) -> bytes:
+    return encode_varint((field_num << 3) | wire_type)
+
+
+def encode_string(field_num: int, text: str) -> bytes:
+    b = text.encode("utf-8")
+    return encode_tag(field_num, 2) + encode_varint(len(b)) + b
+
+
+def encode_bytes(field_num: int, b: bytes) -> bytes:
+    return encode_tag(field_num, 2) + encode_varint(len(b)) + b
+
+
+def encode_varint_field(field_num: int, val: int) -> bytes:
+    return encode_tag(field_num, 0) + encode_varint(val)
+
+
+def make_title_proto(entries: list[tuple[str, str]]) -> bytes:
+    root = bytearray()
+    for sid, title in entries:
+        summary_msg = encode_string(1, title)
+        entry_msg = encode_string(1, sid) + encode_bytes(2, summary_msg)
+        root.extend(encode_bytes(1, entry_msg))
+    return bytes(root)
+
+
+def make_gen_metadata_blob(
+    model: str, input_tokens: int, output_tokens: int, extra_fields: bytes = b""
+) -> bytes:
+    usage_msg = (
+        encode_varint_field(2, input_tokens)
+        + encode_varint_field(3, output_tokens)
+        + extra_fields
+    )
+    gen_msg = encode_string(19, model) + encode_bytes(4, usage_msg)
+    return encode_bytes(1, gen_msg)
+
+
+class TestAntigravityNativeTitle:
+    def test_reads_native_title_map_and_preserves_first_user_text(
+        self, antigravity_factory, tmp_home
+    ):
+        sid = "title-test-session-123"
+        path = antigravity_factory(
+            sid,
+            [
+                _user("Add unit tests for Antigravity native title", 1),
+                _planner("Writing tests.", 2),
+            ],
+            cwd="/Users/x/demo",
+        )
+        pb_path = tmp_home / ".gemini" / "antigravity" / "agyhub_summaries_proto.pb"
+        pb_path.parent.mkdir(parents=True, exist_ok=True)
+        pb_path.write_bytes(
+            make_title_proto([(sid, "Refactor Antigravity metadata parser")])
+        )
+
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
+        stat = provider.parse_session(path)
+
+        assert stat is not None
+        assert stat.native_title == "Refactor Antigravity metadata parser"
+        assert stat.first_user_text == "Add unit tests for Antigravity native title"
+
+
+class TestAntigravityDBMetadataUsage:
+    def test_exact_db_usage_window_filtering_dedup_and_fallback(
+        self, antigravity_factory, tmp_home
+    ):
+        sid = "db-usage-session-456"
+        rec2 = _planner("Turn 2", 2)
+        rec2["usage"] = {
+            "model": "gemini-3.6-flash",
+            "input_tokens": 999,
+            "output_tokens": 999,
+        }
+        rec4 = _planner("Turn 4", 4)
+        rec4["usage"] = {
+            "model": "gemini-3.1-pro-low",
+            "input_tokens": 200,
+            "output_tokens": 80,
+            "cache_read_input_tokens": 50,
+        }
+        rec6 = _planner("Turn 6", 6)
+        rec6["created_at"] = (
+            datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+
+        antigravity_factory(
+            sid,
+            [_user("Prompt", 1), rec2, _user("Next", 3), rec4, rec6],
+            cwd="/Users/x/demo",
+        )
+
+        conv_dir = tmp_home / ".gemini" / "antigravity" / "conversations"
+        conv_dir.mkdir(parents=True, exist_ok=True)
+        db_path = conv_dir / f"{sid}.db"
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute(
+            "CREATE TABLE gen_metadata (idx INTEGER, data BLOB, size INTEGER);"
+        )
+        blob2 = make_gen_metadata_blob(
+            "gemini-3.6-flash",
+            100,
+            40,
+            extra_fields=encode_varint_field(99, 777),
+        )
+        c.execute(
+            "INSERT INTO gen_metadata VALUES (2, ?, ?);", (blob2, len(blob2))
+        )
+        bad_blob = encode_bytes(1, b"corrupt data")
+        c.execute(
+            "INSERT INTO gen_metadata VALUES (4, ?, ?);",
+            (bad_blob, len(bad_blob)),
+        )
+        blob6 = make_gen_metadata_blob("gemini-3.6-flash", 500, 300)
+        c.execute(
+            "INSERT INTO gen_metadata VALUES (6, ?, ?);", (blob6, len(blob6))
+        )
+        conn.commit()
+        conn.close()
+
+        since = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        until = datetime(2026, 7, 30, tzinfo=timezone.utc)
+
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
+        by_model: dict = {}
+        turns = provider.collect_usage(since, until, by_model)
+
+        assert turns == 2
+        assert "gemini-3.6-flash" in by_model
+        assert by_model["gemini-3.6-flash"].turns == 1
+        assert by_model["gemini-3.6-flash"].input_tokens == 100
+        assert by_model["gemini-3.6-flash"].output_tokens == 40
+        assert by_model["gemini-3.6-flash"].cache_read == 0
+
+        assert "gemini-3.1-pro-low" in by_model
+        assert by_model["gemini-3.1-pro-low"].turns == 1
+        assert by_model["gemini-3.1-pro-low"].input_tokens == 200
+        assert by_model["gemini-3.1-pro-low"].output_tokens == 80
+        assert by_model["gemini-3.1-pro-low"].cache_read == 50
+
+
+class TestSessionStatPositionalCompatibility:
+    def test_positional_constructor_backward_compatibility(self):
+        from ccstory.time_tracking import SessionStat
+
+        start = datetime(2026, 7, 22, 12, 0, tzinfo=timezone.utc)
+        end = datetime(2026, 7, 22, 12, 10, tzinfo=timezone.utc)
+        path = Path("/tmp/transcript.jsonl")
+        ts_list = [start.timestamp(), end.timestamp()]
+
+        stat = SessionStat(
+            "proj-a",
+            "coding",
+            "sid-123",
+            start,
+            end,
+            600,
+            10,
+            2,
+            "first prompt",
+            True,
+            "/Users/me/proj-a",
+            ts_list,
+            "user_rule",
+            "antigravity",
+            path,
+        )
+
+        assert stat.project == "proj-a"
+        assert stat.category == "coding"
+        assert stat.session_id == "sid-123"
+        assert stat.start == start
+        assert stat.end == end
+        assert stat.active_sec == 600
+        assert stat.msg_count == 10
+        assert stat.user_msg_count == 2
+        assert stat.first_user_text == "first prompt"
+        assert stat.is_scheduled is True
+        assert stat.cwd == "/Users/me/proj-a"
+        assert stat.timestamps == ts_list
+        assert stat.category_source == "user_rule"
+        assert stat.agent == "antigravity"
+        assert stat.path == path
+        assert stat.native_title == ""
+
+
+class TestStrictProtobufFailClosed:
+    @pytest.mark.parametrize(
+        "trailing_bytes",
+        [
+            b"\x12\x50\x01\x02",
+            b"\x0f",
+            b"\x80" * 11,
+            b"\x00",
+        ],
+    )
+    def test_parse_gen_metadata_blob_fail_closed_on_trailing_corrupt_data(
+        self, trailing_bytes
+    ):
+        from ccstory.providers.antigravity import parse_gen_metadata_blob
+
+        valid_blob = make_gen_metadata_blob("gemini-3.6-flash", 100, 40)
+        corrupt_blob = valid_blob + trailing_bytes
+        assert parse_gen_metadata_blob(corrupt_blob) is None
+
+    def test_title_proto_bad_entry_does_not_corrupt_other_entries(
+        self, tmp_path
+    ):
+        from ccstory.providers.antigravity import _read_title_map
+
+        pb_path = tmp_path / "agyhub_summaries_proto.pb"
+        bad_entry = encode_bytes(
+            1, encode_tag(1, 2) + encode_varint(50) + b"truncated"
+        )
+        valid_entry = encode_bytes(
+            1,
+            encode_string(1, "sid-valid")
+            + encode_bytes(2, encode_string(1, "Valid Native Title")),
+        )
+        pb_path.write_bytes(bad_entry + valid_entry)
+
+        title_map = _read_title_map(pb_path)
+        assert "sid-valid" in title_map
+        assert title_map["sid-valid"] == "Valid Native Title"
+
+    @pytest.mark.parametrize(
+        "varint_bytes",
+        [
+            b"\x80" * 9 + b"\x02",
+            b"\x80" * 10,
+        ],
+    )
+    def test_decode_varint_rejects_uint64_overflow(self, varint_bytes):
+        from ccstory.providers.antigravity import decode_varint
+
+        with pytest.raises(ValueError, match="Malformed varint"):
+            decode_varint(varint_bytes, 0)
+
+    def test_parse_gen_metadata_blob_fails_closed_on_invalid_utf8_model(self):
+        from ccstory.providers.antigravity import parse_gen_metadata_blob
+
+        invalid_utf8_blob = encode_bytes(
+            1,
+            encode_bytes(19, b"\xff\xfe\xfd")
+            + encode_bytes(
+                4, encode_varint_field(2, 100) + encode_varint_field(3, 40)
+            ),
+        )
+        assert parse_gen_metadata_blob(invalid_utf8_blob) is None
+
+    def test_title_proto_skips_invalid_utf8_entry(self, tmp_path):
+        from ccstory.providers.antigravity import _read_title_map
+
+        pb_path = tmp_path / "agyhub_summaries_proto.pb"
+        invalid_entry = encode_bytes(
+            1,
+            encode_string(1, "sid-invalid")
+            + encode_bytes(2, encode_bytes(1, b"\xff\xfe\xfd")),
+        )
+        valid_entry = encode_bytes(
+            1,
+            encode_string(1, "sid-valid")
+            + encode_bytes(2, encode_string(1, "Valid Native Title")),
+        )
+        pb_path.write_bytes(invalid_entry + valid_entry)
+
+        title_map = _read_title_map(pb_path)
+        assert "sid-invalid" not in title_map
+        assert "sid-valid" in title_map
+        assert title_map["sid-valid"] == "Valid Native Title"
+
+
+class TestDuplicateIdxDefense:
+    def test_gen_metadata_duplicate_idx_counted_only_once(
+        self, antigravity_factory, tmp_home
+    ):
+        sid = "dup-idx-session-789"
+        rec2 = _planner("Turn 2", 2)
+        antigravity_factory(
+            sid,
+            [_user("Prompt", 1), rec2],
+            cwd="/Users/x/demo",
+        )
+
+        conv_dir = tmp_home / ".gemini" / "antigravity" / "conversations"
+        conv_dir.mkdir(parents=True, exist_ok=True)
+        db_path = conv_dir / f"{sid}.db"
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute(
+            "CREATE TABLE gen_metadata (idx INTEGER, data BLOB, size INTEGER);"
+        )
+        blob1 = make_gen_metadata_blob("gemini-3.6-flash", 100, 40)
+        blob2 = make_gen_metadata_blob("gemini-3.6-flash", 999, 999)
+        c.execute(
+            "INSERT INTO gen_metadata VALUES (2, ?, ?);", (blob1, len(blob1))
+        )
+        c.execute(
+            "INSERT INTO gen_metadata VALUES (2, ?, ?);", (blob2, len(blob2))
+        )
+        conn.commit()
+        conn.close()
+
+        since = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        until = datetime(2026, 7, 30, tzinfo=timezone.utc)
+
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
+        by_model: dict = {}
+        turns = provider.collect_usage(since, until, by_model)
+
+        assert turns == 1
+        assert "gemini-3.6-flash" in by_model
+        assert by_model["gemini-3.6-flash"].turns == 1
+        assert by_model["gemini-3.6-flash"].input_tokens == 100
+        assert by_model["gemini-3.6-flash"].output_tokens == 40
+
+
+class TestAntigravityDBConnectionFallback:
+    def test_falls_back_when_primary_probe_raises_operational_error(
+        self, tmp_path, monkeypatch
+    ):
+        from ccstory.providers.antigravity import _connect_readonly_db
+
+        db_path = tmp_path / "lazy_restricted.db"
+        conn_real = sqlite3.connect(db_path)
+        conn_real.execute("CREATE TABLE test (id INT);")
+        conn_real.commit()
+        conn_real.close()
+
+        real_connect = sqlite3.connect
+        connect_calls: list[str] = []
+        primary_closed = False
+
+        class PrimaryProbeFailingConnection:
+            def __init__(self, real_conn):
+                self._real = real_conn
+
+            def execute(self, sql, *args, **kwargs):
+                if "schema_version" in sql:
+                    raise sqlite3.OperationalError("unable to open database file")
+                return self._real.execute(sql, *args, **kwargs)
+
+            def cursor(self):
+                return self._real.cursor()
+
+            def close(self):
+                nonlocal primary_closed
+                primary_closed = True
+                return self._real.close()
+
+        def custom_connect(database, *args, **kwargs):
+            db_str = str(database)
+            connect_calls.append(db_str)
+            conn = real_connect(database, *args, **kwargs)
+            if "immutable=1" not in db_str:
+                return PrimaryProbeFailingConnection(conn)
+            return conn
+
+        monkeypatch.setattr(
+            "ccstory.providers.antigravity.sqlite3.connect",
+            custom_connect,
+        )
+
+        with contextlib.closing(_connect_readonly_db(db_path)) as conn:
+            c = conn.cursor()
+            rows = c.execute("SELECT name FROM sqlite_master;").fetchall()
+            assert ("test",) in rows
+
+        assert primary_closed is True
+        assert len(connect_calls) == 2
+        assert "mode=ro" in connect_calls[0]
+        assert "immutable=1" not in connect_calls[0]
+        assert "mode=ro" in connect_calls[1]
+        assert "immutable=1" in connect_calls[1]
+
+    def test_falls_back_to_immutable_uri_on_connect_operational_error(
+        self, tmp_path, monkeypatch
+    ):
+        from ccstory.providers.antigravity import _connect_readonly_db
+
+        db_path = tmp_path / "restricted.db"
+        conn_real = sqlite3.connect(db_path)
+        conn_real.execute("CREATE TABLE test (id INT);")
+        conn_real.commit()
+        conn_real.close()
+
+        real_connect = sqlite3.connect
+        connect_calls: list[tuple[str, dict]] = []
+
+        def failing_primary_connect(database, *args, **kwargs):
+            connect_calls.append((str(database), kwargs))
+            if "immutable=1" not in str(database):
+                raise sqlite3.OperationalError("unable to open database file")
+            return real_connect(database, *args, **kwargs)
+
+        monkeypatch.setattr(
+            "ccstory.providers.antigravity.sqlite3.connect",
+            failing_primary_connect,
+        )
+
+        with contextlib.closing(_connect_readonly_db(db_path)) as conn:
+            c = conn.cursor()
+            rows = c.execute("SELECT name FROM sqlite_master;").fetchall()
+            assert ("test",) in rows
+
+        assert len(connect_calls) == 2
+        assert "mode=ro" in connect_calls[0][0]
+        assert "immutable=1" not in connect_calls[0][0]
+        assert "mode=ro" in connect_calls[1][0]
+        assert "immutable=1" in connect_calls[1][0]
+
+    def test_normal_connection_does_not_trigger_fallback(
+        self, tmp_path, monkeypatch
+    ):
+        from ccstory.providers.antigravity import _connect_readonly_db
+
+        db_path = tmp_path / "normal.db"
+        conn_real = sqlite3.connect(db_path)
+        conn_real.execute("CREATE TABLE test (id INT);")
+        conn_real.commit()
+        conn_real.close()
+
+        real_connect = sqlite3.connect
+        connect_calls: list[tuple[str, dict]] = []
+
+        def normal_connect(database, *args, **kwargs):
+            connect_calls.append((str(database), kwargs))
+            return real_connect(database, *args, **kwargs)
+
+        monkeypatch.setattr(
+            "ccstory.providers.antigravity.sqlite3.connect",
+            normal_connect,
+        )
+
+        with contextlib.closing(_connect_readonly_db(db_path)) as conn:
+            c = conn.cursor()
+            rows = c.execute("SELECT name FROM sqlite_master;").fetchall()
+            assert ("test",) in rows
+
+        assert len(connect_calls) == 1
+        assert "mode=ro" in connect_calls[0][0]
+        assert "immutable=1" not in connect_calls[0][0]
