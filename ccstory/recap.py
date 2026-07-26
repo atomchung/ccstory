@@ -46,9 +46,11 @@ from .session_summarizer import (
     CCSTORY_LANG_ENV,
     _classify_cache_get_many,
     _needs_llm,
-    claude_bin_available,
+    llm_available,
     classify_sessions_by_content,
     get_many,
+    get_comparison_narrative_provenance,
+    get_period_narrative_provenance,
     import_from_claude_recap,
     invalidate_comparison_narratives,
     invalidate_content_buckets,
@@ -177,6 +179,7 @@ class RecapResult:
     # Appended after the existing defaulted fields so older positional
     # RecapResult(...) callers do not silently bind report_path as agent.
     agent: str = "all"
+    narrative_provenance: dict = field(default_factory=dict)
 
     def to_json(self) -> dict:
         """The machine-readable envelope (`schema_version: 1`), same shape
@@ -195,6 +198,7 @@ class RecapResult:
             artifacts=self.artifacts,
             category_narratives=self.category_narratives or None,
             agent=self.agent,
+            narrative_provenance=self.narrative_provenance,
         )
         if self.report_path is not None:
             payload["report_path"] = str(self.report_path)
@@ -210,7 +214,7 @@ def _synthesize_overall(
 ) -> str | None:
     """Synthesize the overall goal-thread narrative for the period.
 
-    Single `claude -p` call across all categories — replaces the old
+    Single configured-narrator call across all categories — replaces the old
     per-bucket aggregate path. Cache-friendly: only re-runs when the set
     of session ids changes since the cached narrative was written.
     """
@@ -228,7 +232,7 @@ def _synthesize_overall(
     category_hours = [(r.category, r.active_min / 60) for r in rollups]
 
     with console.status(
-        "[dim]Synthesizing overall narrative (claude -p)…[/dim]"
+        "[dim]Synthesizing overall narrative (configured narrator)…[/dim]"
     ):
         return synthesize_overall_for_period(
             period_key=label,
@@ -248,7 +252,7 @@ def _synthesize_categories(
 
     Same input contract as the overall narrative: only sessions with a real
     summary (auto/record) feed the prompt. A bucket with none is skipped;
-    a bucket whose claude -p fails is simply absent from the result.
+    a bucket whose narrator call fails is simply absent from the result.
     """
     sessions_by_cat: dict[str, list[tuple[str, str]]] = {}
     for s in sessions:
@@ -264,7 +268,7 @@ def _synthesize_categories(
         items = sessions_by_cat[cat]
         with console.status(
             f"[dim]Synthesizing bucket narrative {i}/{len(cats)} — "
-            f"{cat} (claude -p)…[/dim]"
+            f"{cat} (configured narrator)…[/dim]"
         ):
             narrative = synthesize_category_for_period(
                 period_key=label,
@@ -289,7 +293,7 @@ def _resolve_all_sessions(
 
     Two-pass design:
       Pass 1: cache + folder rule walk-through (single SQL query for cache)
-      Pass 2: one batched ``claude -p`` for sessions marked ``needs_llm``,
+      Pass 2: one batched local narrator call for sessions marked ``needs_llm``,
               when summaries exist and mode allows LLM.
 
     Sessions that still have no resolution (folder mode, or LLM unavailable,
@@ -355,7 +359,7 @@ def _resolve_all_sessions(
         if mapping:
             console.print(
                 f"[green]✓[/green] [dim]content-classified {len(mapping)} "
-                f"session(s) via claude -p[/dim]\n"
+                f"session(s) via configured narrator[/dim]\n"
             )
     else:
         # Folder mode (or no LLM path) → assign fallback to leftovers.
@@ -365,7 +369,7 @@ def _resolve_all_sessions(
 
 
 def _sec_per_session() -> tuple[float, bool]:
-    """How long one `claude -p` summary actually takes on this machine.
+    """How long one configured narrator summary actually takes on this machine.
 
     Learns from the cache rather than guessing: a backfill writes one `auto`
     row per call, so gaps between consecutive rows are real timings for
@@ -398,7 +402,7 @@ def _backfill_summaries(
     """Resolve narratives for sessions in this window.
 
     Default path is the instant first/last-user-message fallback for never-seen
-    sessions. Pass `use_llm=True` to opt into `claude -p`: it upgrades
+    sessions. Pass `use_llm=True` to opt into the configured narrator: it upgrades
     `fallback` rows to `auto` and regenerates stale `auto` rows (older
     prompt_version) — or, with `force=True`, every in-window `auto`. The
     user gets an ETA warning, split into new vs regenerated, before the
@@ -426,12 +430,12 @@ def _backfill_summaries(
         basis = "measured on this machine" if measured else "first-run estimate"
         console.print(
             f"[yellow]![/yellow] {len(todo)} session(s) to summarize "
-            f"({breakdown}). [bold]`claude -p` ETA ~{eta_min} min[/bold] "
+            f"({breakdown}). [bold]Narrator ETA ~{eta_min} min[/bold] "
             f"(~{sec:.0f}s/session, {basis}). "
             f"Press Ctrl+C to abort, or rerun without --llm-narrative "
             f"for an instant first/last-message fallback.\n"
         )
-        progress_desc = "Summarizing sessions via claude -p"
+        progress_desc = "Summarizing sessions via configured narrator"
     else:
         progress_desc = "Generating fallback narratives"
 
@@ -514,8 +518,8 @@ def build_recap(
 
       window            week | month | all | YYYY-MM   (positional arg)
       minimal           --minimal        skip the narrative pipeline entirely
-      llm_narrative     --llm-narrative  polish per-session summaries via
-                                         `claude -p` (slow, ETA warning)
+      llm_narrative     --llm-narrative  polish per-session summaries via the
+                                         configured local narrator (slow, ETA warning)
       narrative         --narrative      overall | per-category | both
       aggregate         --no-aggregate   False skips the overall synthesis
       compare           --no-compare     False skips the vs-previous block
@@ -629,9 +633,9 @@ def build_recap(
                 f"summarie(s) from ~/.claude/session_summaries.db "
                 f"(/recap)[/dim]\n"
             )
-        if llm_narrative and not claude_bin_available():
+        if llm_narrative and not llm_available():
             console.print(
-                "[yellow]![/yellow] [dim]`claude` not on PATH — "
+                "[yellow]![/yellow] [dim]no configured narrative CLI is available — "
                 "--llm-narrative will fall back to first/last user messages[/dim]\n"
             )
         counts = _backfill_summaries(
@@ -673,12 +677,14 @@ def build_recap(
     )
 
     category_narratives: dict[str, str] = {}
+    narrative_provenance: dict[str, object] = {"overall": None, "categories": {}, "comparison": None}
     if not minimal:
         if aggregate and summaries and narrative in ("overall", "both"):
             overall_narrative = _synthesize_overall(
                 label, sessions, rollups, summaries, console,
             )
             if overall_narrative:
+                narrative_provenance["overall"] = get_period_narrative_provenance(label)
                 console.print(
                     "[green]✓[/green] [dim]synthesized overall narrative"
                     "[/dim]\n"
@@ -688,6 +694,10 @@ def build_recap(
                 label, sessions, rollups, summaries, console,
             )
             if category_narratives:
+                narrative_provenance["categories"] = {
+                    category: get_period_narrative_provenance(label, category)
+                    for category in category_narratives
+                }
                 console.print(
                     f"[green]✓[/green] [dim]synthesized "
                     f"{len(category_narratives)} bucket narrative(s)[/dim]\n"
@@ -710,7 +720,7 @@ def build_recap(
         if comparison and compare_narrative and summaries:
             prev_summaries = get_many(comparison.previous_session_ids)
             with console.status(
-                "[dim]Synthesizing week-over-week narrative (claude -p)…[/dim]"
+                "[dim]Synthesizing week-over-week narrative (configured narrator)…[/dim]"
             ):
                 comparison.narrative = synthesize_comparison(
                     current_key=label,
@@ -730,6 +740,10 @@ def build_recap(
                         for d in comparison.deltas
                     ],
                 )
+                if comparison.narrative:
+                    narrative_provenance["comparison"] = get_comparison_narrative_provenance(
+                        label, comparison.previous_label,
+                    )
 
     artifacts_report = None
     if artifacts:
@@ -752,6 +766,7 @@ def build_recap(
         artifacts=artifacts_report,
         category_narratives=category_narratives or None,
         agent=agent,
+        narrative_provenance=narrative_provenance,
     )
 
     report_path: Path | None = None
@@ -778,4 +793,5 @@ def build_recap(
         agent=agent,
         report_path=report_path,
         counts=counts,
+        narrative_provenance=narrative_provenance,
     )

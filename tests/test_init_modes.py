@@ -152,16 +152,16 @@ class TestRunSkipMode:
 
 # --- run_quick_mode / run_deep_mode dispatcher hooks ------------------------
 
-class TestRunQuickAndDeepClaudeUnavailable:
-    """If `claude` CLI not on PATH, Quick + Deep both refuse cleanly."""
+class TestRunQuickAndDeepNarratorUnavailable:
+    """If no configured narrator is available, Quick + Deep refuse cleanly."""
 
-    def test_quick_returns_1_without_claude(self, tmp_home: Path):
-        with patch.object(init_categories, "claude_bin_available", return_value=False):
+    def test_quick_returns_1_without_narrator(self, tmp_home: Path):
+        with patch.object(init_categories, "llm_available", return_value=False):
             rc = run_quick_mode(console=Console(file=StringIO()))
         assert rc == 1
 
-    def test_deep_returns_1_without_claude(self, tmp_home: Path):
-        with patch.object(init_categories, "claude_bin_available", return_value=False):
+    def test_deep_returns_1_without_narrator(self, tmp_home: Path):
+        with patch.object(init_categories, "llm_available", return_value=False):
             rc = run_deep_mode(console=Console(file=StringIO()))
         assert rc == 1
 
@@ -171,10 +171,10 @@ class TestRunDeepClampsBadInputs:
     before `sample_sessions_for_deep` could clamp. Verify both inputs clamp."""
 
     def test_deep_clamps_days_zero(self, tmp_home: Path):
-        # claude_bin_available=False short-circuits before any sampling, but the
-        # clamp runs before that check — make claude available so the warning
+        # An unavailable narrator short-circuits before any sampling, but the
+        # clamp runs before that check — make one available so the warning
         # path is reachable.
-        with patch.object(init_categories, "claude_bin_available", return_value=True), \
+        with patch.object(init_categories, "llm_available", return_value=True), \
              patch.object(init_categories, "collect_sessions", return_value=[]):
             rc = run_deep_mode(
                 days=0, max_n=200,
@@ -185,7 +185,7 @@ class TestRunDeepClampsBadInputs:
         assert rc == 0
 
     def test_deep_clamps_max_n_zero(self, tmp_home: Path):
-        with patch.object(init_categories, "claude_bin_available", return_value=True), \
+        with patch.object(init_categories, "llm_available", return_value=True), \
              patch.object(init_categories, "collect_sessions", return_value=[]):
             rc = run_deep_mode(
                 days=7, max_n=0,

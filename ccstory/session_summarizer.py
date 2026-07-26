@@ -1,8 +1,8 @@
-"""Session-level summaries cached to SQLite, generated via local `claude -p`.
+"""Session-level summaries cached to SQLite, generated through local CLIs.
 
 This is the differentiator: ccusage gives numbers, ccstory gives a one-line
-narrative per session. We invoke the user's *local* Claude Code CLI through
-subprocess — no API key, no cost to us, no privacy concerns.
+narrative per session.  Narrative work uses the first available configured
+local coding-agent CLI; no API key or ccstory-operated service is involved.
 
 Extracted from ting/personal_os/core/session_summarizer.py. Simplified for v1:
   - Single source ("auto") — dropped the personal_os curated "record" source
@@ -34,14 +34,16 @@ CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 CCSTORY_CONFIG_PATH = Path.home() / ".ccstory" / "config.toml"
 CCSTORY_LANG_ENV = "CCSTORY_LANG"
 CLAUDE_BIN = "claude"
+CODEX_BIN = "codex"
+ANTIGRAVITY_BIN = Path.home() / ".local" / "bin" / "agy"
 
 # Bump whenever the per-session narrative prompt (_PROMPT_TEMPLATE) is changed
 # materially, or when retuning it for a newer/better default `claude` model.
 # Cached "auto" summaries carrying a lower prompt_version are treated as stale
 # and regenerated on the next `--llm-narrative` run. Keep this an int so the
 # comparison `stored < PROMPT_VERSION` is monotonic.
-PROMPT_VERSION = 2
-CACHE_SCHEMA_VERSION = 3
+PROMPT_VERSION = 3
+CACHE_SCHEMA_VERSION = 4
 
 
 _CLAUDE_MD_MAX_CHARS = 500
@@ -165,6 +167,83 @@ def _read_ccstory_language(path: Path | None = None) -> str | None:
     return None
 
 
+def _read_ccstory_config(path: Path | None = None) -> dict:
+    """Return ccstory's TOML config, or an empty mapping on malformed input."""
+    target = path or CCSTORY_CONFIG_PATH
+    if not target.exists():
+        return {}
+    try:
+        import tomllib  # py 3.11+
+    except ImportError:
+        try:
+            import tomli as tomllib  # type: ignore
+        except ImportError:
+            return {}
+    try:
+        with target.open("rb") as f:
+            data = tomllib.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def narrative_backends(path: Path | None = None) -> tuple[NarrativeBackend, ...]:
+    """Resolve explicit local narrator backends from ``[narrative]`` config.
+
+    Defaults are deliberately economical and ordered by the requested coding
+    agent preference: Claude Sonnet, Codex GPT-5.6 Terra, then Antigravity
+    Gemini Flash low.  Invalid entries are ignored rather than silently
+    creating a model-less call; an empty ``providers`` list explicitly opts
+    out of all LLM work.
+    """
+    block = _read_ccstory_config(path).get("narrative")
+    if not isinstance(block, dict):
+        return _DEFAULT_NARRATIVE_BACKENDS
+    providers = block.get("providers")
+    if providers is None:
+        selected = [backend.provider for backend in _DEFAULT_NARRATIVE_BACKENDS]
+    elif isinstance(providers, list) and all(isinstance(v, str) for v in providers):
+        selected = [v.strip().lower() for v in providers]
+    else:
+        LOG.warning("ignoring malformed [narrative].providers; using defaults")
+        return _DEFAULT_NARRATIVE_BACKENDS
+
+    defaults = {backend.provider: backend for backend in _DEFAULT_NARRATIVE_BACKENDS}
+    resolved: list[NarrativeBackend] = []
+    seen: set[str] = set()
+    for provider in selected:
+        if provider in seen:
+            continue
+        seen.add(provider)
+        default = defaults.get(provider)
+        if default is None:
+            LOG.warning("ignoring unsupported narrative provider %r", provider)
+            continue
+        override = block.get(provider)
+        override = override if isinstance(override, dict) else {}
+        model = override.get("model", default.model)
+        if not isinstance(model, str) or not model.strip():
+            LOG.warning("ignoring narrative provider %r without a model", provider)
+            continue
+        effort = override.get("effort", default.effort)
+        if effort is not None and (not isinstance(effort, str) or not effort.strip()):
+            LOG.warning("ignoring invalid effort for narrative provider %r", provider)
+            continue
+        resolved.append(NarrativeBackend(provider, model.strip(), effort.strip() if effort else None))
+    return tuple(resolved)
+
+
+def narrative_config_fingerprint() -> str:
+    """Stable cache identity for the configured backend order and models."""
+    return _cache_fingerprint(
+        "narrative-backends",
+        *(
+            f"{backend.provider}:{backend.model}:{backend.effort or ''}"
+            for backend in narrative_backends()
+        ),
+    )
+
+
 _LOCALE_NAMES: dict[str, str] = {
     "zh_TW": "Traditional Chinese",
     "zh_HK": "Traditional Chinese",
@@ -231,6 +310,38 @@ class SessionSummary:
     # release can refresh summaries when the prompt — or the model it's
     # tuned for — improves. 0 / None for fallback/skipped/legacy rows.
     prompt_version: int = 0
+    # The backend that actually wrote an ``auto`` summary.  ``None`` is kept
+    # for extractive fallback, skipped, imported, and pre-provenance cache
+    # rows; callers must never infer a model for those records.
+    narrator_provider: str | None = None
+    narrator_model: str | None = None
+    narrator_fingerprint: str = ""
+
+
+@dataclass(frozen=True)
+class NarrativeBackend:
+    """One configured local CLI backend, in fallback priority order."""
+
+    provider: str
+    model: str
+    effort: str | None = None
+
+
+@dataclass(frozen=True)
+class NarrativeCall:
+    """Successful LLM response plus the exact configured provenance."""
+
+    stdout: str
+    provider: str
+    model: str
+
+
+_DEFAULT_NARRATIVE_BACKENDS: tuple[NarrativeBackend, ...] = (
+    NarrativeBackend("claude", "sonnet"),
+    NarrativeBackend("codex", "gpt-5.6-terra"),
+    NarrativeBackend("antigravity", "gemini-3.6-flash-low", "low"),
+)
+_NARRATIVE_PROVIDER_NAMES = frozenset(b.provider for b in _DEFAULT_NARRATIVE_BACKENDS)
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -354,10 +465,33 @@ def _migration_3_adopt_legacy_classifications(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_4_narrator_provenance(conn: sqlite3.Connection) -> None:
+    """Track the configured narrator behind every generated prose cache row.
+
+    Existing auto summaries intentionally keep empty provenance.  They become
+    stale on the next ``--llm-narrative`` run, which prevents a legacy Claude
+    cache entry from being presented as if it had used the new explicit model
+    policy.
+    """
+    _migration_3_adopt_legacy_classifications(conn)
+    for table in (
+        "session_summaries",
+        "period_aggregates",
+        "comparison_narratives",
+    ):
+        _add_column_if_missing(conn, table, "narrator_provider", "TEXT")
+        _add_column_if_missing(conn, table, "narrator_model", "TEXT")
+    _add_column_if_missing(
+        conn, "session_summaries", "narrator_fingerprint",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+
+
 _MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_1_baseline,
     _migration_2_cache_fingerprints,
     _migration_3_adopt_legacy_classifications,
+    _migration_4_narrator_provenance,
 )
 assert len(_MIGRATIONS) == CACHE_SCHEMA_VERSION
 
@@ -470,6 +604,9 @@ def upsert(
     source: str,
     project: str | None = None,
     prompt_version: int = 0,
+    narrator_provider: str | None = None,
+    narrator_model: str | None = None,
+    narrator_fingerprint: str = "",
 ) -> None:
     if not session_id or not summary:
         return
@@ -477,10 +614,11 @@ def upsert(
     try:
         conn.execute(
             """INSERT OR REPLACE INTO session_summaries
-               (session_id, summary, source, project, created_at, prompt_version)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               (session_id, summary, source, project, created_at, prompt_version,
+                narrator_provider, narrator_model, narrator_fingerprint)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (session_id, summary.strip(), source, project, time.time(),
-             prompt_version),
+             prompt_version, narrator_provider, narrator_model, narrator_fingerprint),
         )
         conn.commit()
     finally:
@@ -492,7 +630,8 @@ def get(session_id: str) -> SessionSummary | None:
     try:
         row = conn.execute(
             """SELECT session_id, summary, source, project, created_at,
-                      prompt_version
+                      prompt_version, narrator_provider, narrator_model,
+                      narrator_fingerprint
                FROM session_summaries WHERE session_id = ?""",
             (session_id,),
         ).fetchone()
@@ -509,7 +648,8 @@ def get_many(session_ids: list[str]) -> dict[str, SessionSummary]:
         placeholders = ",".join("?" for _ in session_ids)
         rows = conn.execute(
             f"""SELECT session_id, summary, source, project, created_at,
-                       prompt_version
+                       prompt_version, narrator_provider, narrator_model,
+                       narrator_fingerprint
                 FROM session_summaries WHERE session_id IN ({placeholders})""",
             session_ids,
         ).fetchall()
@@ -664,8 +804,10 @@ def claude_bin_available() -> bool:
 _flag_confirmed_broken = False
 
 
-def run_claude_p(prompt: str, timeout: int) -> subprocess.CompletedProcess:
-    """Run `claude -p --output-format text <prompt>`, preferring
+def run_claude_p(
+    prompt: str, timeout: int, model: str = "sonnet",
+) -> subprocess.CompletedProcess:
+    """Run `claude -p --model <model> --output-format text <prompt>`, preferring
     `--no-session-persistence` so one-off summarization calls don't clutter
     the user's `claude --resume` list.
 
@@ -679,7 +821,7 @@ def run_claude_p(prompt: str, timeout: int) -> subprocess.CompletedProcess:
     callers keep their existing error handling.
     """
     global _flag_confirmed_broken
-    base = [CLAUDE_BIN, "-p", "--output-format", "text"]
+    base = [CLAUDE_BIN, "-p", "--model", model, "--output-format", "text"]
     if not _flag_confirmed_broken:
         r = subprocess.run(
             [*base, "--no-session-persistence", prompt],
@@ -694,30 +836,112 @@ def run_claude_p(prompt: str, timeout: int) -> subprocess.CompletedProcess:
     )
 
 
-def summarize_via_claude_p(excerpt: str, timeout: int = 60) -> str | None:
-    """Call local `claude -p` to summarize. Returns None on failure.
+def codex_bin_available() -> bool:
+    return shutil.which(CODEX_BIN) is not None
 
-    Uses subprocess so we draw on the user's own Claude Code session/quota.
+
+def antigravity_bin_available() -> bool:
+    return ANTIGRAVITY_BIN.is_file() and os.access(ANTIGRAVITY_BIN, os.X_OK)
+
+
+def narrative_backend_available(backend: NarrativeBackend) -> bool:
+    if backend.provider == "claude":
+        return claude_bin_available()
+    if backend.provider == "codex":
+        return codex_bin_available()
+    if backend.provider == "antigravity":
+        return antigravity_bin_available()
+    return False
+
+
+def llm_available() -> bool:
+    """Whether at least one configured narrator CLI is locally available."""
+    return any(narrative_backend_available(backend) for backend in narrative_backends())
+
+
+def _run_codex_p(
+    prompt: str, timeout: int, model: str,
+) -> subprocess.CompletedProcess:
+    """Run Codex without persisting a source session or granting write access."""
+    return subprocess.run(
+        [
+            CODEX_BIN, "exec", "--ephemeral", "--sandbox", "read-only",
+            "--model", model, prompt,
+        ],
+        capture_output=True, text=True, timeout=timeout, check=False,
+    )
+
+
+def _run_antigravity_p(
+    prompt: str, timeout: int, model: str, effort: str,
+) -> subprocess.CompletedProcess | None:
+    """Run Antigravity prose generation with bounded transient retries."""
+    for attempt in range(3):
+        result = subprocess.run(
+            [str(ANTIGRAVITY_BIN), "-p", prompt, "--model", model, "--effort", effort],
+            capture_output=True, text=True, timeout=max(timeout, 180), check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result
+        if attempt == 2:
+            return result
+        LOG.warning("antigravity narrative call failed; retrying (%d/3)", attempt + 1)
+    return None
+
+
+def run_llm_p(prompt: str, timeout: int) -> NarrativeCall | None:
+    """Run the configured local narrators in order until one returns prose.
+
+    This dispatcher is shared by summaries, classification, init, aggregate,
+    and comparison prose.  It never guesses a model: every configured backend
+    carries one explicit model id, and a failed/unavailable provider simply
+    advances to the next configured provider.
+    """
+    for backend in narrative_backends():
+        if not narrative_backend_available(backend):
+            continue
+        try:
+            if backend.provider == "claude":
+                result = run_claude_p(prompt, timeout, backend.model)
+            elif backend.provider == "codex":
+                result = _run_codex_p(prompt, timeout, backend.model)
+            else:
+                result = _run_antigravity_p(
+                    prompt, timeout, backend.model, backend.effort or "low",
+                )
+        except (subprocess.SubprocessError, OSError) as exc:
+            LOG.warning("%s narrative call errored: %s", backend.provider, exc)
+            continue
+        if result is not None and result.returncode == 0 and result.stdout.strip():
+            return NarrativeCall(result.stdout, backend.provider, backend.model)
+        stderr = result.stderr.strip()[:200] if result is not None else "no result"
+        LOG.warning("%s narrative call failed: %s", backend.provider, stderr)
+    return None
+
+
+def summarize_via_claude_p(excerpt: str, timeout: int = 60) -> NarrativeCall | None:
+    """Call the selected local narrator to summarize. Returns None on failure.
+
+    Uses subprocess so we draw on the selected CLI's signed-in plan quota.
     No API key, no cost to ccstory.
     """
     if not excerpt.strip():
         return None
-    if not claude_bin_available():
+    if not llm_available():
         return None
     prompt = _PROMPT_TEMPLATE.format(
         excerpt=excerpt[:8000], language_directive=language_directive(),
     )
     try:
-        r = run_claude_p(prompt, timeout)
-        if r.returncode != 0:
-            LOG.warning("claude -p failed (rc=%s): %s", r.returncode, r.stderr.strip()[:200])
+        call = run_llm_p(prompt, timeout)
+        if call is None:
             return None
-        out = r.stdout.strip().split("\n", 1)[0].strip().strip('"').strip("'")
+        out = call.stdout.strip().split("\n", 1)[0].strip().strip('"').strip("'")
         if len(out) < 4 or len(out) > 200:
             return None
-        return out
+        return NarrativeCall(out, call.provider, call.model)
     except (subprocess.SubprocessError, OSError) as e:
-        LOG.warning("claude -p errored: %s", e)
+        LOG.warning("narrative backend errored: %s", e)
         return None
 
 
@@ -726,7 +950,7 @@ def _fallback_narrative(excerpt: str) -> str:
 
     A single-message session keeps the old 120-character fallback.  With
     multiple messages, showing both endpoints gives the reader a cheap hint
-    of the session's arc without spending a ``claude -p`` call (#70).
+    of the session's arc without spending a local narrator call (#70).
     ``_extract_excerpt`` inserts bracketed role markers (plus an optional
     ``...`` sentinel), so parse those markers rather than splitting on blank
     lines that may legitimately occur inside a message.
@@ -757,7 +981,7 @@ def _fallback_narrative(excerpt: str) -> str:
 
 
 def _needs_llm(existing: SessionSummary | None, force: bool = False) -> bool:
-    """Whether a session should be (re)sent to `claude -p` under use_llm=True.
+    """Whether a session should be (re)sent to the configured narrator.
 
     - missing            → yes (never summarized)
     - source == skipped  → no  (no usable content; retrying only wastes calls)
@@ -774,7 +998,10 @@ def _needs_llm(existing: SessionSummary | None, force: bool = False) -> bool:
         return True
     if force:  # source == "auto"
         return True
-    return (existing.prompt_version or 0) < PROMPT_VERSION
+    return (
+        (existing.prompt_version or 0) < PROMPT_VERSION
+        or existing.narrator_fingerprint != narrative_config_fingerprint()
+    )
 
 
 def summarize_session(
@@ -812,10 +1039,19 @@ def summarize_session(
         upsert(session_id, "(no meaningful conversation)", "skipped", project=project)
         return get(session_id)
     if use_llm:
-        summary = summarize_via_claude_p(excerpt)
-        if summary:
-            upsert(session_id, summary, "auto", project=project,
-                   prompt_version=PROMPT_VERSION)
+        call = summarize_via_claude_p(excerpt)
+        # Compatibility with callers that monkeypatch the old helper to a
+        # plain string; production always returns NarrativeCall.
+        if isinstance(call, str):
+            call = NarrativeCall(call, "claude", "sonnet")
+        if call:
+            upsert(
+                session_id, call.stdout, "auto", project=project,
+                prompt_version=PROMPT_VERSION,
+                narrator_provider=call.provider,
+                narrator_model=call.model,
+                narrator_fingerprint=narrative_config_fingerprint(),
+            )
             return get(session_id)
         # claude -p failed: keep a good existing summary instead of
         # downgrading it to a fallback on a transient failure.
@@ -919,6 +1155,7 @@ def synthesize_overall_for_period(
             category_summary=fp_hours_line,
             breakdown=breakdown,
         ),
+        narrative_config_fingerprint(),
     )
 
     conn = _connect()
@@ -940,19 +1177,14 @@ def synthesize_overall_for_period(
     finally:
         conn.close()
 
-    if not claude_bin_available():
+    if not llm_available():
         return None
 
-    try:
-        r = run_claude_p(prompt, timeout)
-        if r.returncode != 0:
-            LOG.warning("overall claude -p failed: %s", r.stderr.strip()[:200])
-            return None
-        narrative = r.stdout.strip().strip('"').strip("'")
-        if len(narrative) < 10:
-            return None
-    except (subprocess.SubprocessError, OSError) as e:
-        LOG.warning("overall errored: %s", e)
+    call = run_llm_p(prompt, timeout)
+    if call is None:
+        return None
+    narrative = call.stdout.strip().strip('"').strip("'")
+    if len(narrative) < 10:
         return None
 
     conn = _connect()
@@ -960,10 +1192,11 @@ def synthesize_overall_for_period(
         conn.execute(
             """INSERT OR REPLACE INTO period_aggregates
                (period_key, category, summary, session_ids, created_at,
-                input_fingerprint)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+                input_fingerprint, narrator_provider, narrator_model)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (period_key, OVERALL_KEY, narrative,
-             ",".join(all_ids), time.time(), input_fingerprint),
+             ",".join(all_ids), time.time(), input_fingerprint,
+             call.provider, call.model),
         )
         conn.commit()
     finally:
@@ -1019,7 +1252,9 @@ def synthesize_category_for_period(
         count=len(summaries),
         bullets=bullets,
     )
-    input_fingerprint = _cache_fingerprint("period-category", prompt)
+    input_fingerprint = _cache_fingerprint(
+        "period-category", prompt, narrative_config_fingerprint(),
+    )
 
     conn = _connect()
     try:
@@ -1040,20 +1275,14 @@ def synthesize_category_for_period(
     finally:
         conn.close()
 
-    if not claude_bin_available():
+    if not llm_available():
         return None
 
-    try:
-        r = run_claude_p(prompt, timeout)
-        if r.returncode != 0:
-            LOG.warning("category %r claude -p failed: %s",
-                        category, r.stderr.strip()[:200])
-            return None
-        narrative = r.stdout.strip().strip('"').strip("'")
-        if len(narrative) < 10:
-            return None
-    except (subprocess.SubprocessError, OSError) as e:
-        LOG.warning("category %r errored: %s", category, e)
+    call = run_llm_p(prompt, timeout)
+    if call is None:
+        return None
+    narrative = call.stdout.strip().strip('"').strip("'")
+    if len(narrative) < 10:
         return None
 
     conn = _connect()
@@ -1061,10 +1290,11 @@ def synthesize_category_for_period(
         conn.execute(
             """INSERT OR REPLACE INTO period_aggregates
                (period_key, category, summary, session_ids, created_at,
-                input_fingerprint)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+                input_fingerprint, narrator_provider, narrator_model)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (period_key, category, narrative,
-             ",".join(ids_sorted), time.time(), input_fingerprint),
+             ",".join(ids_sorted), time.time(), input_fingerprint,
+             call.provider, call.model),
         )
         conn.commit()
     finally:
@@ -1082,6 +1312,42 @@ def get_overall_narrative(period_key: str) -> str | None:
             (period_key, OVERALL_KEY),
         ).fetchone()
         return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def get_period_narrative_provenance(
+    period_key: str, category: str = OVERALL_KEY,
+) -> dict[str, str] | None:
+    """Return recorded provider/model for one cached period narrative."""
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT narrator_provider, narrator_model FROM period_aggregates "
+            "WHERE period_key = ? AND category = ?",
+            (period_key, category),
+        ).fetchone()
+        if not row or not row[0] or not row[1]:
+            return None
+        return {"provider": row[0], "model": row[1]}
+    finally:
+        conn.close()
+
+
+def get_comparison_narrative_provenance(
+    current_key: str, previous_key: str,
+) -> dict[str, str] | None:
+    """Return recorded provider/model for one cached comparison narrative."""
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT narrator_provider, narrator_model FROM comparison_narratives "
+            "WHERE current_key = ? AND previous_key = ?",
+            (current_key, previous_key),
+        ).fetchone()
+        if not row or not row[0] or not row[1]:
+            return None
+        return {"provider": row[0], "model": row[1]}
     finally:
         conn.close()
 
@@ -1254,7 +1520,9 @@ def synthesize_comparison(
         current_summaries=_fmt(current_summaries)[:3000],
     )
     sig = _comparison_signature(current_summaries, previous_summaries, deltas)
-    input_fingerprint = _cache_fingerprint("period-comparison", prompt)
+    input_fingerprint = _cache_fingerprint(
+        "period-comparison", prompt, narrative_config_fingerprint(),
+    )
 
     conn = _connect()
     try:
@@ -1274,19 +1542,14 @@ def synthesize_comparison(
     finally:
         conn.close()
 
-    if not claude_bin_available():
+    if not llm_available():
         return None
 
-    try:
-        r = run_claude_p(prompt, timeout)
-        if r.returncode != 0:
-            LOG.warning("comparison claude -p failed: %s", r.stderr.strip()[:200])
-            return None
-        narrative = r.stdout.strip().strip('"').strip("'")
-        if len(narrative) < 10:
-            return None
-    except (subprocess.SubprocessError, OSError) as e:
-        LOG.warning("comparison errored: %s", e)
+    call = run_llm_p(prompt, timeout)
+    if call is None:
+        return None
+    narrative = call.stdout.strip().strip('"').strip("'")
+    if len(narrative) < 10:
         return None
 
     conn = _connect()
@@ -1294,10 +1557,10 @@ def synthesize_comparison(
         conn.execute(
             """INSERT OR REPLACE INTO comparison_narratives
                (current_key, previous_key, signature, narrative, created_at,
-                input_fingerprint)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+                input_fingerprint, narrator_provider, narrator_model)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (current_key, previous_key, sig, narrative, time.time(),
-             input_fingerprint),
+             input_fingerprint, call.provider, call.model),
         )
         conn.commit()
     finally:
@@ -1404,6 +1667,7 @@ def _content_classification_fingerprint(category_context: str | None = None) -> 
         str(MAX_CONTENT_BUCKETS),
         _CONTENT_CLASSIFY_PROMPT,
         context,
+        narrative_config_fingerprint(),
     )
 
 
@@ -1553,7 +1817,7 @@ def classify_sessions_by_content(
     )
 
     pending = [(sid, leaf, summ) for sid, leaf, summ in items if sid not in cached]
-    if not pending or not claude_bin_available():
+    if not pending or not llm_available():
         return cached
 
     combined = dict(cached)
@@ -1587,9 +1851,9 @@ def classify_sessions_by_content(
         )
         fresh: dict[str, str] = {}
         try:
-            r = run_claude_p(prompt, timeout)
-            if r.returncode == 0:
-                parsed = _parse_classification_lines(r.stdout)
+            call = run_llm_p(prompt, timeout)
+            if call is not None:
+                parsed = _parse_classification_lines(call.stdout)
                 # Validate ids and vocabulary before anything reaches SQLite.
                 chunk_ids = [sid for sid, _, _ in chunk]
                 fresh = _validated_chunk_buckets(
@@ -1614,9 +1878,8 @@ def classify_sessions_by_content(
                     fresh[sid] = drop_fallback
             else:
                 LOG.warning(
-                    "content-classify claude -p failed (chunk %d-%d): %s",
+                    "content-classify failed (chunk %d-%d): no backend returned prose",
                     chunk_start, chunk_start + len(chunk),
-                    r.stderr.strip()[:200],
                 )
         except (subprocess.SubprocessError, OSError) as e:
             LOG.warning("content-classify errored: %s", e)

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Configurable local narrative backends. The default fallback order is Claude
+  Sonnet, Codex GPT-5.6 Terra, then Antigravity Gemini 3.6 Flash Low; every
+  invocation passes an explicit model. `~/.ccstory/config.toml` can reorder,
+  disable, or replace those choices, and recap JSON/Markdown/MCP now disclose
+  the provider and model that actually produced aggregate prose.
+
 ### Changed
 
 - Top focus now states the user's goal, the observable target state, and work

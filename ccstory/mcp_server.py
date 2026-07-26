@@ -58,11 +58,11 @@ Classify = Literal["folder", "content", "hybrid"]
 Agent = str
 
 # "folder" is the only classify mode that never fires an LLM call (content/
-# hybrid batch-classify claude -p on cache misses) — same choice
+# hybrid batch-classify through a local narrator on cache misses) — same choice
 # scripts/refresh_claude.py makes for the same reason. get_recap's
 # `allow_llm` only gates narrative polish; without this default, an agent
 # calling get_recap with default args could still trigger a surprise batch
-# claude -p call via classification, which is exactly what issue #35 asks
+# local narrator call via classification, which is exactly what issue #35 asks
 # MCP tools to avoid by default.
 _DEFAULT_CLASSIFY: Classify = "folder"
 
@@ -116,6 +116,8 @@ def _merge_point_coverage(points) -> dict[str, str]:
 def _compact_recap(result) -> dict:
     top = sorted(result.sessions, key=lambda s: -s.active_min)[:5]
     focus = top_focus_thread(result.overall_narrative)
+    narrative_provenance = getattr(result, "narrative_provenance", {}) or {}
+    category_provenance = narrative_provenance.get("categories", {})
     return {
         "ok": True,
         "agent": result.agent,
@@ -128,6 +130,7 @@ def _compact_recap(result) -> dict:
                 "name": r.category,
                 "active_hours": round(r.active_min / 60, 2),
                 "narrative": result.category_narratives.get(r.category),
+                "narrator": category_provenance.get(r.category),
                 # Layer-2 (#69): additive per-project breakdown under each
                 # area, biggest first. Compact shape — name + hours only, no
                 # session detail. Older clients that ignore unknown keys keep
@@ -143,6 +146,7 @@ def _compact_recap(result) -> dict:
             for r in result.rollups
         ],
         "top_focus": result.overall_narrative,
+        "top_focus_narrator": narrative_provenance.get("overall"),
         # Keep the existing prose field stable and add a structured Top focus
         # so MCP clients do not need to reverse-engineer LLM Markdown.
         "top_focus_detail": (
@@ -208,7 +212,7 @@ def _compact_comparison(cmp) -> dict:
             "current": cmp.current_unpriced_models,
             "previous": cmp.previous_unpriced_models,
         },
-        # Always None in v0: this tool never runs claude -p synthesis —
+        # Always None in v0: this tool never runs fresh narrator synthesis —
         # matches "no fresh LLM calls" for this tool (see its docstring).
         "narrative": cmp.narrative,
         "deltas": [
@@ -235,7 +239,7 @@ def get_recap(
     """Recap totals, per-category breakdown, and the overall narrative for
     one window (week | month | all | YYYY-MM). Read-only, compact JSON —
     top 5 sessions only, not the full list. Default `classify="folder"`
-    and `allow_llm=False` never fire `claude -p` — this gates *every*
+    and `allow_llm=False` never fire a local narrator — this gates *every*
     synthesis step (per-session polish, the overall narrative, and the
     per-category narratives), so `top_focus` and each category's
     `narrative` are null unless `allow_llm=True`. Pass `classify="content"`
@@ -274,7 +278,7 @@ def compare_to_previous(
     for `window="all"` (there is no meaningful previous window for an
     open-ended range).
 
-    Never fires a fresh `claude -p` call — unlike `get_recap`, this is not
+    Never fires a fresh local narrator call — unlike `get_recap`, this is not
     conditional on any parameter here: both windows' sessions are always
     resolved cache-only (this tool's own choice, not an intrinsic property
     of the classify mode), so `narrative` is always null (use `get_recap`
@@ -354,7 +358,7 @@ def get_trend(
     active hours, cost, and per-category hours for each window, oldest
     first. `count` is clamped to 1..24.
 
-    Never fires a fresh `claude -p` call — like `compare_to_previous`,
+    Never fires a fresh local narrator call — like `compare_to_previous`,
     this holds for every parameter combination: `collect_trend()` resolves
     buckets cache-only by design (cache-miss sessions land in the fallback
     bucket), so `classify="hybrid"` here only changes which cache layers

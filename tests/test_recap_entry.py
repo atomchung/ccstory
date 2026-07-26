@@ -80,7 +80,7 @@ def _no_llm(monkeypatch):
 class TestBuildRecap:
     def test_agent_field_does_not_shift_existing_positional_fields(self):
         fields = list(recap.RecapResult.__dataclass_fields__)
-        assert fields[-3:] == ["report_path", "counts", "agent"]
+        assert fields[-4:] == ["report_path", "counts", "agent", "narrative_provenance"]
 
     def test_end_to_end_result_shape(self, tmp_home, jsonl_factory):
         _seed_session(jsonl_factory)

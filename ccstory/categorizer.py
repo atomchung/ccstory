@@ -606,7 +606,7 @@ default_bucket = "coding"
 # Set to 0 to hide the burn-% row entirely.
 monthly_quota_usd = 3500
 
-# Narrative response language for `claude -p` outputs. Free-form — the value
+# Narrative response language for configured local narrator outputs. Free-form — the value
 # is dropped straight into the prompt as `Respond in <language>.`
 # Examples: "Traditional Chinese", "日本語", "Spanish".
 # Precedence (high → low): --lang flag · $CCSTORY_LANG · this field ·
@@ -635,14 +635,15 @@ def _render_config(
     monthly_quota_usd: float,
     language: str | None = None,
     projects: dict[str, str] | None = None,
+    narrative: dict[str, object] | None = None,
 ) -> str:
     """Re-render config.toml from scratch from in-memory state.
 
     Comments and section ordering are stable across writes so successive
     `category set/unset` commands produce minimal diffs. The optional
-    ``[projects]`` alias table (#69) is preserved verbatim and only emitted
-    when non-empty, so a config that never used aliases renders byte-for-byte
-    as before.
+    ``[projects]`` aliases and the optional ``[narrative]`` backend policy are
+    preserved.  A category edit must not silently reset the model/provider
+    policy a user selected for recap prose.
     """
     import json as _json
     lines = [
@@ -657,7 +658,7 @@ def _render_config(
         "# Set to 0 to hide the burn-% row entirely.",
         f"monthly_quota_usd = {monthly_quota_usd:g}",
         "",
-        "# Narrative response language. Free-form — passed straight to claude -p.",
+        "# Narrative response language. Free-form — passed straight to the configured narrator.",
         "# Examples: \"Traditional Chinese\", \"日本語\", \"Spanish\". Comment out",
         "# or leave empty to inherit from $CCSTORY_LANG / CLAUDE.md / system locale.",
         f'language = {_json.dumps(language)}' if language else '# language = ""',
@@ -682,14 +683,48 @@ def _render_config(
     else:
         lines.append("[categories]")
     lines.append("")
+    lines.extend(_render_narrative_config(narrative))
     return "\n".join(lines)
+
+
+def _render_narrative_config(narrative: dict[str, object] | None) -> list[str]:
+    """Render the supported narrator policy without dropping it on a rewrite."""
+    if not narrative:
+        return []
+    import json as _json
+
+    lines = ["[narrative]"]
+    providers = narrative.get("providers")
+    if isinstance(providers, list) and all(isinstance(p, str) for p in providers):
+        lines.append(
+            "providers = [" + ", ".join(_json.dumps(p) for p in providers) + "]"
+        )
+    lines.append("")
+    for provider in ("claude", "codex", "antigravity"):
+        spec = narrative.get(provider)
+        if not isinstance(spec, dict):
+            continue
+        values = {
+            str(key): value
+            for key, value in spec.items()
+            if isinstance(value, (str, int, float, bool))
+        }
+        if not values:
+            continue
+        lines.append(f"[narrative.{provider}]")
+        for key in sorted(values):
+            lines.append(f"{key} = {_json.dumps(values[key])}")
+        lines.append("")
+    return lines
 
 
 def _load_state(
     path: Path,
-) -> tuple[dict[str, list[str]], dict[str, str], str, float, str | None]:
+) -> tuple[
+    dict[str, list[str]], dict[str, str], str, float, str | None, dict[str, object]
+]:
     """Read existing config (or defaults) into
-    ``(categories, projects, default_bucket, quota, language)``.
+    ``(categories, projects, default_bucket, quota, language, narrative)``.
 
     ``projects`` is the raw ``[projects]`` alias table, preserved so a
     ``category set/unset`` re-render never silently drops the user's aliases.
@@ -714,7 +749,9 @@ def _load_state(
         lang = None
     else:
         lang = lang.strip()
-    return categories, projects, default_bucket, quota, lang
+    raw_narrative = cfg.get("narrative")
+    narrative = raw_narrative if isinstance(raw_narrative, dict) else {}
+    return categories, projects, default_bucket, quota, lang, narrative
 
 
 def add_category_keywords(
@@ -741,7 +778,7 @@ def add_category_keywords(
     if not cleaned:
         raise ValueError("at least one non-empty keyword required")
 
-    categories, projects, default_bucket, quota, language = _load_state(path)
+    categories, projects, default_bucket, quota, language, narrative = _load_state(path)
     moved: list[tuple[str, str]] = []
     for kw in cleaned:
         for b, kws in list(categories.items()):
@@ -756,7 +793,7 @@ def add_category_keywords(
             target.append(kw)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        _render_config(categories, default_bucket, quota, language, projects),
+        _render_config(categories, default_bucket, quota, language, projects, narrative),
         encoding="utf-8",
     )
     return categories, moved
@@ -778,7 +815,7 @@ def remove_category_keywords(
     if not cleaned:
         raise ValueError("at least one non-empty keyword required")
 
-    categories, projects, default_bucket, quota, language = _load_state(path)
+    categories, projects, default_bucket, quota, language, narrative = _load_state(path)
     missing: list[str] = []
     target = categories.get(bucket, [])
     for kw in cleaned:
@@ -790,7 +827,7 @@ def remove_category_keywords(
         del categories[bucket]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        _render_config(categories, default_bucket, quota, language, projects),
+        _render_config(categories, default_bucket, quota, language, projects, narrative),
         encoding="utf-8",
     )
     return categories, missing
@@ -802,7 +839,7 @@ def list_user_categories(
     """Return the current user `[categories]` mapping (empty if none)."""
     if path is None:
         path = CONFIG_PATH
-    categories, _, _, _, _ = _load_state(path)
+    categories, _, _, _, _, _ = _load_state(path)
     return categories
 
 

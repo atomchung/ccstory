@@ -74,6 +74,13 @@ def tmp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "CCSTORY_CONFIG_PATH",
         ccstory_dir / "config.toml",
     )
+    # Existing unit tests exercise Claude behavior by monkeypatching its
+    # availability/call helper. Keep the machine's real Codex/Antigravity
+    # CLIs out of those tests; backend-specific tests opt in explicitly.
+    monkeypatch.setattr(session_summarizer, "codex_bin_available", lambda: False)
+    monkeypatch.setattr(
+        session_summarizer, "antigravity_bin_available", lambda: False,
+    )
     # Make the default language deterministic without replacing ccstory's
     # locale detector itself; detector-focused tests can still monkeypatch
     # locale.getlocale() and exercise the real implementation.

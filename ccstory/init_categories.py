@@ -35,15 +35,17 @@ from rich.table import Table
 
 from .categorizer import (
     CONFIG_PATH,
+    _load_state,
+    _render_narrative_config,
     colors_for,
     ensure_default_config,
     normalize_project_name,
 )
 from .session_summarizer import (
-    claude_bin_available,
     classify_sessions_by_content,
     get_many,
-    run_claude_p,
+    llm_available,
+    run_llm_p,
 )
 from .time_tracking import SessionStat, collect_sessions
 
@@ -108,15 +110,15 @@ def _format_prompt(samples: dict[str, list[str]]) -> str:
     return _INIT_PROMPT.format(projects="\n".join(lines))
 
 
-def _call_claude_p(prompt: str, timeout: int = 120) -> str | None:
-    if not claude_bin_available():
+def _call_llm(prompt: str, timeout: int = 120) -> str | None:
+    if not llm_available():
         return None
     try:
-        r = run_claude_p(prompt, timeout)
-        if r.returncode != 0:
-            LOG.warning("claude -p failed: %s", r.stderr[:200])
+        call = run_llm_p(prompt, timeout)
+        if call is None:
+            LOG.warning("category proposal LLM call failed")
             return None
-        return r.stdout.strip()
+        return call.stdout.strip()
     except (subprocess.SubprocessError, OSError) as e:
         LOG.warning("claude -p errored: %s", e)
         return None
@@ -209,7 +211,11 @@ def _write_config(path: Path, proposal: dict[str, list[str]],
                   preserve_header: str = "") -> Path | None:
     """Backup existing then write new config. Returns backup path if any."""
     backup: Path | None = None
+    narrative: dict[str, object] = {}
     if path.exists():
+        # ``init`` replaces classification rules, but its setup flow must not
+        # reset the separately-chosen narrator/provider policy.
+        _, _, _, _, _, narrative = _load_state(path)
         backup = path.with_suffix(f".toml.bak-{int(time.time())}")
         shutil.copy2(path, backup)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -230,6 +236,7 @@ def _write_config(path: Path, proposal: dict[str, list[str]],
         plist = ", ".join(json.dumps(p) for p in projects)
         lines.append(f'"{bucket}" = [{plist}]')
     lines.append("")
+    lines.extend(_render_narrative_config(narrative))
     path.write_text("\n".join(lines), encoding="utf-8")
     return backup
 
@@ -245,16 +252,16 @@ def run_quick_mode(
 ) -> int:
     """LLM proposes `bucket → [folders]` from folder names + sample text.
 
-    Time: ~10s (one `claude -p` call). Writes `[categories]` to config.toml.
+    Time: ~10s (one configured narrator call). Writes `[categories]` to config.toml.
     Behaviour-equivalent to the pre-PR-B `ccstory init` flow, minus the
     select-N trap (this function always writes when LLM succeeds; the
     enclosing dispatcher decides whether to call us at all).
     """
     console = console or Console()
 
-    if not claude_bin_available():
+    if not llm_available():
         console.print(
-            "[red]✗[/red] `claude` CLI not on PATH. Install Claude Code first."
+            "[red]✗[/red] No configured narrative CLI is available."
         )
         return 1
 
@@ -272,12 +279,12 @@ def run_quick_mode(
     )
 
     with console.status(
-        "[dim]Asking claude -p to suggest category buckets (one shot, ~10s)…[/dim]"
+        "[dim]Asking configured narrator to suggest category buckets (one shot)…[/dim]"
     ):
-        out = _call_claude_p(_format_prompt(samples))
+        out = _call_llm(_format_prompt(samples))
     if not out:
         console.print(
-            "[red]✗[/red] claude -p failed. See `ccstory init -v` for details."
+            "[red]✗[/red] Narrative backend failed. See `ccstory init -v` for details."
         )
         return 1
 
@@ -397,9 +404,9 @@ def run_deep_mode(
     """
     console = console or Console()
 
-    if not claude_bin_available():
+    if not llm_available():
         console.print(
-            "[red]✗[/red] `claude` CLI not on PATH. Install Claude Code first."
+            "[red]✗[/red] No configured narrative CLI is available."
         )
         return 1
 
@@ -453,7 +460,7 @@ def run_deep_mode(
     eta = max(1, len(items) // 80 + 1)  # ~80 sessions/batch, ~1 min/batch
     total_chunks = (len(items) + 79) // 80
     console.print(
-        f"[dim]Asking claude -p to classify {len(items)} session(s) "
+        f"[dim]Asking configured narrator to classify {len(items)} session(s) "
         f"(~{eta} min)…[/dim]"
     )
     with console.status(
@@ -466,7 +473,7 @@ def run_deep_mode(
             items, force_refresh=True, on_chunk_complete=_tick,
         )
     if not mapping:
-        console.print("[red]✗[/red] claude -p classification failed or returned nothing.")
+        console.print("[red]✗[/red] Narrator classification failed or returned nothing.")
         return 1
 
     folder_rules = _aggregate_folder_rules(sampled, mapping)
