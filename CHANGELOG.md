@@ -10,12 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Native protobuf wire decoder reading Google Antigravity native session titles from `agyhub_summaries_proto.pb`. Titles populate `SessionStat.native_title` and take precedence over `first_user_text` across terminal, Markdown, JSON, and MCP recap surfaces while preserving `first_user_text`.
-- Authoritative exact token usage extraction for Google Antigravity from `gen_metadata` in `conversations/<session_id>.db`, aligned by step index timestamps with transcript logs and deduplicated per step index (DB priority, transcript exact usage fallback).
+- Authoritative exact token usage extraction for Google Antigravity from `gen_metadata` in `conversations/<session_id>.db`, including cached-content token count (usage field 5), aligned by step index timestamps with transcript logs and deduplicated per step index (DB priority, transcript exact usage fallback).
+- Time-window attribution for compacted Antigravity DB steps lacking explicit transcript timestamps using session window inclusion and boundary-crossing linear interpolation.
+- Refreshed vendored LiteLLM pricing table containing bare Gemini model IDs (`gemini-3.6-flash`, `gemini-3-flash-preview`), and explicit pricing aliases for `gemini-3-flash-a` and `gemini-3-flash-agent`.
 - Disclosed `unpriced_models` and per-period/point `usage_coverage` payloads as additive fields in `--json` recap, comparison, and trend outputs.
 
 ### Changed
 
-- Antigravity token coverage remains `partial` because DB cache fields are unconfirmed without descriptors and unaligned timestamps fail closed.
+- Updated Google Antigravity provider usage coverage status from `partial` to `complete`.
 
 ## [0.7.1] - 2026-07-26
 

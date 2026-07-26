@@ -623,8 +623,8 @@ class TestAntigravityRegistryContracts:
             datetime(2026, 7, 30, tzinfo=timezone.utc),
             agent="antigravity",
         )
-        assert usage.incomplete_agents == ["antigravity"]
-        assert not usage.usage_complete
+        assert usage.incomplete_agents == []
+        assert usage.usage_complete is True
 
         with pytest.raises(SystemExit) as excinfo:
             cli.main(["week", "--help"])
@@ -669,13 +669,19 @@ def make_title_proto(entries: list[tuple[str, str]]) -> bytes:
 
 
 def make_gen_metadata_blob(
-    model: str, input_tokens: int, output_tokens: int, extra_fields: bytes = b""
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cached_tokens: int = 0,
+    extra_fields: bytes = b"",
 ) -> bytes:
-    usage_msg = (
-        encode_varint_field(2, input_tokens)
-        + encode_varint_field(3, output_tokens)
-        + extra_fields
-    )
+    usage_parts = [
+        encode_varint_field(2, input_tokens),
+        encode_varint_field(3, output_tokens),
+    ]
+    if cached_tokens > 0:
+        usage_parts.append(encode_varint_field(5, cached_tokens))
+    usage_msg = b"".join(usage_parts) + extra_fields
     gen_msg = encode_string(19, model) + encode_bytes(4, usage_msg)
     return encode_bytes(1, gen_msg)
 
@@ -1095,3 +1101,263 @@ class TestAntigravityDBConnectionFallback:
         assert len(connect_calls) == 1
         assert "mode=ro" in connect_calls[0][0]
         assert "immutable=1" not in connect_calls[0][0]
+
+
+class TestAntigravityCacheTokens:
+    def test_parse_gen_metadata_blob_field_5_cache_tokens(self):
+        from ccstory.providers.antigravity import parse_gen_metadata_blob
+
+        blob = make_gen_metadata_blob(
+            "gemini-3.6-flash", 1000, 200, cached_tokens=500
+        )
+        parsed = parse_gen_metadata_blob(blob)
+        assert parsed is not None
+        model, inp, out, cache_read = parsed
+        assert model == "gemini-3.6-flash"
+        assert inp == 1000
+        assert out == 200
+        assert cache_read == 500
+
+    def test_parse_gen_metadata_blob_absent_field_5_defaults_to_zero(self):
+        from ccstory.providers.antigravity import parse_gen_metadata_blob
+
+        blob = make_gen_metadata_blob("gemini-3.6-flash", 1000, 200)
+        parsed = parse_gen_metadata_blob(blob)
+        assert parsed is not None
+        model, inp, out, cache_read = parsed
+        assert cache_read == 0
+
+    def test_parse_gen_metadata_blob_fails_closed_on_corrupt_or_missing_fields(self):
+        from ccstory.providers.antigravity import parse_gen_metadata_blob
+
+        # Trailing corrupt protobuf bytes
+        valid_blob = make_gen_metadata_blob("gemini-3.6-flash", 1000, 200)
+        assert parse_gen_metadata_blob(valid_blob + b"\x80" * 11) is None
+
+        # Missing input tokens (field 2)
+        gen_msg_no_inp = encode_string(19, "gemini-3.6-flash") + encode_bytes(
+            4, encode_varint_field(3, 200)
+        )
+        blob_no_inp = encode_bytes(1, gen_msg_no_inp)
+        assert parse_gen_metadata_blob(blob_no_inp) is None
+
+
+class TestCompactedStepAttribution:
+    def test_unmatched_db_row_included_when_whole_session_in_window(
+        self, tmp_path, monkeypatch
+    ):
+        from ccstory.providers.antigravity import AntigravityProvider
+
+        antigravity_dir = tmp_path / "antigravity"
+        antigravity_dir.mkdir()
+        monkeypatch.setattr(AntigravityProvider, "antigravity_dir", antigravity_dir)
+
+        sid = "compacted-session-in-window"
+        session_dir = antigravity_dir / "brain" / sid / ".system_generated" / "logs"
+        session_dir.mkdir(parents=True)
+        transcript = session_dir / "transcript.jsonl"
+
+        ts1 = "2026-07-26T10:00:00Z"
+        ts2 = "2026-07-26T10:30:00Z"
+        transcript.write_text(
+            json.dumps({
+                "type": "USER_INPUT",
+                "source": "USER_EXPLICIT",
+                "step_index": 1,
+                "created_at": ts1,
+                "content": "Hi",
+            })
+            + "\n"
+            + json.dumps({
+                "type": "PLANNER_RESPONSE",
+                "source": "MODEL",
+                "step_index": 5,
+                "created_at": ts2,
+                "content": "Hello",
+            })
+            + "\n",
+            encoding="utf-8",
+        )
+
+        db_dir = antigravity_dir / "conversations"
+        db_dir.mkdir()
+        db_path = db_dir / f"{sid}.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE gen_metadata (idx INT PRIMARY KEY, data BLOB);")
+        blob3 = make_gen_metadata_blob("gemini-3.6-flash", 400, 100, cached_tokens=50)
+        conn.execute("INSERT INTO gen_metadata VALUES (?, ?);", (3, blob3))
+        conn.commit()
+        conn.close()
+
+        since = datetime(2026, 7, 26, 9, 0, tzinfo=timezone.utc)
+        until = datetime(2026, 7, 26, 11, 0, tzinfo=timezone.utc)
+        provider = AntigravityProvider(antigravity_dir=antigravity_dir)
+        by_model = {}
+        turns = provider.collect_usage(since, until, by_model)
+
+        assert turns == 1
+        assert "gemini-3.6-flash" in by_model
+        mu = by_model["gemini-3.6-flash"]
+        assert mu.input_tokens == 400
+        assert mu.output_tokens == 100
+        assert mu.cache_read == 50
+
+    def test_unmatched_db_row_excluded_when_whole_session_outside_window(
+        self, tmp_path, monkeypatch
+    ):
+        from ccstory.providers.antigravity import AntigravityProvider
+
+        antigravity_dir = tmp_path / "antigravity"
+        antigravity_dir.mkdir()
+
+        sid = "compacted-session-outside-window"
+        session_dir = antigravity_dir / "brain" / sid / ".system_generated" / "logs"
+        session_dir.mkdir(parents=True)
+        transcript = session_dir / "transcript.jsonl"
+
+        ts1 = "2026-07-26T08:00:00Z"
+        ts2 = "2026-07-26T08:30:00Z"
+        transcript.write_text(
+            json.dumps({
+                "type": "USER_INPUT",
+                "source": "USER_EXPLICIT",
+                "step_index": 1,
+                "created_at": ts1,
+                "content": "Hi",
+            })
+            + "\n"
+            + json.dumps({
+                "type": "PLANNER_RESPONSE",
+                "source": "MODEL",
+                "step_index": 5,
+                "created_at": ts2,
+                "content": "Hello",
+            })
+            + "\n",
+            encoding="utf-8",
+        )
+
+        db_dir = antigravity_dir / "conversations"
+        db_dir.mkdir()
+        db_path = db_dir / f"{sid}.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE gen_metadata (idx INT PRIMARY KEY, data BLOB);")
+        blob3 = make_gen_metadata_blob("gemini-3.6-flash", 400, 100)
+        conn.execute("INSERT INTO gen_metadata VALUES (?, ?);", (3, blob3))
+        conn.commit()
+        conn.close()
+
+        since = datetime(2026, 7, 26, 9, 0, tzinfo=timezone.utc)
+        until = datetime(2026, 7, 26, 11, 0, tzinfo=timezone.utc)
+        provider = AntigravityProvider(antigravity_dir=antigravity_dir)
+        by_model = {}
+        turns = provider.collect_usage(since, until, by_model)
+
+        assert turns == 0
+        assert not by_model
+
+    def test_boundary_crossing_linear_interpolation(self):
+        from ccstory.providers.antigravity import _is_db_step_in_window
+
+        step_timestamps = {
+            1: datetime(2026, 7, 26, 10, 0, tzinfo=timezone.utc),
+            10: datetime(2026, 7, 26, 10, 30, tzinfo=timezone.utc),
+        }
+        since = datetime(2026, 7, 26, 10, 15, tzinfo=timezone.utc)
+        until = datetime(2026, 7, 26, 10, 45, tzinfo=timezone.utc)
+
+        assert _is_db_step_in_window(3, step_timestamps, since, until) is False
+        assert _is_db_step_in_window(7, step_timestamps, since, until) is True
+
+    def test_boundary_crossing_single_sided_nearest_step(self):
+        from ccstory.providers.antigravity import _is_db_step_in_window
+
+        since = datetime(2026, 7, 26, 10, 15, tzinfo=timezone.utc)
+        until = datetime(2026, 7, 26, 10, 45, tzinfo=timezone.utc)
+
+        # Missing idx beyond higher end (only lower candidates exist)
+        step_timestamps_high = {
+            1: datetime(2026, 7, 26, 10, 0, tzinfo=timezone.utc),
+            10: datetime(2026, 7, 26, 10, 30, tzinfo=timezone.utc),
+            20: datetime(2026, 7, 26, 11, 30, tzinfo=timezone.utc),
+        }
+        assert _is_db_step_in_window(25, step_timestamps_high, since, until) is False
+
+        step_timestamps_lower_in = {
+            1: datetime(2026, 7, 26, 10, 0, tzinfo=timezone.utc),
+            10: datetime(2026, 7, 26, 10, 30, tzinfo=timezone.utc),
+        }
+        assert _is_db_step_in_window(15, step_timestamps_lower_in, since, until) is True
+
+        # Missing idx before lower end (only higher candidates exist)
+        step_timestamps_higher_out = {
+            10: datetime(2026, 7, 26, 10, 0, tzinfo=timezone.utc),
+            20: datetime(2026, 7, 26, 11, 0, tzinfo=timezone.utc),
+        }
+        assert _is_db_step_in_window(5, step_timestamps_higher_out, since, until) is False
+
+        step_timestamps_higher_in = {
+            10: datetime(2026, 7, 26, 10, 30, tzinfo=timezone.utc),
+            20: datetime(2026, 7, 26, 11, 0, tzinfo=timezone.utc),
+        }
+        assert _is_db_step_in_window(5, step_timestamps_higher_in, since, until) is True
+
+
+class TestDbPriorityAndDedup:
+    def test_db_row_takes_priority_over_transcript_fallback(self, tmp_path):
+        from ccstory.providers.antigravity import AntigravityProvider
+
+        antigravity_dir = tmp_path / "antigravity"
+        antigravity_dir.mkdir()
+
+        sid = "db-priority-session"
+        session_dir = antigravity_dir / "brain" / sid / ".system_generated" / "logs"
+        session_dir.mkdir(parents=True)
+        transcript = session_dir / "transcript.jsonl"
+
+        ts1 = "2026-07-26T10:00:00Z"
+        ts2 = "2026-07-26T10:05:00Z"
+
+        transcript.write_text(
+            json.dumps({
+                "type": "PLANNER_RESPONSE",
+                "source": "MODEL",
+                "step_index": 1,
+                "created_at": ts1,
+                "model": "gemini-3.6-flash",
+                "usage": {"input_tokens": 999, "output_tokens": 999},
+            })
+            + "\n"
+            + json.dumps({
+                "type": "PLANNER_RESPONSE",
+                "source": "MODEL",
+                "step_index": 2,
+                "created_at": ts2,
+                "model": "gemini-3.6-flash",
+                "usage": {"input_tokens": 200, "output_tokens": 50},
+            })
+            + "\n",
+            encoding="utf-8",
+        )
+
+        db_dir = antigravity_dir / "conversations"
+        db_dir.mkdir()
+        db_path = db_dir / f"{sid}.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE gen_metadata (idx INT PRIMARY KEY, data BLOB);")
+        blob1 = make_gen_metadata_blob("gemini-3.6-flash", 500, 100, cached_tokens=25)
+        conn.execute("INSERT INTO gen_metadata VALUES (?, ?);", (1, blob1))
+        conn.commit()
+        conn.close()
+
+        since = datetime(2026, 7, 26, 9, 0, tzinfo=timezone.utc)
+        until = datetime(2026, 7, 26, 11, 0, tzinfo=timezone.utc)
+        provider = AntigravityProvider(antigravity_dir=antigravity_dir)
+        by_model = {}
+        turns = provider.collect_usage(since, until, by_model)
+
+        assert turns == 2
+        mu = by_model["gemini-3.6-flash"]
+        assert mu.input_tokens == 700
+        assert mu.output_tokens == 150
+        assert mu.cache_read == 25

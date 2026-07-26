@@ -87,7 +87,7 @@ register_provider(
         "antigravity",
         "Google Antigravity",
         AntigravityProvider,
-        usage_coverage="partial",
+        usage_coverage="complete",
     )
 )
 

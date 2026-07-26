@@ -187,8 +187,8 @@ class TestReportJson:
 
         # Unpriced model present -> listed explicitly, cost remains 0
         u_unpriced = UsageReport(since=SINCE, until=UNTIL)
-        u_unpriced.by_model["gemini-3.6-flash"] = ModelUsage(
-            model="gemini-3.6-flash", turns=3, input_tokens=100, output_tokens=40
+        u_unpriced.by_model["gemini-9.9-unpriced"] = ModelUsage(
+            model="gemini-9.9-unpriced", turns=3, input_tokens=100, output_tokens=40
         )
         u_unpriced.assistant_turns = 3
         s = _stat()
@@ -202,7 +202,7 @@ class TestReportJson:
             usage=u_unpriced,
             summaries={},
         )
-        assert p_unpriced["unpriced_models"] == ["gemini-3.6-flash"]
+        assert p_unpriced["unpriced_models"] == ["gemini-9.9-unpriced"]
         assert p_unpriced["totals"]["cost_usd"] == 0.0
 
     def test_comparison_none(self):
