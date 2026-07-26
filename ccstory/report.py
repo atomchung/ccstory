@@ -141,7 +141,7 @@ def agent_breakdown(sessions: list[SessionStat]) -> list[AgentShare]:
 
 
 def render_agent_breakdown_markdown(sessions: list[SessionStat]) -> list[str]:
-    """The "Coding agents" section, or [] when only one agent is in play.
+    """The "Agent Breakdown" section, or [] when only one agent is in play.
 
     A single-agent window has nothing to compare, and a 100% row would be pure
     noise for the Claude-Code-only user who is still ccstory's default reader.
@@ -150,7 +150,7 @@ def render_agent_breakdown_markdown(sessions: list[SessionStat]) -> list[str]:
     if len(shares) < 2:
         return []
 
-    lines = ["## Coding agents", ""]
+    lines = ["## Agent Breakdown", ""]
     lines.append("| Agent | Time share | Sessions | Messages |")
     lines.append("|---|---:|---:|---:|")
     for a in shares:
@@ -168,9 +168,9 @@ def render_agent_breakdown_markdown(sessions: list[SessionStat]) -> list[str]:
     )
     lines.append("")
     lines.append(
-        "> Share = each agent's raw interaction time relative to the others'. "
-        "Agents run in parallel, so a share is **not** a duration and the "
-        "shares do not add up to the total active time above."
+        "> Time share = each agent's raw interaction time relative to the "
+        "others'. Agents run in parallel, so a share is **not** a duration "
+        "and the shares do not add up to the total active time above."
     )
     lines.append("")
     return lines
@@ -494,10 +494,13 @@ def render_report(
         )
     lines.append("")
 
-    lines.extend(render_agent_breakdown_markdown(sessions))
-
     if comparison:
         lines.append(render_comparison_markdown(comparison))
+
+    # Agent provenance is useful context, but not the recap's story. Keep it
+    # beneath the cross-window view rather than interrupting the work-focused
+    # time distribution above.
+    lines.extend(render_agent_breakdown_markdown(sessions))
 
     # Overall narrative (goal-thread synthesis across the whole period)
     if overall_narrative:
@@ -1002,30 +1005,6 @@ def render_terminal_card(
         parts.append(Text("By project", style="bold underline"))
         parts.append(proj_table)
 
-    # --- Multi-agent shares (#133) --- no hours here on purpose; see the
-    # module-level note above agent_breakdown().
-    shares = agent_breakdown(sessions)
-    if len(shares) >= 2:
-        agent_table = Table.grid(padding=(0, 1))
-        agent_table.add_column(width=14, no_wrap=True, overflow="ellipsis")
-        agent_table.add_column(no_wrap=True)
-        for a in shares:
-            agent_table.add_row(
-                Text(a.label, style="bold"),
-                Text(
-                    f"{a.time_share*100:.0f}% of agent time · "
-                    f"{a.sessions} sessions ({a.session_share*100:.0f}%)",
-                    style="dim",
-                ),
-            )
-        parts.append(Text(""))
-        parts.append(Text("Coding agents", style="bold underline"))
-        parts.append(agent_table)
-        note = Text()
-        note.append(f"{parallelism_factor(sessions):.1f}× parallel", style="bold")
-        note.append("  shares are weights, not hours", style="dim")
-        parts.append(note)
-
     if usage.unpriced_models:
         unpriced_str = ", ".join(usage.unpriced_models)
         parts.append(
@@ -1072,6 +1051,32 @@ def render_terminal_card(
 
     if comparison:
         parts.extend(render_comparison_block(comparison, colors))
+
+    # --- Multi-agent shares (#133) --- a supporting source breakdown, not a
+    # primary recap section. Put it after the cross-window story, at the end
+    # of the screenshot card. No per-agent hours here; see the module note
+    # above agent_breakdown().
+    shares = agent_breakdown(sessions)
+    if len(shares) >= 2:
+        agent_table = Table.grid(padding=(0, 1))
+        agent_table.add_column(width=14, no_wrap=True, overflow="ellipsis")
+        agent_table.add_column(no_wrap=True)
+        for a in shares:
+            agent_table.add_row(
+                Text(a.label, style="bold"),
+                Text(
+                    f"{a.time_share*100:.0f}% of agent time · "
+                    f"{a.sessions} sessions ({a.session_share*100:.0f}%)",
+                    style="dim",
+                ),
+            )
+        parts.append(Text(""))
+        parts.append(Text("Agent Breakdown", style="bold underline"))
+        parts.append(agent_table)
+        note = Text()
+        note.append(f"{parallelism_factor(sessions):.1f}× parallel", style="bold")
+        note.append("  time shares, not hours", style="dim")
+        parts.append(note)
 
     if report_path:
         parts.append(Text(""))

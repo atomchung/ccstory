@@ -273,7 +273,7 @@ per-agent time added up to 177h against a deduplicated wall clock of 64h. So:
 
 - **Total active time** is the wall clock across every session, deduplicated —
   the same number ccstory has always reported, now spanning all agents.
-- **The `Coding agents` block reports shares, not hours.** Each agent's share is
+- **The `Agent Breakdown` section reports shares, not hours.** Each agent's share is
   its raw interaction time relative to the others'. Shares are not durations and
   do not add up to the total.
 - **Session share is shown next to time share, and they disagree on purpose.**
