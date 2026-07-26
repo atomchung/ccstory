@@ -241,13 +241,29 @@ def _is_assistant_step(stype: object, source: object) -> bool:
     ) or (stype is None and source == "MODEL")
 
 
+def _connect_readonly_db(db_path: Path) -> sqlite3.Connection:
+    """Open an Antigravity SQLite database in read-only mode.
+
+    Attempts standard ``mode=ro`` first (preserving live WAL visibility on normal hosts).
+    If connection fails with sqlite3.OperationalError (e.g. read-only filesystem or
+    restricted environment where lock/WAL creation is forbidden), falls back to
+    ``mode=ro&immutable=1``.
+    """
+    resolved_uri = db_path.resolve().as_uri()
+    primary_uri = f"{resolved_uri}?mode=ro"
+    try:
+        return sqlite3.connect(primary_uri, uri=True)
+    except sqlite3.OperationalError:
+        fallback_uri = f"{resolved_uri}?mode=ro&immutable=1"
+        return sqlite3.connect(fallback_uri, uri=True)
+
+
 def extract_cwd_from_db(db_path: Path) -> str:
     """Extract launch CWD from an Antigravity conversation database if present."""
     if not db_path.exists():
         return ""
     try:
-        uri = f"{db_path.resolve().as_uri()}?mode=ro"
-        with contextlib.closing(sqlite3.connect(uri, uri=True)) as conn:
+        with contextlib.closing(_connect_readonly_db(db_path)) as conn:
             c = conn.cursor()
             rows = c.execute("SELECT data FROM trajectory_metadata_blob;").fetchall()
             for row in rows:
@@ -529,8 +545,7 @@ class AntigravityProvider(BaseAgentProvider):
 
             if db_path.exists():
                 try:
-                    uri = f"{db_path.resolve().as_uri()}?mode=ro"
-                    with contextlib.closing(sqlite3.connect(uri, uri=True)) as conn:
+                    with contextlib.closing(_connect_readonly_db(db_path)) as conn:
                         c = conn.cursor()
                         rows = c.execute("SELECT idx, data FROM gen_metadata;").fetchall()
                         for row in rows:

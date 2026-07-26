@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 from datetime import datetime, timezone
@@ -967,3 +968,73 @@ class TestDuplicateIdxDefense:
         assert by_model["gemini-3.6-flash"].turns == 1
         assert by_model["gemini-3.6-flash"].input_tokens == 100
         assert by_model["gemini-3.6-flash"].output_tokens == 40
+
+
+class TestAntigravityDBConnectionFallback:
+    def test_falls_back_to_immutable_uri_on_operational_error(
+        self, tmp_path, monkeypatch
+    ):
+        from ccstory.providers.antigravity import _connect_readonly_db
+
+        db_path = tmp_path / "restricted.db"
+        conn_real = sqlite3.connect(db_path)
+        conn_real.execute("CREATE TABLE test (id INT);")
+        conn_real.commit()
+        conn_real.close()
+
+        real_connect = sqlite3.connect
+        connect_calls: list[tuple[str, dict]] = []
+
+        def failing_primary_connect(database, *args, **kwargs):
+            connect_calls.append((str(database), kwargs))
+            if "immutable=1" not in str(database):
+                raise sqlite3.OperationalError("unable to open database file")
+            return real_connect(database, *args, **kwargs)
+
+        monkeypatch.setattr(
+            "ccstory.providers.antigravity.sqlite3.connect",
+            failing_primary_connect,
+        )
+
+        with contextlib.closing(_connect_readonly_db(db_path)) as conn:
+            c = conn.cursor()
+            rows = c.execute("SELECT name FROM sqlite_master;").fetchall()
+            assert ("test",) in rows
+
+        assert len(connect_calls) == 2
+        assert "mode=ro" in connect_calls[0][0]
+        assert "immutable=1" not in connect_calls[0][0]
+        assert "mode=ro" in connect_calls[1][0]
+        assert "immutable=1" in connect_calls[1][0]
+
+    def test_normal_connection_does_not_trigger_fallback(
+        self, tmp_path, monkeypatch
+    ):
+        from ccstory.providers.antigravity import _connect_readonly_db
+
+        db_path = tmp_path / "normal.db"
+        conn_real = sqlite3.connect(db_path)
+        conn_real.execute("CREATE TABLE test (id INT);")
+        conn_real.commit()
+        conn_real.close()
+
+        real_connect = sqlite3.connect
+        connect_calls: list[tuple[str, dict]] = []
+
+        def normal_connect(database, *args, **kwargs):
+            connect_calls.append((str(database), kwargs))
+            return real_connect(database, *args, **kwargs)
+
+        monkeypatch.setattr(
+            "ccstory.providers.antigravity.sqlite3.connect",
+            normal_connect,
+        )
+
+        with contextlib.closing(_connect_readonly_db(db_path)) as conn:
+            c = conn.cursor()
+            rows = c.execute("SELECT name FROM sqlite_master;").fetchall()
+            assert ("test",) in rows
+
+        assert len(connect_calls) == 1
+        assert "mode=ro" in connect_calls[0][0]
+        assert "immutable=1" not in connect_calls[0][0]
