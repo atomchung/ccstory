@@ -89,6 +89,30 @@ def _normalize_error(e: BaseException) -> dict:
     return {"ok": False, "error": str(e)}
 
 
+def _usage_coverage_payload(provider_coverage: dict[str, str]) -> dict:
+    """Compact fail-closed coverage shape shared by every cost-returning tool."""
+    incomplete = sorted(
+        name for name, state in provider_coverage.items() if state != "complete"
+    )
+    return {
+        "complete": not incomplete,
+        "incomplete_agents": incomplete,
+        "providers": dict(sorted(provider_coverage.items())),
+    }
+
+
+def _merge_point_coverage(points) -> dict[str, str]:
+    """Keep the least-complete state seen for each provider across a trend."""
+    rank = {"complete": 0, "partial": 1, "unavailable": 2}
+    merged: dict[str, str] = {}
+    for point in points:
+        for name, state in point.provider_coverage.items():
+            current = merged.get(name)
+            if current is None or rank.get(state, 2) > rank.get(current, 2):
+                merged[name] = state
+    return merged
+
+
 def _compact_recap(result) -> dict:
     top = sorted(result.sessions, key=lambda s: -s.active_min)[:5]
     return {
@@ -143,6 +167,10 @@ def _compact_recap(result) -> dict:
             for share in agent_breakdown(result.sessions)
         ],
         "cost_usd": round(result.usage.total_cost_usd, 2),
+        "usage_coverage": _usage_coverage_payload(
+            result.usage.provider_coverage
+        ),
+        "unpriced_models": result.usage.unpriced_models,
         "report_path": str(result.report_path) if result.report_path else None,
     }
 
@@ -156,6 +184,18 @@ def _compact_comparison(cmp) -> dict:
         "previous_active_hours": round(cmp.previous_total_h, 2),
         "current_cost_usd": round(cmp.current_cost_usd, 2),
         "previous_cost_usd": round(cmp.previous_cost_usd, 2),
+        "usage_coverage": {
+            "current": _usage_coverage_payload(
+                cmp.current_provider_coverage
+            ),
+            "previous": _usage_coverage_payload(
+                cmp.previous_provider_coverage
+            ),
+        },
+        "unpriced_models": {
+            "current": cmp.current_unpriced_models,
+            "previous": cmp.previous_unpriced_models,
+        },
         # Always None in v0: this tool never runs claude -p synthesis —
         # matches "no fresh LLM calls" for this tool (see its docstring).
         "narrative": cmp.narrative,
@@ -334,6 +374,16 @@ def get_trend(
         "agent": agent,
         "period": period,
         "count": n,
+        "usage_coverage": _usage_coverage_payload(
+            _merge_point_coverage(points)
+        ),
+        "unpriced_models": sorted(
+            {
+                model
+                for point in points
+                for model in point.unpriced_models
+            }
+        ),
         "points": [
             {
                 "label": p.label,
@@ -341,6 +391,10 @@ def get_trend(
                 "until": p.until.isoformat(),
                 "active_hours": round(p.total_h, 2),
                 "cost_usd": round(p.cost_usd, 2),
+                "usage_coverage": _usage_coverage_payload(
+                    p.provider_coverage
+                ),
+                "unpriced_models": p.unpriced_models,
                 "buckets": [
                     {
                         "name": r.category,

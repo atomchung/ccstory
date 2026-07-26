@@ -105,6 +105,12 @@ class PeriodComparison:
     # 1-2 sentence cross-period narrative synthesized via claude -p (#26).
     # Optional — None when synthesis is disabled or unavailable.
     narrative: str | None = None
+    # Additive MCP cost-integrity metadata. Kept after the pre-0.7.1 fields so
+    # positional construction of this semi-stable dataclass stays compatible.
+    current_provider_coverage: dict[str, str] = field(default_factory=dict)
+    previous_provider_coverage: dict[str, str] = field(default_factory=dict)
+    current_unpriced_models: list[str] = field(default_factory=list)
+    previous_unpriced_models: list[str] = field(default_factory=list)
 
 
 def previous_window(since: datetime, until: datetime) -> tuple[datetime, datetime]:
@@ -174,6 +180,10 @@ def compare_to_previous(
         previous_output_tokens=prev_usage.total_output,
         current_cost_usd=current_usage.total_cost_usd,
         previous_cost_usd=prev_usage.total_cost_usd,
+        current_provider_coverage=current_usage.provider_coverage,
+        previous_provider_coverage=prev_usage.provider_coverage,
+        current_unpriced_models=current_usage.unpriced_models,
+        previous_unpriced_models=prev_usage.unpriced_models,
         previous_session_ids=[s.session_id for s in prev_sessions],
     )
 
@@ -190,6 +200,7 @@ class PeriodPoint:
     output_tokens: int
     cost_usd: float
     provider_coverage: dict[str, str] = field(default_factory=dict)
+    unpriced_models: list[str] = field(default_factory=list)
 
     def quota_pct(self, monthly_quota_usd: float) -> float:
         """API-equiv cost as % of the prorated monthly quota (1.0 = 100%)."""
@@ -297,6 +308,7 @@ def collect_trend(
             output_tokens=usage.total_output,
             cost_usd=usage.total_cost_usd,
             provider_coverage=usage.provider_coverage,
+            unpriced_models=usage.unpriced_models,
         ))
     return points
 

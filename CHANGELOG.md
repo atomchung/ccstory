@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-07-26
+
 ### Added
 
 - Google Antigravity session provider adapter (`--agent antigravity`), reading
@@ -20,14 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Markdown, terminal, JSON, Obsidian, and trend outputs now disclose incomplete
   agent coverage, preserve partial versus unavailable states, and ignore
   dormant providers instead of silently presenting a partial total as complete.
-- Source/editable builds now read the canonical development version from
-  `pyproject.toml`; post-0.7 development identifies itself as `0.8.0.dev0`
-  instead of impersonating the latest release.
+- Source/editable builds now read the canonical source version from
+  `pyproject.toml` instead of impersonating an older installed distribution.
 
 ### Changed
 
 - Narrative and classification prompts describe agent-neutral coding sessions.
   Provider-specific transcript knowledge no longer lives in the summarizer.
+- Antigravity user requests unwrap the native `<USER_REQUEST>` envelope and
+  remove well-formed injected metadata blocks before appearing in recaps.
 
 ### Fixed
 
@@ -37,6 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parallelism.
 - Codex availability checks include `archived_sessions`, matching collection;
   archived-only users are no longer rejected before parsing begins.
+- Antigravity child conversations referenced by structured
+  `INVOKE_SUBAGENT` records no longer inflate top-level session, active-time,
+  or usage totals; ordinary user or assistant text mentioning a conversation
+  ID cannot trigger the filter.
+- Antigravity usage is exact-only: input/output counts must be non-negative
+  integers and the actual model ID must be present. Cache-read variants are
+  preserved when exposed; missing fields never fall back to character-count
+  estimates or a guessed Gemini model.
 
 ## [0.7.0] - 2026-07-23
 
@@ -377,7 +388,8 @@ Initial tagged release.
 - Category surfaced in the CLI, with louder warnings on silent
   classification failures.
 
-[Unreleased]: https://github.com/atomchung/ccstory/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/atomchung/ccstory/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/atomchung/ccstory/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/atomchung/ccstory/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/atomchung/ccstory/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/atomchung/ccstory/compare/v0.5.2...v0.6.0
