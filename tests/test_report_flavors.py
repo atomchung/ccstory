@@ -122,6 +122,28 @@ class TestPlainFlavor:
         assert "[[myapp]]" not in md
         assert "refactored auth" in md
 
+    def test_top_focus_states_goal_target_and_completed_work(self):
+        s = _stat("coding", "-Users-alice-code-myapp", "s1")
+        md = render_report(
+            label="2026-05",
+            since=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 31, tzinfo=timezone.utc),
+            sessions=[s],
+            rollups=[_rollup("coding", [s])],
+            usage=_usage(),
+            summaries={},
+            overall_narrative=(
+                "**Make recap useful**\n"
+                "- Goal: Give the user a meaningful weekly status.\n"
+                "- Target state: Top focus explains intent and progress.\n"
+                "- Completed: Added the structured projection.\n"
+            ),
+        )
+        top_focus = md.split("## Time distribution")[0]
+        assert "**User goal:** Give the user a meaningful weekly status." in top_focus
+        assert "**Target state:** Top focus explains intent and progress." in top_focus
+        assert "**Completed:** Added the structured projection." in top_focus
+
     @pytest.mark.parametrize(
         ("agent", "title"),
         [

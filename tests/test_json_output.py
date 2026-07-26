@@ -78,6 +78,30 @@ class TestReportJson:
             "projects": [],
         }]
 
+    def test_top_focus_has_structured_goal_target_and_completed_fields(self):
+        s = _stat()
+        rollups = [CategoryRollup(
+            category="coding", active_min=60.0, sessions=1, messages=10,
+            top_sessions=[s],
+        )]
+        narrative = (
+            "**Make recap useful**\n"
+            "- Goal: Give the user a meaningful weekly status.\n"
+            "- Target state: Top focus explains intent and progress.\n"
+            "- Completed: Added the structured projection.\n"
+        )
+        payload = build_report_json(
+            label="2026-W27", since=SINCE, until=UNTIL, sessions=[s],
+            rollups=rollups, usage=_usage(), summaries={},
+            overall_narrative=narrative,
+        )
+        assert payload["narrative"]["top_focus"] == {
+            "title": "Make recap useful",
+            "goal": "Give the user a meaningful weekly status.",
+            "target_state": "Top focus explains intent and progress.",
+            "completed": "Added the structured projection.",
+        }
+
     def test_session_summary_precedence(self):
         # Cached summary wins; first_user_text is the fallback.
         no_cache = _build()

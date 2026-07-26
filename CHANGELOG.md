@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Top focus now states the user's goal, the observable target state, and work
+  completed in the report window. The same structured first goal thread is
+  rendered in terminal and Markdown recaps, and is available additively as
+  `narrative.top_focus` in JSON and `top_focus_detail` in MCP. Existing cached
+  prose safely falls back to the previous session-summary highlight until its
+  prompt fingerprint regenerates it.
+
 - Renamed **What shipped** to **Repo activity** so repo-wide commit and GitHub
   metrics are not mistaken for author-attributed output. GitHub enrichment now
   checks access once, defaults to the 10 most locally active repos, labels

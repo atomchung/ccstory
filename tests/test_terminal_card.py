@@ -18,7 +18,7 @@ from pathlib import Path
 from rich.console import Console
 
 from ccstory.artifacts import ArtifactsReport, RepoArtifacts
-from ccstory.report import _narrative_headers, render_terminal_card
+from ccstory.report import FocusThread, _narrative_headers, focus_threads, render_terminal_card, top_focus_thread
 from ccstory.time_tracking import CategoryRollup, ProjectRollup, SessionStat
 from ccstory.token_usage import ModelUsage, UsageReport
 
@@ -200,6 +200,45 @@ class TestNarrativeHeaders:
         ]
 
 
+class TestTopFocusFields:
+    def test_parses_structured_goal_thread(self):
+        narrative = (
+            "**Make the weekly recap decision-useful**\n"
+            "- Goal: Help the user understand what they are building toward.\n"
+            "- Target state: Top focus names the goal, end state, and progress.\n"
+            "- Completed: Added structured Top focus rendering.\n"
+        )
+        assert focus_threads(narrative) == [
+            FocusThread(
+                title="Make the weekly recap decision-useful",
+                goal="Help the user understand what they are building toward.",
+                target_state="Top focus names the goal, end state, and progress.",
+                completed="Added structured Top focus rendering.",
+            )
+        ]
+
+    def test_rejects_partial_thread_instead_of_guessing_missing_goal(self):
+        narrative = (
+            "**A thread**\n"
+            "- Goal: Something useful.\n"
+            "- Completed: Something happened.\n"
+        )
+        assert focus_threads(narrative) == []
+
+    def test_top_focus_does_not_skip_a_malformed_first_thread(self):
+        narrative = (
+            "**Malformed first thread**\n"
+            "- Goal: A useful goal.\n"
+            "- Completed: Work happened.\n"
+            "\n"
+            "**Valid second thread**\n"
+            "- Goal: Another goal.\n"
+            "- Target state: A clear state.\n"
+            "- Completed: Another completed outcome.\n"
+        )
+        assert top_focus_thread(narrative) is None
+
+
 class TestWhatYouDidCard:
     def _card_text(self, narrative: str) -> str:
         rollups = _rollups([("輸出", 600.0)])
@@ -232,6 +271,21 @@ class TestWhatYouDidCard:
         narrative = "Focused on ccstory this week, shipping the v0.6 release."
         out = self._card_text(narrative)
         assert narrative in out
+
+    def test_structured_top_focus_names_goal_target_and_completed_work(self):
+        narrative = (
+            "**Make the weekly recap decision-useful**\n"
+            "- Goal: Help the user see the work that serves their real objective.\n"
+            "- Target state: The primary recap explains intent, done state, and progress.\n"
+            "- Completed: Replaced the time-bucket-only highlight with a structured focus.\n"
+        )
+        out = self._card_text(narrative)
+        assert "User goal" in out
+        assert "Target state" in out
+        assert "Completed" in out
+        assert "Help the user see the work that serves their real" in out
+        assert "objective." in out
+        assert "Replaced the time-bucket-only highlight" in out
 
 
 class TestCardWrapping:

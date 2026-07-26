@@ -45,8 +45,11 @@ the normal narrative flow, which may invoke your installed Claude Code CLI.
 
 ╭──────────────── Claude Code Recap · May 5 – 12, 2026 ────────────────╮
 │                                                                      │
-│  ★ Top focus  coding  10.9h  (53% of active time)                    │
-│    ↳ Built /show-routine slash command using bash+python to fetch…   │
+│  ★ Top focus  Make scheduled-task output easy to inspect              │
+│    Time focus  coding  10.9h  (53% of active time)                   │
+│    User goal     Make scheduled-task output easy to inspect           │
+│    Target state  A slash command shows the current routine on demand  │
+│    Completed     Built the command and the routine-detail flow        │
 │                                                                      │
 │  Active  20.6h  Sessions  74   Output  2.92M                         │
 │  Turns   3,692  Cache     96%  Cost    $1,608                        │
@@ -344,8 +347,10 @@ pypi = ["my-package"]        # extra packages beyond auto-detection
 
 ## Narrative depth
 
-`## What you did` is 2-4 goal threads (bold header + bullets) by default. For
-real retrospectives, `--narrative` goes deeper:
+`Top focus` is the primary goal thread, not merely the largest time bucket. It
+states the user's goal, the observable target state, and what was completed in
+the report window. The full `## Goal threads` section contains 2-4 such
+evidence-backed threads. For real retrospectives, `--narrative` goes deeper:
 
 ```bash
 ccstory week --narrative per-category   # header + bullets per bucket instead
