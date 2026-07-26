@@ -1,9 +1,10 @@
 # ccstory
 
 > **Your AI coding-agent week, in plain English.**
-> Reads local Claude Code, OpenAI Codex, and Google Antigravity session logs
-> and writes a categorized recap with active hours, costs, and a per-bucket
-> narrative.
+> Reads local coding-agent session logs and writes a categorized recap with
+> active hours, costs, and a per-bucket narrative. This release bundles Claude
+> Code, OpenAI Codex, and Google Antigravity; the provider registry is designed
+> to add more agents without changing the recap contract.
 
 Sibling to [ccusage](https://github.com/ryoppippi/ccusage):
 **ccusage tells you how much you spent · ccstory tells you what on.**
@@ -44,7 +45,7 @@ coding-agent CLIs.
 
 ```
 
-╭──────────────── Claude Code Recap · May 5 – 12, 2026 ────────────────╮
+╭────────────── AI Coding-Agent Recap · May 5 – 12, 2026 ──────────────╮
 │                                                                      │
 │  ★ Top focus  Make scheduled-task output easy to inspect              │
 │    Time focus  coding  10.9h  (53% of active time)                   │
@@ -131,11 +132,11 @@ flow after the live debug session on Wednesday.
 | `--no-compare` | Skip the entire block |
 | `--no-compare-narrative` | Keep numeric deltas, drop the prose |
 
-**Coding agent**
+**Coding agent (currently bundled providers)**
 
 | Flag | What it does |
 |---|---|
-| `--agent all` (default) | Every agent ccstory can read |
+| `--agent all` (default) | Every provider bundled by this installed version |
 | `--agent claude` | Claude Code only (`~/.claude/projects`) |
 | `--agent codex` | OpenAI Codex only (`~/.codex/sessions`) |
 | `--agent antigravity` | Google Antigravity only (`~/.gemini/antigravity/brain`) |
@@ -256,20 +257,23 @@ reruns are free.
 
 ## Multiple coding agents
 
-ccstory reads Claude Code (`~/.claude/projects`), OpenAI Codex
+This release currently reads Claude Code (`~/.claude/projects`), OpenAI Codex
 (`~/.codex/sessions`, plus `archived_sessions`), and Google Antigravity
-(`~/.gemini/antigravity/brain`) by default. Codex and Antigravity sessions are
-attributed to a project from the `cwd` their metadata records, folded through
-the same rules Claude Code project folders get — including git worktrees, so a
-detached checkout counts toward the repo it came from rather than becoming its
-own one-off project.
+(`~/.gemini/antigravity/brain`). That list is an implementation snapshot, not
+an architecture limit: each future agent belongs in the same provider registry
+and receives the same recap, report, JSON, trend, and MCP contracts.
 
-The source boundary is registry-driven. A bundled provider supplies one
-descriptor plus its data roots, transcript parser, narrative-excerpt extractor,
-usage collector, and exact-usage coverage status; CLI choices, MCP filtering,
-availability checks, report labels, and incomplete-cost warnings derive from
-that descriptor. This keeps future transcript formats inside their provider
-instead of adding agent-specific branches across every output surface.
+Where a provider records a working directory, ccstory attributes its sessions
+to a project through the shared rules — including git worktrees, so a detached
+checkout counts toward the repo it came from rather than becoming its own
+one-off project.
+
+The source boundary is registry-driven. A provider supplies one descriptor plus
+its data roots, transcript parser, narrative-excerpt extractor, usage
+collector, and coverage declaration; CLI choices, MCP filtering, availability
+checks, report labels, and incomplete-cost warnings derive from that descriptor.
+This keeps future transcript formats inside their provider instead of adding
+agent-specific branches across every output surface.
 
 **Time is reported once, not per agent.** Agents run concurrently: a Codex
 review and a Claude Code session routinely occupy the same ten minutes. Summing
@@ -287,18 +291,20 @@ per-agent time added up to 177h against a deduplicated wall clock of 64h. So:
 - **`N× parallel`** is raw agent time ÷ wall clock: how much of the work
   overlapped.
 
-Token usage and costs fully cover Claude Code, OpenAI Codex, and Google Antigravity. For Google
-Antigravity, native titles are read from `~/.gemini/antigravity/agyhub_summaries_proto.pb`
-and take precedence over `first_user_text` in recaps when LLM summaries are absent.
-Authoritative exact token usage for Antigravity is read from `gen_metadata` in companion
-SQLite databases (`~/.gemini/antigravity/conversations/<session_id>.db`), including cached-content
-tokens, aligned by step index timestamps with transcript logs (with transcript exact usage as
-fallback for uncounted steps, and deterministic time-window attribution for compacted steps).
-Antigravity provider coverage is complete. Models with exact tokens but no known rate remain
-visible and trigger a missing-price warning.
+Usage and cost coverage are provider-specific. ccstory never estimates tokens
+or infers a model when a provider's local source does not expose an exact value;
+unknown values stay visible through `usage_coverage` and `unpriced_models`.
+For Google Antigravity, native titles are read from
+`~/.gemini/antigravity/agyhub_summaries_proto.pb`, and token fields are read
+from `gen_metadata` in companion SQLite databases. Some compacted database
+steps have no source timestamp, so their report-window membership is
+deterministically attributed from neighboring transcript step indexes. Treat
+that as local-parser evidence, not a provider billing-portal reconciliation.
+Models with known tokens but no known rate remain visible and trigger a
+missing-price warning.
 
-Use `--agent claude`, `--agent codex`, or `--agent antigravity` to isolate one
-provider.
+Use `--agent <provider-id>` to isolate one bundled provider; run
+`ccstory --help` to see the IDs available in the installed version.
 
 ## Repo activity
 
@@ -366,8 +372,10 @@ text lands in `buckets[].narrative`.
 
 ## Narrative backends, latency, and quota
 
-ccstory tries available local backends in this default order. Every backend
-has an explicit low-cost model; no model is inferred from a source transcript.
+ccstory tries available local narrative backends in this default order. Every
+configured backend has an explicit low-cost model; no model is inferred from a
+source transcript. These are the backends bundled in this release, not a limit
+on future registered providers.
 
 ```toml
 # ~/.ccstory/config.toml
@@ -387,6 +395,9 @@ effort = "low"
 
 Set `providers = []` to disable every LLM path, or select a subset/order for
 an organization. A failed or unavailable backend advances to the next one.
+The current release ignores unknown IDs rather than issuing an unmodelled call;
+after an upgrade, newly bundled provider IDs can be added to the same ordered
+policy.
 Codex calls run with `--ephemeral --sandbox read-only`; Claude calls use
 `--no-session-persistence`. Antigravity has no equivalent ephemeral mode, so
 it may retain local CLI session metadata. JSON records `summary_narrator` for each LLM summary and
@@ -473,8 +484,9 @@ valid even for `client: acme, inc`.
 ## Narrative language
 
 ccstory delegates narrative writing to the first available configured local
-backend. Language is set in the prompt, so the same override applies to Claude,
-Codex, and Antigravity; Claude Code preferences remain a compatibility fallback.
+backend. Language is set in the prompt, so the same override applies to current
+and future providers. Claude Code preferences remain an optional
+backwards-compatibility fallback when they exist; Claude is not required.
 
 Precedence (high → low):
 
@@ -495,9 +507,9 @@ export CCSTORY_LANG="日本語"                  # shell-scoped
 # language = "Spanish"
 ```
 
-The value is dropped straight into the prompt as `Respond in <value>.`,
-so any name Claude can parse (`"Traditional Chinese"`, `"日本語"`,
-`"pt-BR"`) works.
+The value is dropped straight into the prompt as `Respond in <value>.`, so a
+standard language name such as `"Traditional Chinese"`, `"日本語"`, or
+`"pt-BR"` works across configured providers.
 
 ## Custom pricing
 
@@ -547,19 +559,20 @@ ccstory month
 ccstory never sends your conversation data to its own service or to the
 Repo activity metadata providers. There is no ccstory telemetry or account.
 
-- **Data source**: Claude Code logs under
-  `~/.claude/projects/**/*.jsonl`, plus Codex live and archived rollouts under
-  `~/.codex/{sessions,archived_sessions}/**/*.jsonl`, plus Antigravity step
+- **Data source**: Current built-in providers read Claude Code logs under
+  `~/.claude/projects/**/*.jsonl`, Codex live and archived rollouts under
+  `~/.codex/{sessions,archived_sessions}/**/*.jsonl`, and Antigravity step
   logs under
   `~/.gemini/antigravity/brain/*/.system_generated/logs/transcript.jsonl`
-  and companion project metadata under
-  `~/.gemini/antigravity/conversations/*.db`.
-- **Narratives and classification**: subprocess-call the configured local
-  backend in order: `claude -p --model sonnet`, `codex exec --ephemeral
-  --sandbox read-only --model gpt-5.6-terra`, then `agy -p --model
-  gemini-3.6-flash-low --effort low`. The selected CLI contacts its provider
-  using your signed-in session and plan quota; ccstory does not use your API
-  key or operate a proxy.
+  and companion metadata under `~/.gemini/antigravity/conversations/*.db`.
+  Future providers declare their own local roots; ccstory does not send
+  transcript contents to a metadata service.
+- **Narratives and classification**: invoke the configured local backend with
+  its explicit model policy. In this release that policy defaults to
+  `claude -p --model sonnet`, `codex exec --ephemeral --sandbox read-only
+  --model gpt-5.6-terra`, then `agy -p --model gemini-3.6-flash-low --effort
+  low`. The selected CLI contacts its provider using your signed-in session and
+  plan quota; ccstory does not use your API key or operate a proxy.
 - **Pricing**: ccstory makes no pricing network requests. Model prices ship with each release and come from the LiteLLM registry.
 - **Repo activity**: local git supplies repo-wide commit counts. If `gh` is
   installed and authenticated, ccstory sends the repo slug and report date
@@ -583,11 +596,12 @@ local narrator calls with `--minimal --classify folder` (and initialize with
 
 - **Python 3.11+** and **pipx**
   (`brew install pipx` on macOS, [other platforms](https://pipx.pypa.io/stable/installation/)).
-- **At least one configured narrative CLI** — Claude Code (`claude`), Codex
-  (`codex`), or Antigravity (`~/.local/bin/agy`) for `--llm-narrative`, content
-  classification, and cross-period synthesis. Without all of them, narratives
-  fall back to first/last user-message excerpts and `--classify` falls back to
-  folder rules.
+- **At least one configured narrative CLI** for `--llm-narrative`, content
+  classification, and cross-period synthesis. This release supports Claude
+  Code (`claude`), Codex (`codex`), and Antigravity (`~/.local/bin/agy`); later
+  releases may add providers. Without an available configured backend,
+  narratives fall back to first/last user-message excerpts and `--classify`
+  falls back to folder rules.
 
 ## Implementation notes
 
@@ -648,11 +662,11 @@ pip install 'ccstory[mcp]'
 ccstory mcp   # stdio MCP server — read-only, no fresh narrator call by default
 ```
 
-Point any MCP-aware client (Claude Desktop, Claude Code, or another local
-agent) at the `ccstory mcp` command and it can ask for your recap live in
-conversation instead of you running the CLI and pasting output back in.
-Example client config (Claude Desktop's `claude_desktop_config.json`, or
-Claude Code's MCP settings — same shape):
+Point any MCP-aware client at the `ccstory mcp` command and it can ask for your
+recap live in conversation instead of you running the CLI and pasting output
+back in. Claude Desktop and Claude Code are examples, not requirements. Example
+client config (Claude Desktop's `claude_desktop_config.json`, or Claude Code's
+MCP settings — same shape):
 
 ```json
 {
