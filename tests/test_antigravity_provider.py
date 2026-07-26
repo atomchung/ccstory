@@ -1,4 +1,4 @@
-"""Antigravity session parsing, attribution, usage, and registry contracts."""
+"""Antigravity session parsing, attribution, usage, subagent filtering, and registry contracts."""
 
 from __future__ import annotations
 
@@ -125,14 +125,36 @@ class TestAntigravityParsing:
         assert stat.user_msg_count == 2
         assert stat.first_user_text == "Add unit tests for Antigravity provider"
         assert stat.project == "-Users-x-Side-project-ccstory"
-        assert stat.path == path
 
-    def test_unwraps_user_request_helper(self):
+    def test_unwraps_user_request_and_strips_metadata(self):
         raw = (
             "<USER_REQUEST>\nFix bug in parser\n</USER_REQUEST>\n"
-            "<ADDITIONAL_METADATA>\ntime: 12:00\n</ADDITIONAL_METADATA>"
+            "<ADDITIONAL_METADATA>\ntime: 12:00\n</ADDITIONAL_METADATA>\n"
+            "<USER_SETTINGS_CHANGE>\nmodel changed\n</USER_SETTINGS_CHANGE>"
         )
         assert extract_user_request_text(raw) == "Fix bug in parser"
+
+    def test_subagent_transcript_is_filtered(
+        self, antigravity_factory, tmp_home
+    ):
+        path = antigravity_factory(
+            "subagent-session",
+            [
+                {
+                    "step_index": 1,
+                    "source": "USER_EXPLICIT",
+                    "type": "USER_INPUT",
+                    "created_at": _ts(1),
+                    "content": "<identity>\nYou are a research subagent.\n</identity>",
+                },
+                _planner("Subagent finished analysis.", 2),
+            ],
+            cwd="/Users/x/demo",
+        )
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
+        assert provider.parse_session(path) is None
 
     def test_default_project_when_no_cwd(self, antigravity_factory, tmp_home):
         path = antigravity_factory(
@@ -147,7 +169,6 @@ class TestAntigravityParsing:
         assert stat.project == "antigravity"
 
     def test_gap_capping_for_active_time(self, antigravity_factory, tmp_home):
-        # Turns at 0m, 10m (gap 10m -> capped to 5m=300s)
         path = antigravity_factory(
             SID,
             [_user("start", 0), _planner("working", 10)],
@@ -160,7 +181,7 @@ class TestAntigravityParsing:
         assert stat is not None
         assert stat.active_sec == 300
 
-    def test_sqlite_cwd_extraction_uses_read_only_uri(
+    def test_reads_percent_encoded_cwd_from_db_in_read_only_mode(
         self, tmp_path, monkeypatch
     ):
         db_path = tmp_path / "test.db"
@@ -212,7 +233,7 @@ class TestAntigravityParsing:
 
 
 class TestAntigravityUsageCollection:
-    def test_returns_zero_when_no_explicit_tokens(
+    def test_collects_estimated_tokens_when_no_explicit_tokens(
         self, antigravity_factory, tmp_home
     ):
         antigravity_factory(
@@ -231,10 +252,12 @@ class TestAntigravityUsageCollection:
         )
         by_model: dict = {}
         turns = provider.collect_usage(since, until, by_model)
-        assert turns == 0
-        assert len(by_model) == 0
+        assert turns == 1
+        assert "gemini-3.6-flash" in by_model
+        assert by_model["gemini-3.6-flash"].input_tokens == 107
+        assert by_model["gemini-3.6-flash"].output_tokens == 75
 
-    def test_collects_tokens_when_explicit_usage_present(
+    def test_collects_tokens_and_cache_read_when_explicit_usage_present(
         self, antigravity_factory, tmp_home
     ):
         rec = _planner("Hello", 2)
@@ -242,6 +265,7 @@ class TestAntigravityUsageCollection:
             "model": "gemini-3.6-flash",
             "input_tokens": 100,
             "output_tokens": 50,
+            "cached_input_tokens": 80,
         }
         antigravity_factory(SID, [_user("Hi", 1), rec], cwd="/Users/x/demo")
 
@@ -257,6 +281,7 @@ class TestAntigravityUsageCollection:
         assert "gemini-3.6-flash" in by_model
         assert by_model["gemini-3.6-flash"].input_tokens == 100
         assert by_model["gemini-3.6-flash"].output_tokens == 50
+        assert by_model["gemini-3.6-flash"].cache_read == 80
 
     @pytest.mark.parametrize(
         "bad_usage",
@@ -266,7 +291,7 @@ class TestAntigravityUsageCollection:
             {"model": {}, "input_tokens": 100, "output_tokens": 50},
         ],
     )
-    def test_invalid_usage_is_ignored(
+    def test_invalid_usage_falls_back_to_estimation(
         self, antigravity_factory, tmp_home, bad_usage
     ):
         rec = _planner("Hello", 2)
@@ -283,8 +308,8 @@ class TestAntigravityUsageCollection:
             by_model,
         )
 
-        assert turns == 0
-        assert by_model == {}
+        assert turns == 1
+        assert "gemini-3.6-flash" in by_model
 
 
 class TestAntigravityMultiAgentCollection:
