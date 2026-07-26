@@ -24,7 +24,7 @@ from .projects import encode_project_dir, worktree_origin
 
 def decode_varint(data: bytes, pos: int) -> tuple[int, int]:
     """Decode a varint starting at pos. Returns (val, new_pos).
-    Raises ValueError on unexpected EOF or malformed varint (varint > 10 bytes).
+    Raises ValueError on unexpected EOF, varint > 10 bytes, or uint64 overflow.
     """
     res = 0
     shift = 0
@@ -33,11 +33,17 @@ def decode_varint(data: bytes, pos: int) -> tuple[int, int]:
     while pos < n:
         b = data[pos]
         pos += 1
+        byte_count = pos - start
+        if byte_count == 10:
+            if (b & 0x80) != 0 or (b & 0x7F) > 0x01:
+                raise ValueError("Malformed varint: uint64 overflow or byte 10 invalid")
+            res |= (b & 0x01) << shift
+            return res, pos
         res |= (b & 0x7F) << shift
         if not (b & 0x80):
             return res, pos
         shift += 7
-        if shift >= 70 or (pos - start) > 10:
+        if byte_count > 10:
             raise ValueError("Malformed varint: exceeds 10 bytes")
     raise ValueError("Truncated varint: unexpected EOF")
 
@@ -107,15 +113,15 @@ def _read_title_map(pb_path: Path) -> dict[str, str]:
                 e_fields = list(iter_protobuf_fields(entry_bytes))
                 for ef_num, ew_type, eval_bytes in e_fields:
                     if ef_num == 1 and ew_type == 2 and isinstance(eval_bytes, bytes):
-                        sid = eval_bytes.decode("utf-8", errors="ignore").strip()
+                        sid = eval_bytes.decode("utf-8").strip()
                     elif ef_num == 2 and ew_type == 2 and isinstance(eval_bytes, bytes):
                         s_fields = list(iter_protobuf_fields(eval_bytes))
                         for sf_num, sw_type, sval_bytes in s_fields:
                             if sf_num == 1 and sw_type == 2 and isinstance(sval_bytes, bytes):
-                                title = sval_bytes.decode("utf-8", errors="ignore").strip()
+                                title = sval_bytes.decode("utf-8").strip()
                 if sid and title:
                     title_map[sid] = title
-            except ValueError:
+            except (ValueError, UnicodeDecodeError):
                 continue
     return title_map
 
@@ -150,7 +156,7 @@ def parse_gen_metadata_blob(data: bytes) -> tuple[str, int, int] | None:
 
         for f_num, w_type, val in gen_fields:
             if f_num == 19 and w_type == 2 and isinstance(val, bytes):
-                m_str = val.decode("utf-8", errors="ignore").strip()
+                m_str = val.decode("utf-8").strip()
                 if m_str:
                     model = m_str
             elif f_num == 4 and w_type == 2 and isinstance(val, bytes):
@@ -167,7 +173,7 @@ def parse_gen_metadata_blob(data: bytes) -> tuple[str, int, int] | None:
             return None
 
         return model, inp, out
-    except ValueError:
+    except (ValueError, UnicodeDecodeError):
         return None
 
 

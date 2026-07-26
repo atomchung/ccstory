@@ -875,6 +875,52 @@ class TestStrictProtobufFailClosed:
         assert "sid-valid" in title_map
         assert title_map["sid-valid"] == "Valid Native Title"
 
+    @pytest.mark.parametrize(
+        "varint_bytes",
+        [
+            b"\x80" * 9 + b"\x02",
+            b"\x80" * 10,
+        ],
+    )
+    def test_decode_varint_rejects_uint64_overflow(self, varint_bytes):
+        from ccstory.providers.antigravity import decode_varint
+
+        with pytest.raises(ValueError, match="Malformed varint"):
+            decode_varint(varint_bytes, 0)
+
+    def test_parse_gen_metadata_blob_fails_closed_on_invalid_utf8_model(self):
+        from ccstory.providers.antigravity import parse_gen_metadata_blob
+
+        invalid_utf8_blob = encode_bytes(
+            1,
+            encode_bytes(19, b"\xff\xfe\xfd")
+            + encode_bytes(
+                4, encode_varint_field(2, 100) + encode_varint_field(3, 40)
+            ),
+        )
+        assert parse_gen_metadata_blob(invalid_utf8_blob) is None
+
+    def test_title_proto_skips_invalid_utf8_entry(self, tmp_path):
+        from ccstory.providers.antigravity import _read_title_map
+
+        pb_path = tmp_path / "agyhub_summaries_proto.pb"
+        invalid_entry = encode_bytes(
+            1,
+            encode_string(1, "sid-invalid")
+            + encode_bytes(2, encode_bytes(1, b"\xff\xfe\xfd")),
+        )
+        valid_entry = encode_bytes(
+            1,
+            encode_string(1, "sid-valid")
+            + encode_bytes(2, encode_string(1, "Valid Native Title")),
+        )
+        pb_path.write_bytes(invalid_entry + valid_entry)
+
+        title_map = _read_title_map(pb_path)
+        assert "sid-invalid" not in title_map
+        assert "sid-valid" in title_map
+        assert title_map["sid-valid"] == "Valid Native Title"
+
 
 class TestDuplicateIdxDefense:
     def test_gen_metadata_duplicate_idx_counted_only_once(
