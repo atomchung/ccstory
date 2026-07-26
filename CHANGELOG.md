@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   report-wide cost/coverage caveats to the card footer, and let long highlight,
   project, narrative, and agent-breakdown text wrap instead of rendering
   repeated ellipses.
+- Scoped GitHub merged-PR queries to the report window and recursively split
+  capped date ranges, preventing repositories with more than 200 lifetime PRs
+  from emitting false warnings or undercounting current-window shipped work.
 
 ## [0.7.2] - 2026-07-26
 
