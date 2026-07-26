@@ -189,9 +189,51 @@ class AntigravityProvider(BaseAgentProvider):
 
         return project, build_excerpt(user_msgs, assistant_msgs)
 
-    def parse_session(self, jsonl_path: Path) -> SessionStat | None:
-        """Parse one Antigravity transcript.jsonl into a SessionStat."""
+    def _get_child_session_ids(self) -> set[str]:
+        """Discover child subagent conversation IDs referenced by INVOKE_SUBAGENT records."""
+        all_paths = glob.glob(self._transcript_glob())
+        all_session_ids = {_extract_session_id(Path(p)) for p in all_paths}
+        child_ids: set[str] = set()
+
+        for path_str in all_paths:
+            path = Path(path_str)
+            curr_sid = _extract_session_id(path)
+            try:
+                with path.open("r", encoding="utf-8", errors="ignore") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            d = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+
+                        if d.get("type") == "INVOKE_SUBAGENT":
+                            record_str = json.dumps(d)
+                            for sid in all_session_ids:
+                                if sid != curr_sid and sid in record_str:
+                                    child_ids.add(sid)
+            except OSError:
+                continue
+
+        return child_ids
+
+    def _is_child_session(
+        self, jsonl_path: Path, child_ids: set[str] | None = None
+    ) -> bool:
         if _is_subagent_transcript(jsonl_path):
+            return True
+        sid = _extract_session_id(jsonl_path)
+        if child_ids is None:
+            child_ids = self._get_child_session_ids()
+        return sid in child_ids
+
+    def parse_session(
+        self, jsonl_path: Path, child_ids: set[str] | None = None
+    ) -> SessionStat | None:
+        """Parse one Antigravity transcript.jsonl into a SessionStat."""
+        if self._is_child_session(jsonl_path, child_ids=child_ids):
             return None
 
         timestamps: list[datetime] = []
@@ -278,15 +320,15 @@ class AntigravityProvider(BaseAgentProvider):
         from ..token_usage import ModelUsage
 
         assistant_turns = 0
+        child_ids = self._get_child_session_ids()
 
         for path_str in glob.glob(self._transcript_glob()):
             jsonl_path = Path(path_str)
-            if _is_subagent_transcript(jsonl_path):
+            if self._is_child_session(jsonl_path, child_ids):
                 continue
 
             try:
                 with jsonl_path.open("r", encoding="utf-8", errors="ignore") as f:
-                    accumulated_inp = 0
                     for line in f:
                         line = line.strip()
                         if not line:
@@ -298,77 +340,83 @@ class AntigravityProvider(BaseAgentProvider):
 
                         stype = d.get("type")
                         source = d.get("source")
-                        content = _content_text(d.get("content"))
-                        thinking = _content_text(d.get("thinking"))
 
-                        is_user = _is_user_step(stype, source)
-                        is_assistant = _is_assistant_step(stype, source)
-
-                        if not is_assistant:
-                            # Accumulate user prompts, tool outputs, system inputs into context length
-                            accumulated_inp += len(content) + len(thinking)
+                        if not _is_assistant_step(stype, source):
                             continue
 
-                        # Assistant turn
                         ts_raw = d.get("created_at")
-                        in_window = False
-                        if ts_raw:
-                            ts = _parse_ts(ts_raw)
-                            if ts and since <= ts <= until:
-                                in_window = True
+                        if not ts_raw:
+                            continue
+                        ts = _parse_ts(ts_raw)
+                        if not ts or not (since <= ts <= until):
+                            continue
 
-                        if in_window:
-                            usage = d.get("usage")
-                            inp_raw = None
-                            out_raw = None
-                            cache_read_raw = None
-                            model_raw = d.get("model")
+                        usage = d.get("usage")
+                        inp_raw = None
+                        out_raw = None
+                        cache_read_raw = None
+                        model_raw = d.get("model")
 
-                            if isinstance(usage, dict):
-                                inp_raw = (
-                                    usage.get("input_tokens")
-                                    if "input_tokens" in usage
-                                    else usage.get("prompt_tokens")
-                                )
-                                out_raw = (
-                                    usage.get("output_tokens")
-                                    if "output_tokens" in usage
-                                    else usage.get("completion_tokens")
-                                )
-                                cache_read_raw = (
-                                    usage.get("cache_read_input_tokens")
-                                    if "cache_read_input_tokens" in usage
-                                    else usage.get("cached_input_tokens")
-                                    if "cached_input_tokens" in usage
-                                    else usage.get("cached_content_token_count")
-                                )
-                                if isinstance(usage.get("model"), str) and usage["model"].strip():
-                                    model_raw = usage["model"]
+                        if isinstance(usage, dict):
+                            if "input_tokens" in usage:
+                                inp_raw = usage["input_tokens"]
+                            elif "prompt_tokens" in usage:
+                                inp_raw = usage["prompt_tokens"]
 
-                            inp = _exact_token_count(inp_raw)
-                            out = _exact_token_count(out_raw)
-                            cache_read = _exact_token_count(cache_read_raw) or 0
+                            if "output_tokens" in usage:
+                                out_raw = usage["output_tokens"]
+                            elif "completion_tokens" in usage:
+                                out_raw = usage["completion_tokens"]
 
-                            model = (
-                                model_raw.strip()
-                                if isinstance(model_raw, str) and model_raw.strip()
-                                else "gemini-3.6-flash"
-                            )
+                            if "cache_read_input_tokens" in usage:
+                                cache_read_raw = usage["cache_read_input_tokens"]
+                            elif "cached_input_tokens" in usage:
+                                cache_read_raw = usage["cached_input_tokens"]
+                            elif "cached_content_token_count" in usage:
+                                cache_read_raw = usage["cached_content_token_count"]
 
-                            final_inp = inp if inp is not None else max(1, accumulated_inp // 4)
-                            final_out = out if out is not None else max(1, (len(content) + len(thinking)) // 4)
+                            if isinstance(usage.get("model"), str) and usage["model"].strip():
+                                model_raw = usage["model"]
+                        else:
+                            if "input_tokens" in d:
+                                inp_raw = d["input_tokens"]
+                            elif "prompt_tokens" in d:
+                                inp_raw = d["prompt_tokens"]
 
-                            mu = by_model.setdefault(
-                                model, ModelUsage(model=model)
-                            )
-                            mu.turns += 1
-                            mu.input_tokens += final_inp
-                            mu.output_tokens += final_out
-                            mu.cache_read += cache_read
-                            assistant_turns += 1
+                            if "output_tokens" in d:
+                                out_raw = d["output_tokens"]
+                            elif "completion_tokens" in d:
+                                out_raw = d["completion_tokens"]
 
-                        # Context accumulator includes current assistant response & thinking for subsequent turns
-                        accumulated_inp += len(content) + len(thinking)
+                            if "cache_read_input_tokens" in d:
+                                cache_read_raw = d["cache_read_input_tokens"]
+                            elif "cached_input_tokens" in d:
+                                cache_read_raw = d["cached_input_tokens"]
+                            elif "cached_content_token_count" in d:
+                                cache_read_raw = d["cached_content_token_count"]
+
+                        inp = _exact_token_count(inp_raw)
+                        out = _exact_token_count(out_raw)
+                        model = (
+                            model_raw.strip()
+                            if isinstance(model_raw, str) and model_raw.strip()
+                            else None
+                        )
+
+                        if inp is None or out is None or model is None:
+                            continue
+
+                        cache_read_val = _exact_token_count(cache_read_raw)
+                        cache_read = cache_read_val if cache_read_val is not None else 0
+
+                        mu = by_model.setdefault(
+                            model, ModelUsage(model=model)
+                        )
+                        mu.turns += 1
+                        mu.input_tokens += inp
+                        mu.output_tokens += out
+                        mu.cache_read += cache_read
+                        assistant_turns += 1
             except OSError:
                 continue
 
@@ -388,6 +436,7 @@ class AntigravityProvider(BaseAgentProvider):
 
         stats: list[SessionStat] = []
         since_ts = since.timestamp()
+        child_ids = self._get_child_session_ids()
 
         for path_str in glob.glob(self._transcript_glob()):
             path = Path(path_str)
@@ -397,7 +446,7 @@ class AntigravityProvider(BaseAgentProvider):
             except OSError:
                 continue
 
-            s = self.parse_session(path)
+            s = self.parse_session(path, child_ids=child_ids)
             if not s:
                 continue
             if s.end < since:
