@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-07-23",
+  "generated_at": "2026-07-26",
   "source_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
-  "entry_count": 66,
+  "entry_count": 110,
   "prices": {
     "claude-haiku-4-5-20251001": {
       "inp": 1.0,
@@ -129,6 +129,12 @@
       "cw": 12.5,
       "cr": 1.0
     },
+    "claude-opus-5": {
+      "inp": 5.0,
+      "out": 25.0,
+      "cw": 6.25,
+      "cr": 0.5
+    },
     "claude-opus-4-8": {
       "inp": 5.0,
       "out": 25.0,
@@ -140,6 +146,204 @@
       "out": 15.0,
       "cw": 3.75,
       "cr": 0.3
+    },
+    "gemini-2.0-flash": {
+      "inp": 0.1,
+      "out": 0.4,
+      "cw": 0.125,
+      "cr": 0.025
+    },
+    "gemini-2.0-flash-001": {
+      "inp": 0.15,
+      "out": 0.6,
+      "cw": 0.1875,
+      "cr": 0.0375
+    },
+    "gemini-2.0-flash-lite": {
+      "inp": 0.075,
+      "out": 0.3,
+      "cw": 0.0938,
+      "cr": 0.0187
+    },
+    "gemini-2.0-flash-lite-001": {
+      "inp": 0.075,
+      "out": 0.3,
+      "cw": 0.0938,
+      "cr": 0.0187
+    },
+    "gemini-2.5-flash": {
+      "inp": 0.3,
+      "out": 2.5,
+      "cw": 0.375,
+      "cr": 0.03
+    },
+    "gemini-2.5-flash-image": {
+      "inp": 0.3,
+      "out": 2.5,
+      "cw": 0.375,
+      "cr": 0.03
+    },
+    "gemini-3-pro-image": {
+      "inp": 2.0,
+      "out": 12.0,
+      "cw": 2.5,
+      "cr": 0.2
+    },
+    "gemini-3-pro-image-preview": {
+      "inp": 2.0,
+      "out": 12.0,
+      "cw": 2.5,
+      "cr": 0.2
+    },
+    "gemini-3.1-flash-image": {
+      "inp": 0.5,
+      "out": 3.0,
+      "cw": 0.625,
+      "cr": 0.05
+    },
+    "gemini-3.1-flash-image-preview": {
+      "inp": 0.5,
+      "out": 3.0,
+      "cw": 0.625,
+      "cr": 0.05
+    },
+    "gemini-3.1-flash-lite-preview": {
+      "inp": 0.25,
+      "out": 1.5,
+      "cw": 0.3125,
+      "cr": 0.025
+    },
+    "gemini-3.1-flash-lite": {
+      "inp": 0.25,
+      "out": 1.5,
+      "cw": 0.3125,
+      "cr": 0.025
+    },
+    "gemini-3.5-flash-lite": {
+      "inp": 0.3,
+      "out": 2.5,
+      "cw": 0.375,
+      "cr": 0.03
+    },
+    "gemini-2.5-flash-lite": {
+      "inp": 0.1,
+      "out": 0.4,
+      "cw": 0.125,
+      "cr": 0.01
+    },
+    "gemini-2.5-flash-lite-preview-09-2025": {
+      "inp": 0.1,
+      "out": 0.4,
+      "cw": 0.125,
+      "cr": 0.01
+    },
+    "gemini-2.5-flash-preview-09-2025": {
+      "inp": 0.3,
+      "out": 2.5,
+      "cw": 0.375,
+      "cr": 0.075
+    },
+    "gemini-live-2.5-flash-preview-native-audio-09-2025": {
+      "inp": 0.3,
+      "out": 2.0,
+      "cw": 0.375,
+      "cr": 0.075
+    },
+    "gemini-2.5-flash-lite-preview-06-17": {
+      "inp": 0.1,
+      "out": 0.4,
+      "cw": 0.125,
+      "cr": 0.025
+    },
+    "gemini-2.5-pro": {
+      "inp": 1.25,
+      "out": 10.0,
+      "cw": 1.5625,
+      "cr": 0.125
+    },
+    "gemini-3-pro-preview": {
+      "inp": 2.0,
+      "out": 12.0,
+      "cw": 2.5,
+      "cr": 0.2
+    },
+    "gemini-3.1-pro-preview": {
+      "inp": 2.0,
+      "out": 12.0,
+      "cw": 2.5,
+      "cr": 0.2
+    },
+    "gemini-3.1-pro-preview-customtools": {
+      "inp": 2.0,
+      "out": 12.0,
+      "cw": 2.5,
+      "cr": 0.2
+    },
+    "gemini-2.5-pro-preview-tts": {
+      "inp": 1.25,
+      "out": 10.0,
+      "cw": 1.5625,
+      "cr": 0.125
+    },
+    "gemini-robotics-er-1.5-preview": {
+      "inp": 0.3,
+      "out": 2.5,
+      "cw": 0.375,
+      "cr": 0.0
+    },
+    "gemini-2.5-computer-use-preview-10-2025": {
+      "inp": 1.25,
+      "out": 10.0,
+      "cw": 1.5625,
+      "cr": 0.125
+    },
+    "gemini-embedding-001": {
+      "inp": 0.15,
+      "out": 0.0,
+      "cw": 0.1875,
+      "cr": 0.015
+    },
+    "gemini-embedding-2-preview": {
+      "inp": 0.2,
+      "out": 0.0,
+      "cw": 0.25,
+      "cr": 0.02
+    },
+    "gemini-embedding-2": {
+      "inp": 0.2,
+      "out": 0.0,
+      "cw": 0.25,
+      "cr": 0.02
+    },
+    "gemini-flash-experimental": {
+      "inp": 0.0,
+      "out": 0.0,
+      "cw": 0.0,
+      "cr": 0.0
+    },
+    "gemini-3-flash-preview": {
+      "inp": 0.5,
+      "out": 3.0,
+      "cw": 0.625,
+      "cr": 0.05
+    },
+    "gemini-omni-flash-preview": {
+      "inp": 1.5,
+      "out": 9.0,
+      "cw": 1.875,
+      "cr": 0.15
+    },
+    "gemini-3.5-flash": {
+      "inp": 1.5,
+      "out": 9.0,
+      "cw": 1.875,
+      "cr": 0.15
+    },
+    "gemini-3.6-flash": {
+      "inp": 1.5,
+      "out": 7.5,
+      "cw": 1.875,
+      "cr": 0.15
     },
     "gpt-5": {
       "inp": 1.25,
@@ -398,6 +602,66 @@
       "out": 10.0,
       "cw": 1.5625,
       "cr": 0.125
+    },
+    "gemini-2.0-flash-exp-image-generation": {
+      "inp": 0.0,
+      "out": 0.0,
+      "cw": 0.0,
+      "cr": 0.0
+    },
+    "gemini-2.5-flash-native-audio-latest": {
+      "inp": 0.3,
+      "out": 2.5,
+      "cw": 0.375,
+      "cr": 0.03
+    },
+    "gemini-2.5-flash-native-audio-preview-09-2025": {
+      "inp": 0.3,
+      "out": 2.5,
+      "cw": 0.375,
+      "cr": 0.03
+    },
+    "gemini-2.5-flash-native-audio-preview-12-2025": {
+      "inp": 0.3,
+      "out": 2.5,
+      "cw": 0.375,
+      "cr": 0.03
+    },
+    "gemini-3.1-flash-live-preview": {
+      "inp": 0.75,
+      "out": 4.5,
+      "cw": 0.9375,
+      "cr": 0.075
+    },
+    "gemini-2.5-flash-preview-tts": {
+      "inp": 0.3,
+      "out": 2.5,
+      "cw": 0.375,
+      "cr": 0.03
+    },
+    "gemini-flash-latest": {
+      "inp": 0.3,
+      "out": 2.5,
+      "cw": 0.375,
+      "cr": 0.03
+    },
+    "gemini-flash-lite-latest": {
+      "inp": 0.1,
+      "out": 0.4,
+      "cw": 0.125,
+      "cr": 0.01
+    },
+    "gemini-pro-latest": {
+      "inp": 1.25,
+      "out": 10.0,
+      "cw": 1.5625,
+      "cr": 0.125
+    },
+    "gemini-exp-1206": {
+      "inp": 0.3,
+      "out": 2.5,
+      "cw": 0.375,
+      "cr": 0.03
     }
   }
 }

@@ -55,10 +55,54 @@ class TestVendoredPriceTable:
             "claude-sonnet-4-6",
             "claude-opus-4-7",
             "claude-opus-4-6",
+            "gemini-3.6-flash",
+            "gemini-3-flash-preview",
         ]
         for m in required_models:
             assert m in prices, f"Required model {m} missing from vendored model_prices.json"
             assert all(k in prices[m] for k in ("inp", "out", "cw", "cr"))
+
+
+class TestAliasPriceResolution:
+    def test_explicit_alias_names_resolve_to_canonical_price(self):
+        canonical_p = _price_for("gemini-3-flash-preview")
+        assert canonical_p is not None
+
+        alias_a_p = _price_for("gemini-3-flash-a")
+        alias_agent_p = _price_for("gemini-3-flash-agent")
+
+        assert alias_a_p == canonical_p
+        assert alias_agent_p == canonical_p
+
+    def test_canonical_user_override_honored_by_alias(self, tmp_path: Path):
+        cfg = tmp_path / "config.toml"
+        cfg.write_text("[prices.gemini-3-flash-preview]\ninput = 88.0\n", encoding="utf-8")
+
+        prices, snapshot, prov = load_prices_config(cfg)
+        apply_prices(prices, snapshot, prov)
+
+        p = _price_for("gemini-3-flash-a")
+        assert p is not None
+        assert p["inp"] == 88.0
+
+    def test_exact_alias_user_override_wins_over_canonical_user_override(self, tmp_path: Path):
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            "[prices.gemini-3-flash-preview]\ninput = 88.0\n"
+            "[prices.gemini-3-flash-a]\ninput = 99.0\n",
+            encoding="utf-8",
+        )
+
+        prices, snapshot, prov = load_prices_config(cfg)
+        apply_prices(prices, snapshot, prov)
+
+        p_alias = _price_for("gemini-3-flash-a")
+        assert p_alias is not None
+        assert p_alias["inp"] == 99.0
+
+        p_canonical = _price_for("gemini-3-flash-preview")
+        assert p_canonical is not None
+        assert p_canonical["inp"] == 88.0
 
 
 class TestPrecedenceLadder:

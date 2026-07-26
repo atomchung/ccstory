@@ -126,14 +126,15 @@ def _read_title_map(pb_path: Path) -> dict[str, str]:
     return title_map
 
 
-def parse_gen_metadata_blob(data: bytes) -> tuple[str, int, int] | None:
-    """Decode gen_metadata data blob into (response_model, input_tokens, output_tokens).
+def parse_gen_metadata_blob(data: bytes) -> tuple[str, int, int, int] | None:
+    """Decode gen_metadata data blob into (response_model, input_tokens, output_tokens, cached_content_token_count).
 
     Outer field 1 = generation message.
     Generation field 19 = response_model (string).
     Generation field 4 = usage message.
     Usage field 2 = input_tokens (varint).
     Usage field 3 = output_tokens (varint).
+    Usage field 5 = cached_content_token_count (varint, optional).
     Fail closed (return None) if corrupt, trailing malformed bytes, missing fields, empty model, or negative tokens.
     """
     if not isinstance(data, bytes) or not data:
@@ -153,6 +154,7 @@ def parse_gen_metadata_blob(data: bytes) -> tuple[str, int, int] | None:
         model: str | None = None
         inp: int | None = None
         out: int | None = None
+        cache_read = 0
 
         for f_num, w_type, val in gen_fields:
             if f_num == 19 and w_type == 2 and isinstance(val, bytes):
@@ -168,13 +170,70 @@ def parse_gen_metadata_blob(data: bytes) -> tuple[str, int, int] | None:
                     elif uf_num == 3 and uw_type == 0 and isinstance(uval, int):
                         if uval >= 0:
                             out = uval
+                    elif uf_num == 5 and uw_type == 0 and isinstance(uval, int):
+                        if uval >= 0:
+                            cache_read = uval
+                        else:
+                            return None
 
         if not model or inp is None or out is None:
             return None
 
-        return model, inp, out
+        return model, inp, out, cache_read
     except (ValueError, UnicodeDecodeError):
         return None
+
+
+
+def _is_db_step_in_window(
+    idx: int,
+    step_timestamps: dict[int, datetime],
+    since: datetime,
+    until: datetime,
+) -> bool:
+    """Determine whether an Antigravity DB usage row (by step index `idx`) falls within [since, until].
+
+    Antigravity's gen_metadata table contains step index and protobuf payload, but no explicit
+    timestamp column. Exact idx->created_at mapping comes from transcript step logs. For DB rows
+    whose step index was compacted out of transcripts, we attribute window membership as follows:
+
+    1. Exact matching step_index timestamp when present in transcript.
+    2. If every observed transcript timestamp for the session is inside [since, until], include the row.
+       If the session is wholly before or wholly after [since, until], exclude the row.
+    3. For sessions crossing a report boundary, estimate the missing step's timestamp via linear
+       interpolation between nearest lower and higher known step indexes. If only one side is available,
+       use the nearest known step timestamp. Then apply the inclusive [since, until] window test.
+    """
+    if idx in step_timestamps:
+        return since <= step_timestamps[idx] <= until
+
+    session_tss = list(step_timestamps.values())
+    if not session_tss:
+        return False
+
+    min_ts = min(session_tss)
+    max_ts = max(session_tss)
+
+    if since <= min_ts and max_ts <= until:
+        return True
+    if max_ts < since or min_ts > until:
+        return False
+
+    lower = [(i, t) for i, t in step_timestamps.items() if i < idx]
+    higher = [(i, t) for i, t in step_timestamps.items() if i > idx]
+
+    if lower and higher:
+        idx_low, ts_low = max(lower, key=lambda x: x[0])
+        idx_high, ts_high = min(higher, key=lambda x: x[0])
+        frac = (idx - idx_low) / (idx_high - idx_low)
+        ts_posix = ts_low.timestamp() + frac * (ts_high.timestamp() - ts_low.timestamp())
+        est_ts = datetime.fromtimestamp(ts_posix, tz=timezone.utc)
+    elif lower:
+        _, est_ts = max(lower, key=lambda x: x[0])
+    else:
+        _, est_ts = min(higher, key=lambda x: x[0])
+
+    return since <= est_ts <= until
 
 
 def extract_user_request_text(text: str) -> str:
@@ -562,22 +621,21 @@ class AntigravityProvider(BaseAgentProvider):
                             if (
                                 not isinstance(idx, int)
                                 or idx in db_counted_steps
-                                or idx not in step_timestamps
                             ):
                                 continue
 
-                            ts = step_timestamps[idx]
                             parsed = parse_gen_metadata_blob(blob)
                             if parsed is None:
                                 continue
 
                             db_counted_steps.add(idx)
-                            if since <= ts <= until:
-                                model, inp, out = parsed
+                            if _is_db_step_in_window(idx, step_timestamps, since, until):
+                                model, inp, out, cache_read = parsed
                                 mu = by_model.setdefault(model, ModelUsage(model=model))
                                 mu.turns += 1
                                 mu.input_tokens += inp
                                 mu.output_tokens += out
+                                mu.cache_read += cache_read
                                 assistant_turns += 1
                 except (sqlite3.Error, OSError):
                     pass

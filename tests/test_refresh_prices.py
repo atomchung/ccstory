@@ -17,9 +17,11 @@ class TestIsAllowedModel:
             "gpt-5.6-luna",
             "gpt-5",
             "gpt-5.1-codex",
+            "gemini-3.6-flash",
+            "gemini-3-flash-preview",
         ],
     )
-    def test_allows_valid_claude_and_gpt5_models(self, model_id: str):
+    def test_allows_valid_claude_gpt5_and_gemini_models(self, model_id: str):
         assert is_allowed_model(model_id) is True
 
     @pytest.mark.parametrize(
@@ -31,6 +33,9 @@ class TestIsAllowedModel:
             "claude-3-opus@default",
             "gpt-5.6-terra:latest",
             "bedrock:claude-3",
+            "vertex_ai/gemini-3.6-flash",
+            "gemini-3.6-flash@1",
+            "gemini-3.6-flash:latest",
         ],
     )
     def test_rejects_disallowed_models_and_variants(self, model_id: str):

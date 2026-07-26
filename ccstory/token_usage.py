@@ -89,41 +89,62 @@ def _ensure_vendored_loaded() -> None:
         _vendored_initialized = True
 
 
+MODEL_ALIASES: dict[str, str] = {
+    "gemini-3-flash-a": "gemini-3-flash-preview",
+    "gemini-3-flash-agent": "gemini-3-flash-preview",
+}
+
+
 def _match_price_in_table(
     model_key: str,
     price_table: dict[str, dict[str, float]],
     provenance: dict[str, str],
 ) -> dict[str, float] | None:
-    """Resolve price using 3-tier precedence ladder:
-    1. config.toml [prices] user override (exact key, then substring)
-    2. vendored table, exact model id
-    3. DEFAULT_PRICES short-key substring (opus, sonnet, haiku, fable, mythos...)
+    """Resolve price using precedence ladder:
+    1. config.toml [prices] user override for exact model_key (or substring match for user_keys in model_key)
+    2. Explicit alias target user override if model_key is an alias (exact, then substring for target)
+    3. Active price table exact match (canonical target if alias, or model_key)
+    4. DEFAULT_PRICES short-key substring
     """
     mk = model_key.lower().strip()
     if not mk:
         return None
 
-    # Tier 1: User override in config.toml (exact key, then substring)
+    target_k = MODEL_ALIASES.get(mk)
+
+    # Tier 1: User override in config.toml for requested model_key (exact key, then substring)
     user_keys = [k for k, prov in provenance.items() if prov == "user"]
     if mk in price_table and provenance.get(mk) == "user":
         return price_table[mk]
-    user_matches = [k for k in user_keys if k in mk]
-    if user_matches:
-        best_key = max(user_matches, key=len)
+    user_matches_mk = [k for k in user_keys if k in mk]
+    if user_matches_mk:
+        best_key = max(user_matches_mk, key=len)
         return price_table[best_key]
 
-    # Tier 2: Vendored table, exact model id match
+    # Tier 2: User override for canonical target if model_key is an alias
+    if target_k:
+        if target_k in price_table and provenance.get(target_k) == "user":
+            return price_table[target_k]
+        user_matches_target = [k for k in user_keys if k in target_k]
+        if user_matches_target:
+            best_key = max(user_matches_target, key=len)
+            return price_table[best_key]
+
+    # Tier 3: Active price table exact match (canonical target if alias, or model_key)
+    if target_k and target_k in price_table:
+        return price_table[target_k]
     if mk in price_table:
         return price_table[mk]
 
-    # Tier 3: DEFAULT_PRICES short-key substring
+    # Tier 4: DEFAULT_PRICES short-key substring
     default_keys = [k for k in DEFAULT_PRICES if k in price_table]
-    default_matches = [k for k in default_keys if k in mk]
+    default_matches = [k for k in default_keys if k in mk or (target_k and k in target_k)]
     if default_matches:
         best_key = max(default_matches, key=len)
         return price_table[best_key]
 
     return None
+
 
 
 def _price_for(model: str) -> dict[str, float] | None:
