@@ -244,18 +244,27 @@ def _is_assistant_step(stype: object, source: object) -> bool:
 def _connect_readonly_db(db_path: Path) -> sqlite3.Connection:
     """Open an Antigravity SQLite database in read-only mode.
 
-    Attempts standard ``mode=ro`` first (preserving live WAL visibility on normal hosts).
-    If connection fails with sqlite3.OperationalError (e.g. read-only filesystem or
-    restricted environment where lock/WAL creation is forbidden), falls back to
-    ``mode=ro&immutable=1``.
+    Attempts standard ``mode=ro`` first (preserving live WAL visibility on normal hosts)
+    and probes it immediately with a schema query to force file/lock access.
+    If connection or probing fails with sqlite3.OperationalError (e.g. read-only filesystem
+    or restricted environment where lock/WAL creation is forbidden), closes the primary
+    connection and falls back to ``mode=ro&immutable=1``.
     """
     resolved_uri = db_path.resolve().as_uri()
     primary_uri = f"{resolved_uri}?mode=ro"
+    conn: sqlite3.Connection | None = None
     try:
-        return sqlite3.connect(primary_uri, uri=True)
+        conn = sqlite3.connect(primary_uri, uri=True)
+        conn.execute("PRAGMA schema_version;")
+        return conn
     except sqlite3.OperationalError:
+        if conn is not None:
+            with contextlib.suppress(Exception):
+                conn.close()
         fallback_uri = f"{resolved_uri}?mode=ro&immutable=1"
-        return sqlite3.connect(fallback_uri, uri=True)
+        fallback_conn = sqlite3.connect(fallback_uri, uri=True)
+        fallback_conn.execute("PRAGMA schema_version;")
+        return fallback_conn
 
 
 def extract_cwd_from_db(db_path: Path) -> str:

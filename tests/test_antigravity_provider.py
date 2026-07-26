@@ -971,7 +971,64 @@ class TestDuplicateIdxDefense:
 
 
 class TestAntigravityDBConnectionFallback:
-    def test_falls_back_to_immutable_uri_on_operational_error(
+    def test_falls_back_when_primary_probe_raises_operational_error(
+        self, tmp_path, monkeypatch
+    ):
+        from ccstory.providers.antigravity import _connect_readonly_db
+
+        db_path = tmp_path / "lazy_restricted.db"
+        conn_real = sqlite3.connect(db_path)
+        conn_real.execute("CREATE TABLE test (id INT);")
+        conn_real.commit()
+        conn_real.close()
+
+        real_connect = sqlite3.connect
+        connect_calls: list[str] = []
+        primary_closed = False
+
+        class PrimaryProbeFailingConnection:
+            def __init__(self, real_conn):
+                self._real = real_conn
+
+            def execute(self, sql, *args, **kwargs):
+                if "schema_version" in sql:
+                    raise sqlite3.OperationalError("unable to open database file")
+                return self._real.execute(sql, *args, **kwargs)
+
+            def cursor(self):
+                return self._real.cursor()
+
+            def close(self):
+                nonlocal primary_closed
+                primary_closed = True
+                return self._real.close()
+
+        def custom_connect(database, *args, **kwargs):
+            db_str = str(database)
+            connect_calls.append(db_str)
+            conn = real_connect(database, *args, **kwargs)
+            if "immutable=1" not in db_str:
+                return PrimaryProbeFailingConnection(conn)
+            return conn
+
+        monkeypatch.setattr(
+            "ccstory.providers.antigravity.sqlite3.connect",
+            custom_connect,
+        )
+
+        with contextlib.closing(_connect_readonly_db(db_path)) as conn:
+            c = conn.cursor()
+            rows = c.execute("SELECT name FROM sqlite_master;").fetchall()
+            assert ("test",) in rows
+
+        assert primary_closed is True
+        assert len(connect_calls) == 2
+        assert "mode=ro" in connect_calls[0]
+        assert "immutable=1" not in connect_calls[0]
+        assert "mode=ro" in connect_calls[1]
+        assert "immutable=1" in connect_calls[1]
+
+    def test_falls_back_to_immutable_uri_on_connect_operational_error(
         self, tmp_path, monkeypatch
     ):
         from ccstory.providers.antigravity import _connect_readonly_db
