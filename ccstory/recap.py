@@ -42,9 +42,9 @@ from .providers import agent_label, provider_data_roots
 from .report import build_report_json, render_report
 from .session_summarizer import (
     CCSTORY_LANG_ENV,
+    NarrativeBudget,
     _classify_cache_get_many,
     _needs_llm,
-    SUMMARY_BATCH_SIZE,
     backfill_for_sessions,
     llm_available,
     classify_sessions_by_content,
@@ -76,13 +76,6 @@ from .trends import PeriodComparison, compare_to_previous, previous_window
 
 REPORTS_DIR = Path.home() / ".ccstory" / "reports"
 CONFIG_PATH = Path.home() / ".ccstory" / "config.toml"
-
-# A new batch produces forty cache rows almost simultaneously, so the old
-# per-row timestamp-gap heuristic cannot infer narrator latency any more.
-# Keep the first-run estimate explicit until batch timings gain their own
-# persisted measurement lane.
-SUMMARY_BATCH_SEC_FALLBACK = 20
-
 
 class RecapUnavailable(RuntimeError):
     """No Claude Code data on this machine, or no sessions in the window.
@@ -214,6 +207,7 @@ def _synthesize_overall(
     rollups: list,
     summaries: dict,
     console: Console,
+    budget: NarrativeBudget | None = None,
 ) -> str | None:
     """Synthesize the overall goal-thread narrative for the period.
 
@@ -241,6 +235,7 @@ def _synthesize_overall(
             period_key=label,
             category_hours=category_hours,
             sessions_by_category=sessions_by_cat,
+            budget=budget,
         )
 
 
@@ -250,6 +245,7 @@ def _synthesize_categories(
     rollups: list,
     summaries: dict,
     console: Console,
+    budget: NarrativeBudget | None = None,
 ) -> dict[str, str]:
     """One 2-3 line narrative per bucket (#57), rollup order.
 
@@ -278,6 +274,7 @@ def _synthesize_categories(
                 category=cat,
                 session_ids=[sid for sid, _ in items],
                 summaries=[text for _, text in items],
+                budget=budget,
             )
         if narrative:
             out[cat] = narrative
@@ -290,6 +287,7 @@ def _resolve_all_sessions(
     mode: str,
     fallback: str,
     console: Console,
+    budget: NarrativeBudget | None = None,
 ) -> None:
     """Resolve every session's bucket via the unified resolver, batching LLM
     for cache misses. Mutates ``sessions[*].category`` and ``.category_source``.
@@ -347,7 +345,7 @@ def _resolve_all_sessions(
                             f" ({done}/{total} batches)…[/dim]"
                         )
                 mapping = classify_sessions_by_content(
-                    items, on_chunk_complete=_tick,
+                    items, on_chunk_complete=_tick, budget=budget,
                 )
 
         for s in needs_llm:
@@ -376,6 +374,7 @@ def _backfill_summaries(
     console: Console,
     use_llm: bool = False,
     force: bool = False,
+    budget: NarrativeBudget | None = None,
 ) -> dict[str, int]:
     """Resolve narratives for sessions in this window.
 
@@ -383,8 +382,8 @@ def _backfill_summaries(
     sessions. Pass `use_llm=True` to opt into the configured narrator: it upgrades
     `fallback` rows to `auto` and regenerates stale `auto` rows (older
     prompt_version) — or, with `force=True`, every in-window `auto`. The
-    user gets an ETA warning, split into new vs regenerated, before the
-    batch starts.
+    user sees the shared time budget, split into new vs regenerated, before
+    the adaptive batch sequence starts.
     """
     by_id = {s.session_id: s for s in sessions if getattr(s, "session_id", None)}
     ids = list(by_id.keys())
@@ -400,19 +399,15 @@ def _backfill_summaries(
         }
 
     if use_llm:
-        batch_count = (len(todo) + SUMMARY_BATCH_SIZE - 1) // SUMMARY_BATCH_SIZE
-        eta_min = max(1, int((batch_count * SUMMARY_BATCH_SEC_FALLBACK + 59) // 60))
         regen = sum(1 for sid in todo if existing.get(sid) is not None)
         breakdown = f"{len(todo) - regen} new"
         if regen:
             breakdown += f" + {regen} regenerated"
         console.print(
             f"[yellow]![/yellow] {len(todo)} session(s) to summarize "
-            f"({breakdown}) in {batch_count} batch(es). "
-            f"[bold]Narrator ETA ~{eta_min} min[/bold] "
-            f"(~{SUMMARY_BATCH_SEC_FALLBACK}s/batch, first-run estimate). "
-            f"Press Ctrl+C to abort, or rerun without --llm-narrative "
-            f"for an instant first/last-message fallback.\n"
+            f"({breakdown}). Starts with a 10-session probe; LLM work has a "
+            f"[bold]90s total budget[/bold] and 45s per-call deadline. "
+            "Unfinished sessions use local fallback.\n"
         )
         progress_desc = "Summarizing sessions via configured narrator"
     else:
@@ -440,6 +435,7 @@ def _backfill_summaries(
 
         return backfill_for_sessions(
             sessions, on_progress=_progress, use_llm=use_llm, force=force,
+            budget=budget,
             on_chunk_complete=_chunk_progress if use_llm else None,
         )
 
@@ -480,7 +476,7 @@ def build_recap(
       window            week | month | all | YYYY-MM   (positional arg)
       minimal           --minimal        skip the narrative pipeline entirely
       llm_narrative     --llm-narrative  polish per-session summaries via the
-                                         configured local narrator (slow, ETA warning)
+                                         configured local narrator (90s shared budget)
       narrative         --narrative      overall | per-category | both
       aggregate         --no-aggregate   False skips the overall synthesis
       compare           --no-compare     False skips the vs-previous block
@@ -615,6 +611,7 @@ def build_recap(
 
     summaries: dict = {}
     counts: dict[str, int] = {}
+    narrative_budget = NarrativeBudget() if not minimal else None
     overall_narrative: str | None = None
     if not minimal:
         imported = import_from_claude_recap()
@@ -632,6 +629,7 @@ def build_recap(
         counts = _backfill_summaries(
             sessions, console, use_llm=llm_narrative,
             force=(refresh or refresh_all),
+            budget=narrative_budget,
         )
         regen = counts.get("regenerated", 0)
         regen_note = f" · regenerated={regen}" if regen else ""
@@ -657,6 +655,7 @@ def build_recap(
     fallback_bucket = settings.get("default_bucket", "coding")
     _resolve_all_sessions(
         sessions, summaries, classify, fallback_bucket, console,
+        budget=narrative_budget,
     )
     # aliases feed the layer-2 (area → project) rollup (#69); layer-1 area
     # totals are independent of it.
@@ -673,6 +672,7 @@ def build_recap(
         if aggregate and summaries and narrative in ("overall", "both"):
             overall_narrative = _synthesize_overall(
                 label, sessions, rollups, summaries, console,
+                budget=narrative_budget,
             )
             if overall_narrative:
                 narrative_provenance["overall"] = get_period_narrative_provenance(label)
@@ -683,6 +683,7 @@ def build_recap(
         if summaries and narrative in ("per-category", "both"):
             category_narratives = _synthesize_categories(
                 label, sessions, rollups, summaries, console,
+                budget=narrative_budget,
             )
             if category_narratives:
                 narrative_provenance["categories"] = {
@@ -732,11 +733,27 @@ def build_recap(
                         (d.category, d.current_min, d.previous_min)
                         for d in comparison.deltas
                     ],
+                    budget=narrative_budget,
                 )
                 if comparison.narrative:
                     narrative_provenance["comparison"] = get_comparison_narrative_provenance(
                         label, comparison.previous_label,
                     )
+
+    if narrative_budget is not None:
+        narrative_provenance["budget"] = narrative_budget.status()
+        if narrative_budget.stopped_reason == "budget_exhausted":
+            console.print(
+                "[yellow]![/yellow] [dim]LLM analysis partial: "
+                f"stopped at {narrative_budget.total_sec:.0f}s budget; "
+                "remaining session work used local fallback and later prose was skipped[/dim]\n"
+            )
+        elif narrative_budget.timed_out_calls:
+            console.print(
+                "[yellow]![/yellow] [dim]LLM analysis partial: one or more "
+                "calls reached the 45s deadline; affected session work used "
+                "local fallback[/dim]\n"
+            )
 
     artifacts_report = None
     if artifacts:

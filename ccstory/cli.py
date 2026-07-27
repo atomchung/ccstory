@@ -8,7 +8,7 @@
 
 Flags:
     --llm-narrative    Polish per-session narratives via configured local narrator
-                       (slow, opt-in; shows ETA before batch). Re-run on a
+                       (slow, opt-in; shared 90s LLM budget). Re-run on a
                        past window to upgrade cached fallbacks / stale auto
                        summaries; add --refresh to force-regenerate all.
     --minimal          Skip per-session narrative entirely (fastest)
@@ -498,7 +498,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
             "  ccstory week                  # last 7 days, instant fallback\n"
             "                                # narratives + overall synthesis\n"
             "  ccstory week --llm-narrative  # polish per-session via configured narrator\n"
-            "                                # (slow; shows ETA before batch)\n"
+            "                                # (shared 90s LLM budget)\n"
             "  ccstory week --no-aggregate   # skip overall synthesis\n"
             "  ccstory week --refresh        # re-classify cached sessions in window\n"
             "  ccstory 2026-04               # specific month\n"
@@ -518,8 +518,8 @@ def _dispatch(argv: list[str] | None = None) -> int:
                         help=argparse.SUPPRESS)  # deprecated alias for --minimal
     parser.add_argument("--llm-narrative", action="store_true",
                         help="Polish per-session narratives via configured local narrator "
-                             "(batched up to 40 sessions/call; shows ETA "
-                             "before batch). Default is an instant "
+                             "(10-session probe, then up to 40 sessions/call; "
+                             "shared 90s LLM budget). Default is an instant "
                              "first/last-message fallback. Re-run on a past "
                              "window to upgrade those fallbacks to polished "
                              "summaries; already-polished sessions are reused "

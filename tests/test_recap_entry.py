@@ -109,6 +109,15 @@ class TestBuildRecap:
         assert len(payload["sessions"]) == 1
         # The envelope carries the report location for downstream tooling.
         assert payload["report_path"] == str(result.report_path)
+        assert payload["narrative"]["provenance"]["budget"] == {
+            "total_sec": 90.0,
+            "spent_sec": 0.0,
+            "remaining_sec": 90.0,
+            "completed_calls": 0,
+            "timed_out_calls": 0,
+            "stopped_reason": None,
+            "partial": False,
+        }
 
     def test_write_report_false_skips_file(self, tmp_home, jsonl_factory):
         _seed_session(jsonl_factory)

@@ -10,6 +10,7 @@ the wasted first attempt every time.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -77,6 +78,22 @@ class TestRunClaudeP:
         assert len(flaky.calls) == 2
         assert "--no-session-persistence" in flaky.calls[0]
         assert "--no-session-persistence" not in flaky.calls[1]
+
+    def test_deadline_prevents_silent_empty_retry_from_getting_full_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        flaky = _FakeRun(responses=[(0, ""), (0, "a real answer")])
+        # First attempt starts with 45 seconds remaining; it returns empty at
+        # the deadline, so the compatibility retry must not start at all.
+        clock = iter([10.0, 55.0])
+        monkeypatch.setattr(ss.time, "monotonic", lambda: next(clock))
+        monkeypatch.setattr(ss.subprocess, "run", flaky)
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            run_claude_p("prompt", timeout=45, deadline=55)
+
+        assert len(flaky.calls) == 1
+        assert "--no-session-persistence" in flaky.calls[0]
 
     def test_does_not_retry_on_real_failure(self, monkeypatch: pytest.MonkeyPatch):
         fail = _FakeRun(stdout="", returncode=1)

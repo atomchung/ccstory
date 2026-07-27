@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Every recap LLM lane now shares a 90-second wall-clock budget with a
+  45-second per-call deadline. Per-session narration begins with a 10-session
+  probe and adapts later batches between 10 and 40 sessions; completed rows
+  remain available while budget-exhausted work falls back locally.
 - A normal recap now takes one in-memory transcript snapshot spanning the
   current and previous comparison windows, rather than reparsing overlapping
   session files twice. The snapshot is per invocation (not an mtime cache),
