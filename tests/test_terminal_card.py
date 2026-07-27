@@ -18,7 +18,12 @@ from pathlib import Path
 from rich.console import Console
 
 from ccstory.artifacts import ArtifactsReport, RepoArtifacts
-from ccstory.report import _narrative_headers, render_terminal_card
+from ccstory.report import (
+    _narrative_headers,
+    _top_focus_terminal_detail_lines,
+    render_terminal_card,
+)
+from ccstory.session_summarizer import SessionSummary
 from ccstory.time_tracking import CategoryRollup, ProjectRollup, SessionStat
 from ccstory.token_usage import ModelUsage, UsageReport
 
@@ -268,6 +273,67 @@ class TestWhatYouDidCard:
 
 
 class TestCardWrapping:
+    def test_top_focus_detail_wraps_at_readable_boundaries_and_caps_at_two_lines(self):
+        detail = (
+            "kol-collector-fomo-kernel · 理解跨 session 開發測試環境不一致，"
+            "完成可重現的驗收流程與回歸測試。 · 後續還要掃描公開 issue、"
+            "整理效能改善與合併紀錄 TOP_FOCUS_THIRD_LINE"
+        )
+
+        lines = _top_focus_terminal_detail_lines(detail)
+
+        assert len(lines) == 2
+        assert "kol-collector-fomo-kernel" in lines[0].plain
+        assert "TOP_FOCUS_THIRD_LINE" not in "".join(line.plain for line in lines)
+        assert lines[-1].plain.endswith("…")
+
+    def test_top_focus_detail_uses_hanging_indent_in_card(self):
+        top_session = SessionStat(
+            project="kol-collector-fomo-kernel",
+            category="輸出",
+            session_id="wrapped-focus",
+            start=SINCE,
+            end=UNTIL,
+            active_sec=3600,
+            msg_count=2,
+        )
+        rollup = CategoryRollup(
+            category="輸出",
+            active_min=60.0,
+            sessions=1,
+            messages=2,
+            top_sessions=[top_session],
+            projects=[ProjectRollup("kol-collector-fomo-kernel", 60.0, 1, 2)],
+        )
+        summary = SessionSummary(
+            session_id="wrapped-focus",
+            source="auto",
+            summary=(
+                "理解跨 session 開發測試環境不一致，完成可重現的驗收流程與回歸"
+                "測試，並整理公開 issue 的效能改善路徑 TOP_FOCUS_CARD_END"
+            ),
+        )
+        console = Console(width=72, record=True)
+        console.print(render_terminal_card(
+            since=SINCE,
+            until=UNTIL,
+            sessions=[top_session],
+            rollups=[rollup],
+            summaries={top_session.session_id: summary},
+            usage=_usage(),
+        ))
+
+        lines = console.export_text().splitlines()
+        detail_start = next(i for i, line in enumerate(lines) if "↳" in line)
+        metrics_start = next(i for i, line in enumerate(lines) if "Active" in line)
+        detail_lines = [
+            line for line in lines[detail_start:metrics_start]
+            if line.strip("│ ")
+        ]
+        assert len(detail_lines) == 2
+        assert detail_lines[1].index("開") > detail_lines[0].index("↳")
+        assert "TOP_FOCUS_CARD_END" not in "".join(detail_lines)
+
     def test_highlight_omits_raw_prompt_fallback_while_project_and_narrative_wrap(self):
         top_session = SessionStat(
             project="demo",
