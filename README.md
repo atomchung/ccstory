@@ -429,9 +429,11 @@ use zero local-narrator calls.
 Deep/content classification and per-session `--llm-narrative` work are batched.
 The latter sends up to 40 bounded excerpts in one strict JSONL request, validates
 every returned session id, and falls back only entries the model omitted. The CLI
-still estimates work from prior runs, but first-run speed now scales with batches
-rather than one subprocess per session. Aggregate call latency varies with the
-selected CLI startup and input size. A same-window rerun is usually cache-only, but new sessions,
+currently shows a conservative fixed first-run estimate of roughly 20 seconds
+per summary batch. It does not yet learn timing from prior runs: a batch writes
+many cache rows together, so the old per-session timestamp heuristic is no
+longer valid. Aggregate call latency varies with the selected CLI startup and
+input size. A same-window rerun is usually cache-only, but new sessions,
 changed inputs/config, `--refresh`, or a newer prompt version can trigger fresh
 calls. Content classification carries accepted bucket names into later
 80-session batches and enforces one run-wide vocabulary cap, preventing a
