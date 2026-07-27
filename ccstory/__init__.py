@@ -3,6 +3,11 @@
 Companion to ccusage: ccusage tells you the bill, ccstory tells you the story.
 """
 
-from .version import resolve_version
+def __getattr__(name: str):
+    if name == "__version__":
+        from .version import resolve_version
 
-__version__ = resolve_version()
+        version_val = resolve_version()
+        globals()["__version__"] = version_val
+        return version_val
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -717,6 +717,28 @@ class TestCacheSchemaMigrations:
         monkeypatch.setattr(ss, "_MIGRATIONS", (_boom, _boom))
         assert get("kept").summary == "preserved summary"
 
+    def test_unchanged_cache_verifies_schema_once_per_process(
+        self, tmp_home: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        original = ss._run_migrations
+        calls = 0
+
+        def tracking_migrations(conn: sqlite3.Connection) -> None:
+            nonlocal calls
+            calls += 1
+            original(conn)
+
+        ss._verified_db_stamps.clear()
+        monkeypatch.setattr(ss, "_run_migrations", tracking_migrations)
+        try:
+            first = ss._connect()
+            first.close()
+            second = ss._connect()
+            second.close()
+            assert calls == 1
+        finally:
+            ss._verified_db_stamps.clear()
+
     def test_each_migration_is_transactional(
         self, tmp_home: Path, monkeypatch: pytest.MonkeyPatch,
     ):

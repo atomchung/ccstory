@@ -731,15 +731,24 @@ def _corrupt_cache_message(e: Exception) -> str:
     )
 
 
+_verified_db_stamps: set[tuple[Path, int, int]] = set()
+
+
 def _connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn: sqlite3.Connection | None = None
     try:
         conn = sqlite3.connect(str(DB_PATH))
-        # PRAGMA schema_version forces SQLite to parse the file early, so a
-        # corrupt cache gets the existing actionable recovery hint.
-        conn.execute("PRAGMA schema_version").fetchone()
-        _run_migrations(conn)
+        stat = DB_PATH.stat()
+        stamp = (DB_PATH, stat.st_mtime_ns, stat.st_size)
+        if stamp not in _verified_db_stamps:
+            # PRAGMA schema_version forces SQLite to parse the file early, so a
+            # corrupt cache gets the existing actionable recovery hint.
+            conn.execute("PRAGMA schema_version").fetchone()
+            _run_migrations(conn)
+            stat = DB_PATH.stat()
+            _verified_db_stamps.add((DB_PATH, stat.st_mtime_ns, stat.st_size))
+        return conn
     except _CacheSchemaTooNew as e:
         if conn is not None:
             conn.close()

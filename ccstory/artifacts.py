@@ -24,8 +24,6 @@ import shutil
 import sqlite3
 import subprocess
 import tomllib
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -422,6 +420,9 @@ def pypi_downloads(package: str, window: str) -> PyPIDownloads | None:
 
     One retry on transient failures per the house rule for network calls.
     """
+    import urllib.error
+    import urllib.request
+
     url = f"https://pypistats.org/api/packages/{package}/recent"
     for attempt in (1, 2):
         try:
