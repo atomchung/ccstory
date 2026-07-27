@@ -363,12 +363,27 @@ def _top_focus_detail(focus: TopFocusNarrative) -> str | None:
 
 
 def _top_focus_terminal_text(focus: TopFocusNarrative) -> str | None:
-    """Compact terminal projection of the same category/project narrative."""
-    parts: list[str] = []
-    if focus.project:
-        parts.append(focus.project)
-    parts.extend(focus.strongest_session_summaries)
-    return " · ".join(parts) or None
+    """One compact ``subject: outcome`` line for the terminal card.
+
+    The full report and JSON retain project metadata and two strongest
+    summaries.  The screenshot-sized terminal card instead needs one clear
+    subject and one outcome, not a long project path plus multiple excerpts.
+    """
+    summary = next(iter(focus.strongest_session_summaries), "")
+    # The first clause names the concrete thing being solved. Later clauses
+    # are implementation detail for the full report and make the terminal
+    # card read like a wrapped paragraph again.
+    if summary:
+        summary = re.split(r"[，、；;。！？!?]", summary, maxsplit=1)[0].strip()
+    if not focus.project:
+        return summary or None
+    # Project rollups are already normalized, but workspace prefixes can still
+    # make them too long for the card (e.g. kol-collector-fomo-kernel).  The
+    # final two hyphenated components preserve the useful subject in the
+    # common collection/workspace naming convention: fomo-kernel.
+    parts = [part for part in focus.project.split("-") if part]
+    label = "-".join(parts[-2:]) if len(parts) > 2 else focus.project
+    return f"{label}: {summary}" if summary else label
 
 
 _TOP_FOCUS_DETAIL_WIDTH = 62
