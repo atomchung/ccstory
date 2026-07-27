@@ -995,6 +995,62 @@ SUMMARY_PROBE_BATCH_SIZE = 10
 SUMMARY_MIN_BATCH_SIZE = 10
 SUMMARY_BATCH_SLOW_SEC = 30
 _SUMMARY_BATCH_EXCERPT_CHARS = 700
+
+
+def _compact_batch_excerpt(excerpt: str, max_chars: int = _SUMMARY_BATCH_EXCERPT_CHARS) -> str:
+    """Keep the semantic endpoints of a provider-formatted excerpt.
+
+    Providers deliberately put the latest assistant response at the end of
+    the excerpt.  A raw ``excerpt[:max_chars]`` therefore drops the outcome
+    from long sessions and leaves the narrator with only the opening request.
+    Keep the first user request, the latest user request, and the final
+    assistant response within the batch budget.  The head/tail trim for each
+    block preserves both intent and likely outcome evidence without changing
+    the provider excerpt contract.
+    """
+    if max_chars <= 0 or not excerpt:
+        return ""
+
+    marker = re.compile(r"(?m)^\[(USER \d+|USER LATE|ASSISTANT END)\]\n?")
+    matches = list(marker.finditer(excerpt))
+    if not matches:
+        return excerpt[:max_chars]
+
+    blocks: list[tuple[str, str]] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(excerpt)
+        text = " ".join(excerpt[match.end():end].split()).strip()
+        if text:
+            blocks.append((match.group(1), text))
+
+    user_blocks = [(label, text) for label, text in blocks if label.startswith("USER")]
+    assistant_blocks = [(label, text) for label, text in blocks if label == "ASSISTANT END"]
+    selected: list[tuple[str, str, int]] = []
+    if user_blocks:
+        selected.append((*user_blocks[0], 180))
+        if len(user_blocks) > 1:
+            selected.append((*user_blocks[-1], 160))
+    if assistant_blocks:
+        selected.append((*assistant_blocks[-1], 280))
+    if not selected:
+        return excerpt[:max_chars]
+
+    def trim(text: str, budget: int) -> str:
+        if len(text) <= budget:
+            return text
+        if budget <= 3:
+            return text[:budget]
+        head = max(1, (budget - 1) // 2)
+        tail = budget - head - 1
+        return f"{text[:head]}…{text[-tail:]}"
+
+    rendered = [f"[{label}]\n{trim(text, budget)}" for label, text, budget in selected]
+    compacted = "\n\n".join(rendered)
+    # Marker overhead is small and fixed, but keep the public limit exact if
+    # a future label or separator changes its size.
+    return compacted[:max_chars]
+
+
 _SUMMARY_BATCH_PROMPT = """{language_directive}
 
 Below are excerpts from several AI coding-agent conversations. For EACH input
@@ -1322,7 +1378,8 @@ def summarize_sessions_via_llm_batch(
         chunk_index += 1
         chunk = items[start:start + current_batch_size]
         rows = "\n\n".join(
-            f"[session_id={session_id}; project={project}]\n{excerpt[:_SUMMARY_BATCH_EXCERPT_CHARS]}"
+            f"[session_id={session_id}; project={project}]\n"
+            f"{_compact_batch_excerpt(excerpt)}"
             for session_id, project, excerpt in chunk
         )
         prompt = _SUMMARY_BATCH_PROMPT.format(
@@ -2442,3 +2499,4 @@ def backfill_for_sessions(
         "already": len(ids) - len(todo),
         "regenerated": regenerated,
     }
+
