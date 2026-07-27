@@ -17,6 +17,7 @@ import importlib.resources
 import json
 import logging
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -449,38 +450,71 @@ def collect_usage(
     dormant registered providers do not create false incomplete-coverage
     warnings.
     """
+    return collect_usage_for_windows(
+        {"window": (since, until)},
+        agent=agent,
+        active_agents_by_window={"window": active_agents},
+    )["window"]
+
+
+def collect_usage_for_windows(
+    windows: Mapping[str, tuple[datetime, datetime | None]],
+    agent: str = "all",
+    active_agents_by_window: Mapping[str, set[str] | None] | None = None,
+) -> dict[str, UsageReport]:
+    """Aggregate several windows from one scan per bundled provider.
+
+    Adjacent comparison windows deliberately retain the existing inclusive
+    boundary rule (an event exactly at the boundary belongs to both), while
+    avoiding a second full JSONL parse for every provider.
+    """
     from .providers import create_providers, provider_specs
 
-    if since.tzinfo is None:
-        since = since.replace(tzinfo=timezone.utc)
-    else:
-        since = since.astimezone(timezone.utc)
-    if until is None:
-        until = datetime.now(timezone.utc)
-    elif until.tzinfo is None:
-        until = until.replace(tzinfo=timezone.utc)
-    else:
-        until = until.astimezone(timezone.utc)
+    if not windows:
+        return {}
+
+    normalized: dict[str, tuple[datetime, datetime]] = {}
+    for key, (since, until) in windows.items():
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+        else:
+            since = since.astimezone(timezone.utc)
+        if until is None:
+            until = datetime.now(timezone.utc)
+        elif until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        else:
+            until = until.astimezone(timezone.utc)
+        normalized[key] = (since, until)
 
     specs = provider_specs(agent)
-    by_model: dict[str, ModelUsage] = {}
-    assistant_turns = 0
-
+    by_model_by_window: dict[str, dict[str, ModelUsage]] = {
+        key: {} for key in normalized
+    }
+    turns_by_window = {key: 0 for key in normalized}
     for provider in create_providers(agent):
-        assistant_turns += provider.collect_usage(since, until, by_model)
+        provider_turns = provider.collect_usage_for_windows(
+            normalized, by_model_by_window,
+        )
+        for key, turns in provider_turns.items():
+            turns_by_window[key] += turns
 
-    return UsageReport(
-        since=since,
-        until=until,
-        by_model=by_model,
-        assistant_turns=assistant_turns,
-        provider_coverage={
-            spec.name: spec.usage_coverage
-            for spec in specs
-            if active_agents is None or spec.name in active_agents
-        },
-    )
-
+    return {
+        key: UsageReport(
+            since=since,
+            until=until,
+            by_model=by_model_by_window[key],
+            assistant_turns=turns_by_window[key],
+            provider_coverage={
+                spec.name: spec.usage_coverage
+                for spec in specs
+                if active_agents_by_window is None
+                or active_agents_by_window.get(key) is None
+                or spec.name in active_agents_by_window[key]
+            },
+        )
+        for key, (since, until) in normalized.items()
+    }
 
 def fmt_tokens(n: int) -> str:
     if n >= 1_000_000_000:

@@ -19,6 +19,7 @@ from __future__ import annotations
 import glob
 import json
 import re
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -274,6 +275,15 @@ class CodexProvider(BaseAgentProvider):
         until: datetime,
         by_model: dict,
     ) -> int:
+        return self.collect_usage_for_windows(
+            {"window": (since, until)}, {"window": by_model},
+        )["window"]
+
+    def collect_usage_for_windows(
+        self,
+        windows: Mapping[str, tuple[datetime, datetime]],
+        by_model_by_window: Mapping[str, dict],
+    ) -> dict[str, int]:
         """Scan all Codex jsonl files and aggregate token usage in [since, until].
 
         Each rollout id is a cumulative counter branch. Spawned subagents have
@@ -291,7 +301,7 @@ class CodexProvider(BaseAgentProvider):
         """
         from ..token_usage import ModelUsage
 
-        assistant_turns = 0
+        assistant_turns = {key: 0 for key in windows}
         fields = (
             "input_tokens",
             "cached_input_tokens",
@@ -472,11 +482,10 @@ class CodexProvider(BaseAgentProvider):
                     continue
 
                 # The snapshot timestamp owns the increment since the previous
-                # cumulative snapshot. Keeping the baseline even when it is
-                # before ``since`` is what excludes pre-window usage; continuing
-                # through snapshots after ``until`` does not erase increments
-                # that already landed inside the window.
-                if ts < since or ts > until or not any(delta.values()):
+                # cumulative snapshot. Keeping every baseline is what excludes
+                # pre-window usage when this one scan attributes deltas to
+                # several adjacent windows.
+                if not any(delta.values()):
                     continue
 
                 inp = delta["input_tokens"]
@@ -486,13 +495,18 @@ class CodexProvider(BaseAgentProvider):
 
                 uncached_inp = max(0, inp - cached_inp)
 
-                mu = by_model.setdefault(model, ModelUsage(model=model))
-                mu.turns += 1
-                mu.input_tokens += uncached_inp
-                mu.cache_read += cached_inp
-                mu.cache_creation += cw
-                mu.output_tokens += out
-                assistant_turns += 1
+                for key, (since, until) in windows.items():
+                    if ts < since or ts > until:
+                        continue
+                    mu = by_model_by_window[key].setdefault(
+                        model, ModelUsage(model=model),
+                    )
+                    mu.turns += 1
+                    mu.input_tokens += uncached_inp
+                    mu.cache_read += cached_inp
+                    mu.cache_creation += cw
+                    mu.output_tokens += out
+                    assistant_turns[key] += 1
 
         return assistant_turns
 

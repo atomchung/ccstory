@@ -24,7 +24,7 @@ from ccstory.trends import (
     collect_trend,
     compare_to_previous,
 )
-from ccstory.token_usage import UsageReport, collect_usage
+from ccstory.token_usage import UsageReport, collect_usage, collect_usage_for_windows
 
 
 def _stat(
@@ -73,6 +73,39 @@ class TestCrossWindowResolverSymmetry:
         assert by_id["sess-writing"].category == "writing"
         assert by_id["sess-writing"].category_source == "llm_cache"
         assert by_id["sess-research"].category == "research"
+
+    def test_precollected_previous_window_skips_second_session_scan(
+        self, monkeypatch, tmp_home: Path,
+    ):
+        import ccstory.time_tracking as tracking
+        import ccstory.trends as trends
+
+        since = datetime(2026, 5, 17, tzinfo=timezone.utc)
+        until = since + timedelta(days=7)
+        previous = [_stat("previous", "project", since - timedelta(days=1))]
+        current = [_stat("current", "project", since + timedelta(days=1))]
+        monkeypatch.setattr(
+            tracking, "collect_sessions",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("rescanned")),
+        )
+        monkeypatch.setattr(
+            trends, "collect_usage",
+            lambda start, end, **_kwargs: UsageReport(since=start, until=end),
+        )
+
+        comparison = compare_to_previous(
+            current_sessions=current,
+            current_rollups=rollup_by_category(current),
+            current_usage=UsageReport(since=since, until=until),
+            current_label="current",
+            since=since,
+            until=until,
+            mode="folder",
+            previous_sessions=previous,
+        )
+
+        assert comparison is not None
+        assert comparison.previous_session_ids == ["previous"]
 
     def test_cache_miss_falls_to_fallback_not_needs_llm(self, tmp_home: Path):
         # Critical for `compare_to_previous`: it MUST NOT fire fresh LLM
@@ -197,6 +230,18 @@ class TestCodexUsageWindowSymmetry:
         sessions = collect_sessions(since, now, agent="codex")
         _resolve_sessions_from_cache(sessions, mode="folder", fallback="coding")
         current_usage = collect_usage(since, now, agent="codex")
+        previous_usage = collect_usage(
+            since - timedelta(days=7), since, agent="codex",
+        )
+        both_usage = collect_usage_for_windows(
+            {
+                "current": (since, now),
+                "previous": (since - timedelta(days=7), since),
+            },
+            agent="codex",
+        )
+        assert both_usage["current"].total_output == current_usage.total_output
+        assert both_usage["previous"].total_output == previous_usage.total_output
         comparison = compare_to_previous(
             current_sessions=sessions,
             current_rollups=rollup_by_category(sessions),
@@ -207,6 +252,7 @@ class TestCodexUsageWindowSymmetry:
             mode="folder",
             fallback="coding",
             agent="codex",
+            previous_usage=both_usage["previous"],
         )
         assert comparison is not None
         assert comparison.current_output_tokens == 40

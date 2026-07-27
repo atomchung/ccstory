@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePath
@@ -136,6 +137,43 @@ def collect_sessions(
     return collect_multi_agent_sessions(
         since, until, engaged_only=engaged_only, agent=agent
     )
+
+
+def collect_sessions_for_windows(
+    windows: Mapping[str, tuple[datetime, datetime]],
+    engaged_only: bool = True,
+    agent: str = "all",
+) -> dict[str, list[SessionStat]]:
+    """Collect several bounded windows with one provider scan.
+
+    A normal recap needs both its current window and the immediately preceding
+    one for comparison. Calling :func:`collect_sessions` twice means every
+    provider re-enumerates and reparses much of the same immutable transcript
+    set. Scan their enclosing range once, then apply the exact overlap rule
+    that each individual collection uses. Sessions crossing a boundary stay
+    in both windows, preserving the existing comparison semantics.
+
+    This is intentionally an in-memory, invocation-local snapshot. It never
+    treats an mtime as a durable truth for token/session data, which is
+    especially important for resumed Codex rollout files.
+    """
+    if not windows:
+        return {}
+
+    earliest = min(since for since, _until in windows.values())
+    latest = max(until for _since, until in windows.values())
+    scanned = collect_sessions(
+        earliest, latest, engaged_only=engaged_only, agent=agent,
+    )
+
+    by_window: dict[str, list[SessionStat]] = {}
+    for key, (since, until) in windows.items():
+        by_window[key] = [
+            session
+            for session in scanned
+            if session.end >= since and session.start < until
+        ]
+    return by_window
 
 
 def _is_subagent_path(path: PurePath) -> bool:

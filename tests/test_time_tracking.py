@@ -6,6 +6,7 @@ schema drifts, these tests fail loudly instead of silently dropping data.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
@@ -14,6 +15,7 @@ from ccstory.time_tracking import (
     GAP_CAP_SEC,
     SessionStat,
     _is_subagent_path,
+    collect_sessions_for_windows,
     parse_session,
     rollup_by_category,
     wall_clock_active_sec,
@@ -42,6 +44,51 @@ class TestSubagentPathDetection:
     )
     def test_does_not_match_partial_component(self, path):
         assert _is_subagent_path(path) is False
+
+
+class TestWindowedSessionSnapshot:
+    def test_scans_once_and_preserves_boundary_overlap(self, monkeypatch):
+        import ccstory.time_tracking as tracking
+
+        boundary = datetime(2026, 7, 20, tzinfo=timezone.utc)
+        previous_start = boundary - timedelta(days=7)
+        current_end = boundary + timedelta(days=7)
+        spanning = SessionStat(
+            project="p", category="", session_id="spanning",
+            start=boundary - timedelta(minutes=1),
+            end=boundary + timedelta(minutes=1), active_sec=60,
+            msg_count=2, user_msg_count=1,
+        )
+        previous_only = SessionStat(
+            project="p", category="", session_id="previous",
+            start=previous_start + timedelta(minutes=1),
+            end=previous_start + timedelta(minutes=2), active_sec=60,
+            msg_count=2, user_msg_count=1,
+        )
+        current_only = SessionStat(
+            project="p", category="", session_id="current",
+            start=boundary + timedelta(minutes=1),
+            end=boundary + timedelta(minutes=2), active_sec=60,
+            msg_count=2, user_msg_count=1,
+        )
+        calls: list[tuple[datetime, datetime, str]] = []
+
+        def fake_collect(since, until=None, engaged_only=True, agent="all"):
+            calls.append((since, until, agent))
+            return [previous_only, spanning, current_only]
+
+        monkeypatch.setattr(tracking, "collect_sessions", fake_collect)
+        result = collect_sessions_for_windows(
+            {
+                "previous": (previous_start, boundary),
+                "current": (boundary, current_end),
+            },
+            agent="codex",
+        )
+
+        assert calls == [(previous_start, current_end, "codex")]
+        assert [s.session_id for s in result["previous"]] == ["previous", "spanning"]
+        assert [s.session_id for s in result["current"]] == ["spanning", "current"]
 
 
 class TestParseSession:

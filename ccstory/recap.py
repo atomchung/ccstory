@@ -60,9 +60,19 @@ from .session_summarizer import (
     synthesize_comparison,
     synthesize_overall_for_period,
 )
-from .time_tracking import CLAUDE_PROJECTS, collect_sessions, rollup_by_category
-from .token_usage import apply_prices, collect_usage, load_prices_config
-from .trends import PeriodComparison, compare_to_previous
+from .time_tracking import (
+    CLAUDE_PROJECTS,
+    collect_sessions,
+    collect_sessions_for_windows,
+    rollup_by_category,
+)
+from .token_usage import (
+    apply_prices,
+    collect_usage,
+    collect_usage_for_windows,
+    load_prices_config,
+)
+from .trends import PeriodComparison, compare_to_previous, previous_window
 
 REPORTS_DIR = Path.home() / ".ccstory" / "reports"
 CONFIG_PATH = Path.home() / ".ccstory" / "config.toml"
@@ -225,7 +235,7 @@ def _synthesize_overall(
     category_hours = [(r.category, r.active_min / 60) for r in rollups]
 
     with console.status(
-        "[dim]Synthesizing overall narrative (configured narrator)…[/dim]"
+        "[dim]Synthesizing overall narrative (configured narrator)…[/dim]",
     ):
         return synthesize_overall_for_period(
             period_key=label,
@@ -532,17 +542,47 @@ def build_recap(
         f"[dim]({label})[/dim]\n"
     )
 
+    previous_sessions = None
+    previous_usage = None
     with console.status("[dim]Parsing sessions and token usage…[/dim]"):
-        sessions = collect_sessions(since, until, agent=agent)
+        if compare and window != "all":
+            prev_since, prev_until = previous_window(since, until)
+            session_windows = collect_sessions_for_windows(
+                {
+                    "current": (since, until),
+                    "previous": (prev_since, prev_until),
+                },
+                agent=agent,
+            )
+            sessions = session_windows["current"]
+            previous_sessions = session_windows["previous"]
+        else:
+            sessions = collect_sessions(since, until, agent=agent)
         if not sessions:
             raise RecapUnavailable("No engaged sessions in this window.")
-        # since/until are tz-aware local; collect_usage normalizes to UTC.
-        usage = collect_usage(
-            since,
-            until,
-            agent=agent,
-            active_agents={session.agent for session in sessions},
-        )
+        # Read current/previous exact usage in one provider scan whenever the
+        # comparison needs both windows. Token usage normalizes local bounds.
+        if previous_sessions is not None:
+            usage_windows = collect_usage_for_windows(
+                {
+                    "current": (since, until),
+                    "previous": (prev_since, prev_until),
+                },
+                agent=agent,
+                active_agents_by_window={
+                    "current": {session.agent for session in sessions},
+                    "previous": {session.agent for session in previous_sessions},
+                },
+            )
+            usage = usage_windows["current"]
+            previous_usage = usage_windows["previous"]
+        else:
+            usage = collect_usage(
+                since,
+                until,
+                agent=agent,
+                active_agents={session.agent for session in sessions},
+            )
 
     console.print(
         f"[green]✓[/green] {len(sessions)} sessions · "
@@ -667,6 +707,8 @@ def build_recap(
                 mode=classify,
                 fallback=fallback_bucket,
                 agent=agent,
+                previous_sessions=previous_sessions,
+                previous_usage=previous_usage,
             )
         if comparison and compare_narrative and summaries:
             prev_summaries = get_many(comparison.previous_session_ids)
