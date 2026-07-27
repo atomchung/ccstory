@@ -995,6 +995,7 @@ SUMMARY_PROBE_BATCH_SIZE = 10
 SUMMARY_MIN_BATCH_SIZE = 10
 SUMMARY_BATCH_SLOW_SEC = 30
 _SUMMARY_BATCH_EXCERPT_CHARS = 700
+SUMMARY_OMISSION_RETRY_SIZE = 10
 
 
 def _compact_batch_excerpt(excerpt: str, max_chars: int = _SUMMARY_BATCH_EXCERPT_CHARS) -> str:
@@ -1377,14 +1378,17 @@ def summarize_sessions_via_llm_batch(
             break
         chunk_index += 1
         chunk = items[start:start + current_batch_size]
-        rows = "\n\n".join(
-            f"[session_id={session_id}; project={project}]\n"
-            f"{_compact_batch_excerpt(excerpt)}"
-            for session_id, project, excerpt in chunk
-        )
-        prompt = _SUMMARY_BATCH_PROMPT.format(
-            language_directive=language_directive(), rows=rows,
-        )
+        def make_prompt(prompt_chunk: list[tuple[str, str, str]]) -> str:
+            rows = "\n\n".join(
+                f"[session_id={session_id}; project={project}]\n"
+                f"{_compact_batch_excerpt(excerpt)}"
+                for session_id, project, excerpt in prompt_chunk
+            )
+            return _SUMMARY_BATCH_PROMPT.format(
+                language_directive=language_directive(), rows=rows,
+            )
+
+        prompt = make_prompt(chunk)
         started = time.monotonic()
         try:
             call = _run_budgeted_llm_p(
@@ -1395,12 +1399,37 @@ def summarize_sessions_via_llm_batch(
             call = None
         if call is not None:
             requested_ids = {session_id for session_id, _, _ in chunk}
-            for session_id, summary in _parse_batch_summaries(
-                call.stdout, requested_ids,
-            ).items():
+            parsed = _parse_batch_summaries(call.stdout, requested_ids)
+            for session_id, summary in parsed.items():
                 out[session_id] = NarrativeCall(
                     summary, call.provider, call.model,
                 )
+            missing = [item for item in chunk if item[0] not in parsed]
+            if missing:
+                retry_chunk = missing[:SUMMARY_OMISSION_RETRY_SIZE]
+                if budget is None or budget.remaining_sec() > 0:
+                    retry_call = None
+                    try:
+                        retry_call = _run_budgeted_llm_p(
+                            make_prompt(retry_chunk), timeout, budget,
+                            lane="session_summaries_retry",
+                        )
+                    except (subprocess.SubprocessError, OSError) as exc:
+                        LOG.warning("batch omission retry errored: %s", exc)
+                    if retry_call is not None:
+                        retry_ids = {session_id for session_id, _, _ in retry_chunk}
+                        for session_id, summary in _parse_batch_summaries(
+                            retry_call.stdout, retry_ids,
+                        ).items():
+                            out[session_id] = NarrativeCall(
+                                summary, retry_call.provider, retry_call.model,
+                            )
+                    if budget is not None:
+                        budget.record_batch(
+                            "session_summaries_retry", chunk_index, chunk_index,
+                            len(retry_chunk),
+                            outcome="completed" if retry_call is not None else "failed",
+                        )
         elapsed = time.monotonic() - started
         # Probe first, then react to current-model speed without assuming
         # linear token latency. Failed or slow chunks shrink the next request;
