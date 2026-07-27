@@ -21,6 +21,7 @@ import sqlite3
 import subprocess
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -372,32 +373,141 @@ class NarrativeBudget:
     timed_out_calls: int = 0
     stopped_reason: str | None = None
     batch_durations: list[float] = field(default_factory=list)
+    # Execution metadata only.  Never put prompts, generated prose, session
+    # ids, project paths, or stderr in this lane: it is emitted in report JSON
+    # and is intended to explain responsiveness rather than retain content.
+    trace: list[dict[str, object]] = field(default_factory=list)
+    _active_lane: str = field(default="unspecified", init=False, repr=False)
+    _call_lane: str = field(default="unspecified", init=False, repr=False)
+    _call_deadline_sec: float = field(default=0.0, init=False, repr=False)
+
+    @staticmethod
+    def _lane_name(lane: str | None) -> str:
+        """Return a compact, non-content label suitable for public metadata."""
+        if not isinstance(lane, str):
+            return "unspecified"
+        cleaned = "_".join(lane.strip().lower().split())
+        return cleaned[:64] or "unspecified"
+
+    @contextmanager
+    def lane(self, lane: str):
+        """Attribute a caller's next narrator work to a stable lane name.
+
+        The context form preserves the long-standing ``run_llm_p(prompt,
+        timeout, budget=...)`` seam used by library callers and test doubles.
+        New callers may instead pass ``lane=`` directly to ``begin_call`` or
+        ``run_llm_p``.
+        """
+        previous = self._active_lane
+        self._active_lane = self._lane_name(lane)
+        try:
+            yield self
+        finally:
+            self._active_lane = previous
+
+    def _record(self, event: str, **metadata: object) -> None:
+        self.trace.append({"event": event, **metadata})
 
     def remaining_sec(self) -> float:
         if self.started_at is None:
             return self.total_sec
         return max(0.0, self.total_sec - (time.monotonic() - self.started_at))
 
-    def begin_call(self, requested_timeout: float) -> tuple[float, float] | None:
+    def begin_call(
+        self, requested_timeout: float, *, lane: str | None = None,
+    ) -> tuple[float, float] | None:
+        """Reserve one call under the shared budget and its per-call deadline.
+
+        The two-value return remains compatible with older callers.  ``lane``
+        is optional metadata, not an additional scheduling policy, so adding
+        it cannot change their timeout behavior.
+        """
         if self.started_at is None:
             self.started_at = time.monotonic()
         remaining = self.remaining_sec()
+        call_lane = self._lane_name(lane) if lane is not None else self._active_lane
         if remaining <= 0:
             self.stopped_reason = "budget_exhausted"
+            self._record(
+                "call", lane=call_lane, outcome="budget_exhausted",
+                elapsed_sec=0.0, requested_timeout_sec=round(float(requested_timeout), 3),
+            )
             return None
         allowed = min(float(requested_timeout), self.batch_deadline_sec, remaining)
-        return time.monotonic(), max(0.01, allowed)
+        self._call_lane = call_lane
+        self._call_deadline_sec = max(0.01, allowed)
+        return time.monotonic(), self._call_deadline_sec
 
-    def finish_call(self, started: float, *, timed_out: bool = False) -> None:
-        self.batch_durations.append(time.monotonic() - started)
+    def record_provider_attempt(
+        self,
+        provider: str,
+        model: str,
+        *,
+        outcome: str,
+        fallback: bool,
+        elapsed_sec: float,
+    ) -> None:
+        """Record one provider attempt without retaining request/response data."""
+        self._record(
+            "provider_attempt", lane=self._call_lane, provider=provider,
+            model=model, outcome=outcome, fallback=fallback,
+            elapsed_sec=round(max(0.0, elapsed_sec), 3),
+        )
+
+    def record_batch(
+        self, lane: str, completed: int, total: int, item_count: int, *,
+        outcome: str = "completed",
+    ) -> None:
+        """Capture coarse batch progress, never individual work-item identity."""
+        self._record(
+            "batch", lane=self._lane_name(lane), completed=completed,
+            total=total, item_count=item_count, outcome=outcome,
+        )
+
+    def finish_call(
+        self, started: float, *, timed_out: bool = False, success: bool = False,
+    ) -> None:
+        elapsed = time.monotonic() - started
+        self.batch_durations.append(elapsed)
         self.completed_calls += 1
         if timed_out:
             self.timed_out_calls += 1
+        self._record(
+            "call", lane=self._call_lane,
+            outcome="success" if success else ("timed_out" if timed_out else "failed"),
+            elapsed_sec=round(max(0.0, elapsed), 3),
+            deadline_sec=round(self._call_deadline_sec, 3),
+        )
         if self.remaining_sec() <= 0:
             self.stopped_reason = "budget_exhausted"
 
     def status(self) -> dict[str, object]:
         spent = 0.0 if self.started_at is None else self.total_sec - self.remaining_sec()
+        lanes: dict[str, dict[str, object]] = {}
+        for event in self.trace:
+            lane = event.get("lane")
+            if not isinstance(lane, str):
+                continue
+            summary = lanes.setdefault(
+                lane,
+                {"calls": 0, "successful_calls": 0, "failed_calls": 0,
+                 "timed_out_calls": 0, "fallback_successes": 0, "batches": 0},
+            )
+            if event["event"] == "call":
+                outcome = event.get("outcome")
+                if outcome != "budget_exhausted":
+                    summary["calls"] = int(summary["calls"]) + 1
+                if outcome == "success":
+                    summary["successful_calls"] = int(summary["successful_calls"]) + 1
+                elif outcome == "timed_out":
+                    summary["timed_out_calls"] = int(summary["timed_out_calls"]) + 1
+                elif outcome not in ("budget_exhausted",):
+                    summary["failed_calls"] = int(summary["failed_calls"]) + 1
+            elif event["event"] == "provider_attempt":
+                if event.get("outcome") == "success" and event.get("fallback"):
+                    summary["fallback_successes"] = int(summary["fallback_successes"]) + 1
+            elif event["event"] == "batch":
+                summary["batches"] = int(summary["batches"]) + 1
         return {
             "total_sec": round(self.total_sec, 1),
             "spent_sec": round(max(0.0, spent), 1),
@@ -406,6 +516,8 @@ class NarrativeBudget:
             "timed_out_calls": self.timed_out_calls,
             "stopped_reason": self.stopped_reason,
             "partial": bool(self.stopped_reason or self.timed_out_calls),
+            "lanes": lanes,
+            "trace": list(self.trace),
         }
 
 
@@ -1008,6 +1120,8 @@ def run_llm_p(
     prompt: str,
     timeout: int,
     budget: NarrativeBudget | None = None,
+    *,
+    lane: str | None = None,
 ) -> NarrativeCall | None:
     """Run the configured local narrators in order until one returns prose.
 
@@ -1016,7 +1130,9 @@ def run_llm_p(
     carries one explicit model id, and a failed/unavailable provider simply
     advances to the next configured provider.
     """
-    reservation = budget.begin_call(timeout) if budget is not None else None
+    reservation = (
+        budget.begin_call(timeout, lane=lane) if budget is not None else None
+    )
     if budget is not None and reservation is None:
         return None
     started, allowed_timeout = reservation if reservation is not None else (
@@ -1024,7 +1140,7 @@ def run_llm_p(
     )
     deadline = started + allowed_timeout if budget is not None else None
     timed_out = False
-    for backend in narrative_backends():
+    for backend_index, backend in enumerate(narrative_backends()):
         if not narrative_backend_available(backend):
             continue
         remaining = allowed_timeout
@@ -1034,6 +1150,7 @@ def run_llm_p(
                 timed_out = True
                 break
         try:
+            provider_started = time.monotonic()
             if backend.provider == "claude":
                 if deadline is None:
                     result = run_claude_p(prompt, remaining, backend.model)
@@ -1050,15 +1167,38 @@ def run_llm_p(
                 )
         except subprocess.TimeoutExpired:
             timed_out = True
+            if budget is not None:
+                budget.record_provider_attempt(
+                    backend.provider, backend.model, outcome="timed_out",
+                    fallback=backend_index > 0,
+                    elapsed_sec=time.monotonic() - provider_started,
+                )
             LOG.warning("%s narrative call reached its deadline", backend.provider)
             break
         except (subprocess.SubprocessError, OSError) as exc:
+            if budget is not None:
+                budget.record_provider_attempt(
+                    backend.provider, backend.model, outcome="error",
+                    fallback=backend_index > 0,
+                    elapsed_sec=time.monotonic() - provider_started,
+                )
             LOG.warning("%s narrative call errored: %s", backend.provider, exc)
             continue
         if result is not None and result.returncode == 0 and result.stdout.strip():
             if budget is not None:
-                budget.finish_call(started, timed_out=timed_out)
+                budget.record_provider_attempt(
+                    backend.provider, backend.model, outcome="success",
+                    fallback=backend_index > 0,
+                    elapsed_sec=time.monotonic() - provider_started,
+                )
+                budget.finish_call(started, timed_out=timed_out, success=True)
             return NarrativeCall(result.stdout, backend.provider, backend.model)
+        if budget is not None:
+            budget.record_provider_attempt(
+                backend.provider, backend.model, outcome="failed",
+                fallback=backend_index > 0,
+                elapsed_sec=time.monotonic() - provider_started,
+            )
         stderr = result.stderr.strip()[:200] if result is not None else "no result"
         LOG.warning("%s narrative call failed: %s", backend.provider, stderr)
     if budget is not None:
@@ -1067,12 +1207,15 @@ def run_llm_p(
 
 
 def _run_budgeted_llm_p(
-    prompt: str, timeout: int, budget: NarrativeBudget | None,
+    prompt: str, timeout: int, budget: NarrativeBudget | None, *, lane: str,
 ) -> NarrativeCall | None:
-    """Keep the historical two-argument narrator seam intact when unbudgeted."""
+    """Run one caller-labelled lane without breaking the old monkeypatch seam."""
     if budget is None:
         return run_llm_p(prompt, timeout)
-    return run_llm_p(prompt, timeout, budget=budget)
+    # Keep ``lane`` on the budget context rather than forwarding a new keyword
+    # into every old wrapper/test double of ``run_llm_p``.
+    with budget.lane(lane):
+        return run_llm_p(prompt, timeout, budget=budget)
 
 
 def summarize_via_claude_p(excerpt: str, timeout: int = 60) -> NarrativeCall | None:
@@ -1158,6 +1301,10 @@ def summarize_sessions_via_llm_batch(
     while start < len(items):
         if budget is not None and budget.remaining_sec() <= 0:
             budget.stopped_reason = "budget_exhausted"
+            budget.record_batch(
+                "session_summaries", chunk_index + 1, chunk_index + 1, 0,
+                outcome="budget_exhausted",
+            )
             break
         chunk_index += 1
         chunk = items[start:start + current_batch_size]
@@ -1170,7 +1317,9 @@ def summarize_sessions_via_llm_batch(
         )
         started = time.monotonic()
         try:
-            call = _run_budgeted_llm_p(prompt, timeout, budget)
+            call = _run_budgeted_llm_p(
+                prompt, timeout, budget, lane="session_summaries",
+            )
         except (subprocess.SubprocessError, OSError) as exc:
             LOG.warning("batch session summarization errored: %s", exc)
             call = None
@@ -1191,6 +1340,14 @@ def summarize_sessions_via_llm_batch(
         elif current_batch_size < batch_size:
             current_batch_size = min(batch_size, current_batch_size * 2)
         start += len(chunk)
+        if budget is not None:
+            remaining = len(items) - start
+            projected_total = chunk_index + (
+                (remaining + current_batch_size - 1) // current_batch_size
+            )
+            budget.record_batch(
+                "session_summaries", chunk_index, projected_total, len(chunk),
+            )
         if on_chunk_complete is not None:
             remaining = len(items) - start
             projected_total = chunk_index + (
@@ -1432,7 +1589,7 @@ def synthesize_overall_for_period(
     if not llm_available():
         return None
 
-    call = _run_budgeted_llm_p(prompt, timeout, budget)
+    call = _run_budgeted_llm_p(prompt, timeout, budget, lane="overall")
     if call is None:
         return None
     narrative = call.stdout.strip().strip('"').strip("'")
@@ -1531,7 +1688,7 @@ def synthesize_category_for_period(
     if not llm_available():
         return None
 
-    call = _run_budgeted_llm_p(prompt, timeout, budget)
+    call = _run_budgeted_llm_p(prompt, timeout, budget, lane="category")
     if call is None:
         return None
     narrative = call.stdout.strip().strip('"').strip("'")
@@ -1799,7 +1956,7 @@ def synthesize_comparison(
     if not llm_available():
         return None
 
-    call = _run_budgeted_llm_p(prompt, timeout, budget)
+    call = _run_budgeted_llm_p(prompt, timeout, budget, lane="comparison")
     if call is None:
         return None
     narrative = call.stdout.strip().strip('"').strip("'")
@@ -2094,6 +2251,10 @@ def classify_sessions_by_content(
     ):
         if budget is not None and budget.remaining_sec() <= 0:
             budget.stopped_reason = "budget_exhausted"
+            budget.record_batch(
+                "content_classification", chunk_idx, total_chunks, 0,
+                outcome="budget_exhausted",
+            )
             break
         chunk = pending[chunk_start:chunk_start + batch_size]
         rows = "\n".join(
@@ -2109,7 +2270,9 @@ def classify_sessions_by_content(
         )
         fresh: dict[str, str] = {}
         try:
-            call = _run_budgeted_llm_p(prompt, timeout, budget)
+            call = _run_budgeted_llm_p(
+                prompt, timeout, budget, lane="content_classification",
+            )
             if call is not None:
                 parsed = _parse_classification_lines(call.stdout)
                 # Validate ids and vocabulary before anything reaches SQLite.
@@ -2147,6 +2310,10 @@ def classify_sessions_by_content(
         _classify_cache_upsert_many(fresh, input_fingerprint)
         combined.update(fresh)
         used_buckets.update(fresh.values())
+        if budget is not None:
+            budget.record_batch(
+                "content_classification", chunk_idx, total_chunks, len(chunk),
+            )
         if on_chunk_complete is not None:
             on_chunk_complete(chunk_idx, total_chunks)
 

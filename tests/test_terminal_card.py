@@ -150,6 +150,18 @@ class TestRepoActivityCard:
         assert "commit activity only" in out
         assert "PRs merged" not in out
 
+    def test_title_is_a_separate_module_from_activity_metrics(self):
+        out = self._render(ArtifactsReport(
+            repos=[RepoArtifacts(root=Path("/x/p"), name="p", commits=4)],
+            repos_discovered=1,
+            github_status="not_connected",
+            github_repos_total=1,
+        ))
+        lines = out.splitlines()
+        title = next(i for i, line in enumerate(lines) if "Repo activity" in line)
+        metrics = next(i for i, line in enumerate(lines) if "4 commits" in line)
+        assert metrics == title + 1
+
     def test_partial_github_totals_are_not_rendered_as_complete(self):
         out = self._render(ArtifactsReport(
             repos=[RepoArtifacts(
@@ -256,7 +268,7 @@ class TestWhatYouDidCard:
 
 
 class TestCardWrapping:
-    def test_highlight_is_bounded_while_project_and_narrative_text_can_wrap(self):
+    def test_highlight_omits_raw_prompt_fallback_while_project_and_narrative_wrap(self):
         top_session = SessionStat(
             project="demo",
             category="輸出",
@@ -303,11 +315,13 @@ class TestCardWrapping:
         )
 
         text = console.export_text()
-        assert "$record" in text
+        assert "$record" not in text
         assert "/Users/demo" not in text
         assert "**" not in text
         assert "WRAP_END" not in text
-        assert "…" in text
+        # With no eligible generated summary, the compact line is just the
+        # deterministic primary project — never the raw prompt fallback.
+        assert "↳ kol-collector-fomo-kernel-with-a-long-project-name" in text
         assert "personal-os-project-tail" in text
         assert "HEADER_END" in text
 

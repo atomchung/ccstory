@@ -116,6 +116,9 @@ class TestGetRecap:
             "providers": {"claude": "complete"},
         }
         assert out["unpriced_models"] == []
+        focus = out["top_focus_projection"]
+        assert focus["category"] == out["categories"][0]["name"]
+        assert focus["project"]["name"] == "proj"
         # Compact, not the full --json envelope: no per-session id list
         # beyond top_sessions, no raw transcript text anywhere in the shape.
         assert "sessions" not in out
@@ -249,6 +252,7 @@ class TestGetRecap:
         out = get_recap(window="week", allow_llm=False)
         assert out["ok"] is True
         assert out["top_focus"] is None
+        assert out["top_focus_projection"] is not None
         assert all(c["narrative"] is None for c in out["categories"])
 
     def test_allow_llm_true_synthesizes_both_narrative_levels(

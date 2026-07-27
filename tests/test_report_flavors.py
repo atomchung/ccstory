@@ -6,9 +6,15 @@ from datetime import datetime, timezone
 
 import pytest
 
-from ccstory.report import VALID_FLAVORS, _format_date_range, _md_cell, render_report
+from ccstory.report import (
+    VALID_FLAVORS,
+    _format_date_range,
+    _md_cell,
+    build_report_json,
+    render_report,
+)
 from ccstory.session_summarizer import SessionSummary
-from ccstory.time_tracking import CategoryRollup, SessionStat
+from ccstory.time_tracking import CategoryRollup, ProjectRollup, SessionStat
 from ccstory.token_usage import ModelUsage, UsageReport
 
 
@@ -143,6 +149,65 @@ class TestPlainFlavor:
         assert "**★ Top focus: `coding` — 0.5h (100% of active time)**" in top_focus
         assert "User goal" not in top_focus
         assert "## What you did" in md
+
+    def test_top_focus_uses_category_project_and_safe_strongest_summaries(self):
+        raw_prompt = _stat("coding", "-Users-alice-code-ccstory", "raw", mins=90)
+        raw_prompt.first_user_text = (
+            "Run `ccstory week` from /Users/alice/Side_project/ccstory "
+            "with --refresh-all"
+        )
+        safe = _stat("coding", "-Users-alice-code-ccstory", "safe", mins=60)
+        rollup = CategoryRollup(
+            category="coding",
+            active_min=150.0,
+            sessions=2,
+            messages=20,
+            # Deliberately unsorted: the Top focus helper owns its stable
+            # strongest-session ordering instead of trusting callers.
+            top_sessions=[safe, raw_prompt],
+            projects=[ProjectRollup("ccstory", 150.0, 2, 20)],
+        )
+        summaries = {
+            "raw": SessionSummary(
+                session_id="raw",
+                summary=raw_prompt.first_user_text,
+                source="fallback",
+            ),
+            "safe": SessionSummary(
+                session_id="safe",
+                summary="Hardened the recap report output.",
+                source="auto",
+            ),
+        }
+        kwargs = dict(
+            label="2026-05",
+            since=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 31, tzinfo=timezone.utc),
+            sessions=[raw_prompt, safe],
+            rollups=[rollup],
+            usage=_usage(),
+            summaries=summaries,
+        )
+
+        md = render_report(**kwargs)
+        top_focus = md.split("## Time distribution")[0]
+        assert "Primary project: `ccstory` — 2.5h across 2 session(s)." in top_focus
+        assert "Strongest work: Hardened the recap report output." in top_focus
+        assert "ccstory week" not in top_focus
+        assert "/Users/alice" not in top_focus
+
+        payload = build_report_json(**kwargs)
+        assert payload["narrative"]["top_focus"] == {
+            "category": "coding",
+            "active_hours": 2.5,
+            "share": 1.0,
+            "project": {"name": "ccstory", "active_hours": 2.5, "sessions": 2},
+            "strongest_session_summaries": ["Hardened the recap report output."],
+            "summary": (
+                "Primary project: `ccstory` — 2.5h across 2 session(s). "
+                "Strongest work: Hardened the recap report output."
+            ),
+        }
 
     @pytest.mark.parametrize(
         ("agent", "title"),

@@ -281,6 +281,81 @@ def _synthesize_categories(
     return out
 
 
+_LOCAL_CATEGORY_FALLBACK_PROVENANCE = {
+    "provider": "ccstory",
+    "model": "deterministic-local-fallback",
+    "source": "local_fallback",
+}
+
+
+def _local_category_fallback(
+    rollup: object,
+    summaries: dict,
+) -> str:
+    """Return a deterministic, local-only narrative for one category.
+
+    Category synthesis is an enhancement, not a condition for presenting a
+    category's work.  In particular, session summaries often start as local
+    ``fallback`` rows and a configured narrator can be unavailable or exhaust
+    its budget.  Keep the category visible in those cases without inventing
+    model output or persisting a synthetic aggregate in the narrator cache.
+    """
+    category = str(rollup.category)
+    sessions = int(rollup.sessions)
+    session_label = "session" if sessions == 1 else "sessions"
+    header = (
+        f"{category}: {sessions} {session_label} · "
+        f"{rollup.active_min:.0f} active min."
+    )
+
+    details: list[str] = []
+    for session in rollup.top_sessions:
+        summary = summaries.get(session.session_id)
+        # Local fallback rows are derived from the raw first/last user turns.
+        # They remain useful in the detailed session list, but must not be
+        # promoted to a category-level recap where they could expose commands,
+        # paths, or an unbounded prompt.  Only generated summaries are prose
+        # suitable for this higher-level surface.
+        text = (
+            summary.summary.strip()
+            if summary and summary.source == "auto" and summary.summary
+            else ""
+        )
+        if text:
+            details.append(text)
+        if len(details) == 4:
+            break
+    if not details:
+        projects = [project.project for project in rollup.projects[:3]]
+        if projects:
+            details.append("Projects: " + ", ".join(projects) + ".")
+        else:
+            details.append("No generated session summary was available.")
+
+    return f"{header}\n\n" + "\n".join(f"- {text}" for text in details)
+
+
+def _fill_local_category_fallbacks(
+    rollups: list,
+    summaries: dict,
+    category_narratives: dict[str, str],
+    narrative_provenance: dict[str, object],
+) -> None:
+    """Fill missing per-category prose and disclose its local provenance."""
+    categories = narrative_provenance["categories"]
+    assert isinstance(categories, dict)
+    for rollup in rollups:
+        if category_narratives.get(rollup.category):
+            continue
+        category_narratives[rollup.category] = _local_category_fallback(
+            rollup, summaries,
+        )
+        categories[rollup.category] = {
+            **_LOCAL_CATEGORY_FALLBACK_PROVENANCE,
+            "reason": "no_generated_category_narrative",
+        }
+
+
 def _resolve_all_sessions(
     sessions: list,
     summaries: dict,
@@ -450,7 +525,7 @@ def build_recap(
     *,
     minimal: bool = False,
     llm_narrative: bool = False,
-    narrative: str = "overall",
+    narrative: str = "per-category",
     aggregate: bool = True,
     compare: bool = True,
     compare_narrative: bool = True,
@@ -477,7 +552,7 @@ def build_recap(
       minimal           --minimal        skip the narrative pipeline entirely
       llm_narrative     --llm-narrative  polish per-session summaries via the
                                          configured local narrator (90s shared budget)
-      narrative         --narrative      overall | per-category | both
+      narrative         --narrative      per-category (default) | overall | both
       aggregate         --no-aggregate   False skips the overall synthesis
       compare           --no-compare     False skips the vs-previous block
       compare_narrative --no-compare-narrative
@@ -680,20 +755,26 @@ def build_recap(
                     "[green]✓[/green] [dim]synthesized overall narrative"
                     "[/dim]\n"
                 )
-        if summaries and narrative in ("per-category", "both"):
-            category_narratives = _synthesize_categories(
-                label, sessions, rollups, summaries, console,
-                budget=narrative_budget,
-            )
-            if category_narratives:
+        if narrative in ("per-category", "both"):
+            generated_count = 0
+            if summaries:
+                category_narratives = _synthesize_categories(
+                    label, sessions, rollups, summaries, console,
+                    budget=narrative_budget,
+                )
+                generated_count = len(category_narratives)
                 narrative_provenance["categories"] = {
                     category: get_period_narrative_provenance(label, category)
                     for category in category_narratives
                 }
-                console.print(
-                    f"[green]✓[/green] [dim]synthesized "
-                    f"{len(category_narratives)} bucket narrative(s)[/dim]\n"
-                )
+            _fill_local_category_fallbacks(
+                rollups, summaries, category_narratives, narrative_provenance,
+            )
+            fallback_count = len(category_narratives) - generated_count
+            console.print(
+                f"[green]✓[/green] [dim]category narratives: "
+                f"{generated_count} synthesized · {fallback_count} local fallback[/dim]\n"
+            )
 
     comparison = None
     if compare and window != "all":

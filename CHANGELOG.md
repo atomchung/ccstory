@@ -17,10 +17,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The terminal card now keeps Top focus to a two-line module with muted,
+  width-bounded supporting text. Repo activity is rendered as its own title
+  plus a separate metrics line for faster scanning.
+- A normal recap now defaults to per-category narrative. Every eligible
+  category remains visible through a deterministic local fallback when the
+  narrator is unavailable or its lane deadline is reached; report and JSON
+  expose that fallback provenance.
+- Top focus now derives a compact category/project narrative from the strongest
+  sessions rather than displaying a representative session's raw prompt or
+  command-like fallback text.
 - Every recap LLM lane now shares a 90-second wall-clock budget with a
   45-second per-call deadline. Per-session narration begins with a 10-session
   probe and adapts later batches between 10 and 40 sessions; completed rows
   remain available while budget-exhausted work falls back locally.
+- Narrative provenance now includes metadata-only lane timing, provider
+  attempts, fallback outcome, budget exhaustion, and coarse batch progress.
+- Reused unchanged parsed `config.toml` within a process and skip Claude usage
+  transcripts older than every requested window before opening them.
 - A normal recap now takes one in-memory transcript snapshot spanning the
   current and previous comparison windows, rather than reparsing overlapping
   session files twice. The snapshot is per invocation (not an mtime cache),

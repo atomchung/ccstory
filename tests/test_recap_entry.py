@@ -95,9 +95,18 @@ class TestBuildRecap:
         assert result.report_path.parent == tmp_home / ".ccstory" / "reports"
         assert result.report_path.name == f"recap-{result.label}.md"
         assert result.report_path.read_text(encoding="utf-8") == result.markdown
-        # No claude available → no narratives, but the pipeline still lands.
+        # No narrator available → deterministic local category prose still
+        # reaches the report and JSON rather than silently dropping a bucket.
         assert result.overall_narrative is None
-        assert result.category_narratives == {}
+        category = result.rollups[0].category
+        assert result.category_narratives[category].startswith(f"{category}:")
+        assert result.narrative_provenance["categories"][category] == {
+            "provider": "ccstory",
+            "model": "deterministic-local-fallback",
+            "source": "local_fallback",
+            "reason": "no_generated_category_narrative",
+        }
+        assert "## What you did, by category" in result.markdown
 
     def test_to_json_envelope(self, tmp_home, jsonl_factory):
         _seed_session(jsonl_factory)
@@ -109,7 +118,16 @@ class TestBuildRecap:
         assert len(payload["sessions"]) == 1
         # The envelope carries the report location for downstream tooling.
         assert payload["report_path"] == str(result.report_path)
-        assert payload["narrative"]["provenance"]["budget"] == {
+        category = result.rollups[0].category
+        assert payload["buckets"][0]["narrative"].startswith(f"{category}:")
+        assert payload["narrative"]["provenance"]["categories"][category][
+            "source"
+        ] == "local_fallback"
+        budget = payload["narrative"]["provenance"]["budget"]
+        assert {key: budget[key] for key in (
+            "total_sec", "spent_sec", "remaining_sec", "completed_calls",
+            "timed_out_calls", "stopped_reason", "partial",
+        )} == {
             "total_sec": 90.0,
             "spent_sec": 0.0,
             "remaining_sec": 90.0,
@@ -203,6 +221,47 @@ class TestBuildRecap:
         assert result.summaries == {}
         assert result.overall_narrative is None
         assert result.counts == {}
+
+    def test_explicit_overall_keeps_category_narratives_offline_disabled(
+        self, tmp_home, jsonl_factory,
+    ):
+        _seed_session(jsonl_factory)
+        result = build_recap("week", narrative="overall", artifacts=False)
+        assert result.overall_narrative is None
+        assert result.category_narratives == {}
+
+    def test_explicit_both_keeps_overall_and_category_lanes(
+        self, tmp_home, jsonl_factory, monkeypatch,
+    ):
+        _seed_session(jsonl_factory)
+        monkeypatch.setattr(
+            recap, "_synthesize_overall", lambda *args, **kwargs: "Overall work.",
+        )
+
+        result = build_recap("week", narrative="both", artifacts=False)
+
+        assert result.overall_narrative == "Overall work."
+        assert result.category_narratives
+
+    def test_category_fallback_survives_missing_summary_lane(
+        self, tmp_home, jsonl_factory, monkeypatch,
+    ):
+        _seed_session(jsonl_factory)
+        monkeypatch.setattr(
+            recap, "_backfill_summaries",
+            lambda *args, **kwargs: {"summarized": 0, "fallback": 0,
+                                     "skipped": 1, "already": 0},
+        )
+        monkeypatch.setattr(recap, "get_many", lambda _ids: {})
+
+        result = build_recap("week", artifacts=False)
+
+        category = result.rollups[0].category
+        assert result.category_narratives[category].startswith(f"{category}:")
+        assert "Projects: proj." in result.category_narratives[category]
+        assert result.narrative_provenance["categories"][category][
+            "source"
+        ] == "local_fallback"
 
 
 class TestParseWindow:

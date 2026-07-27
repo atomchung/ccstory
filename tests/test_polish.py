@@ -45,6 +45,31 @@ class TestMalformedTomlLoudWarn:
         captured = capsys.readouterr()
         assert "could not parse" not in captured.err
 
+    def test_unchanged_config_is_parsed_once_then_invalidated_on_edit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        cfg = tmp_path / "cached.toml"
+        cfg.write_text('default_bucket = "writing"\n', encoding="utf-8")
+        categorizer._toml_cache.clear()
+
+        calls = 0
+        original_open = Path.open
+
+        def counting_open(path: Path, *args, **kwargs):
+            nonlocal calls
+            if path == cfg and args and args[0] == "rb":
+                calls += 1
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", counting_open)
+        assert categorizer._load_toml(cfg) == {"default_bucket": "writing"}
+        assert categorizer._load_toml(cfg) == {"default_bucket": "writing"}
+        assert calls == 1
+
+        cfg.write_text('default_bucket = "coding"\n', encoding="utf-8")
+        assert categorizer._load_toml(cfg) == {"default_bucket": "coding"}
+        assert calls == 2
+
 
 class TestSqliteCorruptionRecovery:
     def test_corrupt_db_raises_with_recovery_hint(self, tmp_home: Path):

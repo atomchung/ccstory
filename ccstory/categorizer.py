@@ -28,6 +28,13 @@ from pathlib import Path
 LOG = logging.getLogger("ccstory.categorizer")
 CONFIG_PATH = Path.home() / ".ccstory" / "config.toml"
 
+# Config is read by several independent phases of one recap.  Retain the
+# parsed result for an unchanged file, but keep an inexpensive stat guard so
+# a long-running process still observes a user edit before its next command.
+# The cache intentionally also remembers parse failures: repeatedly parsing a
+# malformed file only repeats I/O and warnings without producing new signal.
+_toml_cache: dict[str, tuple[tuple[int, int] | None, dict | None]] = {}
+
 # Common path prefixes to strip when normalizing leaf project name. Order matters:
 # longest first so `-Users-foo-Side-project-` strips fully before `-Users-foo-`.
 _PATH_STEM_HINTS = {
@@ -166,7 +173,20 @@ def _load_toml(path: Path) -> dict | None:
     config silently falling back to defaults caused subtle miscategorization
     in the past (issue #9).
     """
-    if not path.exists():
+    cache_key = str(path.expanduser().resolve())
+    try:
+        stat = path.stat()
+    except OSError:
+        stamp = None
+    else:
+        stamp = (stat.st_mtime_ns, stat.st_size)
+
+    cached = _toml_cache.get(cache_key)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+
+    if stamp is None:
+        _toml_cache[cache_key] = (stamp, None)
         return None
     try:
         import tomllib  # py 3.11+
@@ -175,10 +195,13 @@ def _load_toml(path: Path) -> dict | None:
             import tomli as tomllib  # type: ignore
         except ImportError:
             LOG.warning("tomllib/tomli not available; skipping %s", path)
+            _toml_cache[cache_key] = (stamp, None)
             return None
     try:
         with path.open("rb") as f:
-            return tomllib.load(f)
+            result = tomllib.load(f)
+            _toml_cache[cache_key] = (stamp, result)
+            return result
     except (OSError, ValueError) as e:
         import sys as _sys
         msg = (
@@ -188,6 +211,7 @@ def _load_toml(path: Path) -> dict | None:
         )
         print(msg, file=_sys.stderr)
         LOG.warning("failed to parse %s: %s", path, e)
+        _toml_cache[cache_key] = (stamp, None)
         return None
 
 

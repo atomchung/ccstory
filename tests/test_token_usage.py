@@ -17,6 +17,7 @@ from ccstory.token_usage import (
     collect_usage,
     fmt_tokens,
 )
+from ccstory.providers.claude import ClaudeCodeProvider
 
 from tests.conftest import _ts, make_assistant_msg, make_user_msg, write_jsonl
 
@@ -225,6 +226,45 @@ class TestCollectUsage:
         assert rep.assistant_turns == 1
         assert rep.total_input == 300
         assert rep.total_output == 150
+
+    def test_claude_usage_uses_embedded_timestamps_not_file_mtime(
+        self, jsonl_factory, monkeypatch,
+    ):
+        records = [
+            make_user_msg("restore this", _ts(2026, 5, 10, 10, 0, 0)),
+            make_assistant_msg(
+                "restored", _ts(2026, 5, 10, 10, 0, 5), "restored-msg",
+                input_tokens=42, output_tokens=7,
+            ),
+            make_user_msg("confirm restore", _ts(2026, 5, 10, 10, 2, 0)),
+        ]
+        old_path = jsonl_factory("-Users-alice-code-old", "session-old", records)
+        old_mtime = datetime(2026, 5, 1, tzinfo=timezone.utc).timestamp()
+        os.utime(old_path, (old_mtime, old_mtime))
+
+        opened: list[Path] = []
+        original_open = Path.open
+
+        def record_open(path: Path, *args, **kwargs):
+            if path == old_path:
+                opened.append(path)
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", record_open)
+        by_model: dict = {}
+        turns = ClaudeCodeProvider().collect_usage(
+            datetime(2026, 5, 10, tzinfo=timezone.utc),
+            datetime(2026, 5, 31, tzinfo=timezone.utc),
+            by_model,
+        )
+        assert turns == 1
+        assert by_model["claude-opus-4-7"].input_tokens == 42
+        assert old_path in opened
+        sessions = ClaudeCodeProvider().collect_sessions(
+            datetime(2026, 5, 10, tzinfo=timezone.utc),
+            datetime(2026, 5, 31, tzinfo=timezone.utc),
+        )
+        assert [session.session_id for session in sessions] == ["session-old"]
 
 def make_codex_token_count(
     ts: str,

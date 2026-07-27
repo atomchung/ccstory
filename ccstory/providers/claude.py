@@ -271,7 +271,6 @@ class ClaudeCodeProvider(BaseAgentProvider):
             until = until.replace(tzinfo=timezone.utc)
 
         stats: list[SessionStat] = []
-        since_ts = since.timestamp()
 
         for path_str in glob.glob(
             str(self.projects_dir / "**" / "*.jsonl"), recursive=True
@@ -280,12 +279,6 @@ class ClaudeCodeProvider(BaseAgentProvider):
             # Skip nested subagent traces (double-count guard)
             if _is_subagent_path(path):
                 continue
-            try:
-                if path.stat().st_mtime < since_ts:
-                    continue
-            except OSError:
-                continue
-
             s = self.parse_session(path)
             if not s:
                 continue

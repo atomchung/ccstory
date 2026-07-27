@@ -72,6 +72,47 @@ def test_dispatch_falls_back_from_claude_to_ephemeral_codex(monkeypatch):
     ]
 
 
+def test_budget_trace_records_lane_provider_fallback_and_success(monkeypatch):
+    monkeypatch.setattr(ss, "claude_bin_available", lambda: True)
+    monkeypatch.setattr(ss, "codex_bin_available", lambda: True)
+    monkeypatch.setattr(ss, "antigravity_bin_available", lambda: False)
+    monkeypatch.setattr(ss, "run_claude_p", lambda *_, **__: _result("", 1))
+    monkeypatch.setattr(ss, "_run_codex_p", lambda *_: _result("codex prose"))
+
+    budget = ss.NarrativeBudget(total_sec=90, batch_deadline_sec=45)
+    assert ss.run_llm_p("summarize this", 60, budget=budget, lane="overall") == (
+        ss.NarrativeCall("codex prose", "codex", "gpt-5.6-terra")
+    )
+
+    status = budget.status()
+    assert status["lanes"] == {
+        "overall": {
+            "calls": 1, "successful_calls": 1, "failed_calls": 0,
+            "timed_out_calls": 0, "fallback_successes": 1, "batches": 0,
+        },
+    }
+    # Trace is metadata-only: it records the attempted provider/model and
+    # outcome, not the prompt or generated narrative.
+    attempts = [item for item in status["trace"] if item["event"] == "provider_attempt"]
+    assert [(item["provider"], item["outcome"], item["fallback"]) for item in attempts] == [
+        ("claude", "failed", False),
+        ("codex", "success", True),
+    ]
+    assert all("prompt" not in item and "stdout" not in item for item in attempts)
+
+
+def test_budget_lane_deadline_rejection_preserves_legacy_reservation_shape():
+    budget = ss.NarrativeBudget(total_sec=0)
+    # Older callers still receive the same tuple-or-None interface; lane is
+    # optional execution metadata rather than a new scheduling requirement.
+    assert budget.begin_call(30, lane="content classification") is None
+    assert budget.status()["trace"] == [{
+        "event": "call", "lane": "content_classification",
+        "outcome": "budget_exhausted", "elapsed_sec": 0.0,
+        "requested_timeout_sec": 30.0,
+    }]
+
+
 def test_codex_command_is_ephemeral_and_read_only(monkeypatch):
     calls = []
 
