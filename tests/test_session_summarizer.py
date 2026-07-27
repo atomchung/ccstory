@@ -19,6 +19,7 @@ import pytest
 from ccstory import session_summarizer as ss
 from ccstory.session_summarizer import (
     _extract_excerpt,
+    _compact_batch_excerpt,
     _fallback_narrative,
     OVERALL_KEY,
     get,
@@ -315,6 +316,21 @@ class TestRetroactiveRefresh:
 
 
 class TestBatchedNarrativeBackfill:
+    def test_batch_compaction_keeps_latest_request_and_final_outcome(self):
+        excerpt = (
+            "[USER 1]\ninitial intent\n\n"
+            "[USER 2]\nintermediate context\n\n"
+            "[USER LATE]\nlatest request\n\n"
+            "[ASSISTANT END]\nfinal outcome: tests passed and the patch shipped\n"
+        )
+
+        compacted = _compact_batch_excerpt(excerpt)
+
+        assert len(compacted) <= ss._SUMMARY_BATCH_EXCERPT_CHARS
+        assert "initial intent" in compacted
+        assert "latest request" in compacted
+        assert "final outcome: tests passed" in compacted
+
     def _sessions(self, jsonl_factory, count: int = 3):
         provider = ClaudeCodeProvider()
         sessions = []
@@ -366,6 +382,8 @@ class TestBatchedNarrativeBackfill:
         )
 
         assert len(calls) == 2  # 2 + 1, never one subprocess per session
+        assert "[ASSISTANT END]" in calls[0]
+        assert "Completed outcome 0" in calls[0]
         assert result["summarized"] == 3
         for session in sessions:
             stored = get(session.session_id)
@@ -1247,3 +1265,4 @@ class TestImportFromClaudeRecap:
         # Idempotent: a second run inserts nothing new
         second = import_from_claude_recap()
         assert second == 0
+
