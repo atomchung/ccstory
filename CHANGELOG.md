@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `--llm-narrative` now sends up to 40 bounded session excerpts in one
+  narrator request rather than spawning one local CLI process per session.
+  Each returned JSONL row is accepted only for a requested session ID; omitted
+  rows fall back individually and a failed refresh never overwrites a cached
+  automatic summary. Recap now delegates to the shared backfill implementation
+  instead of retaining a second, divergent per-session loop.
 - Restored the category-centered recap structure: `Top focus` shows the
   largest Category, its time share, and a representative session; `What you
   did` remains the separate cross-Category integration of 2-4 goal threads.

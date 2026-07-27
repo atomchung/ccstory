@@ -518,7 +518,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
                         help=argparse.SUPPRESS)  # deprecated alias for --minimal
     parser.add_argument("--llm-narrative", action="store_true",
                         help="Polish per-session narratives via configured local narrator "
-                             "(slow ~40s/session cold start; shows ETA "
+                             "(batched up to 40 sessions/call; shows ETA "
                              "before batch). Default is an instant "
                              "first/last-message fallback. Re-run on a past "
                              "window to upgrade those fallbacks to polished "

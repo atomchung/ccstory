@@ -9,6 +9,8 @@ Focuses on what can be tested without invoking `claude -p`:
 
 from __future__ import annotations
 
+import json
+import re
 import sqlite3
 from pathlib import Path
 
@@ -29,6 +31,7 @@ from ccstory.session_summarizer import (
     synthesize_overall_for_period,
     upsert,
 )
+from ccstory.providers.claude import ClaudeCodeProvider
 
 from tests.conftest import _ts, make_assistant_msg, make_user_msg, write_jsonl
 
@@ -309,6 +312,101 @@ class TestRetroactiveRefresh:
         monkeypatch.setattr(ss, "summarize_via_claude_p", _boom)
         result = summarize_session("sess-r", path, use_llm=False)
         assert result.source == "fallback"
+
+
+class TestBatchedNarrativeBackfill:
+    def _sessions(self, jsonl_factory, count: int = 3):
+        provider = ClaudeCodeProvider()
+        sessions = []
+        for index in range(count):
+            session_id = f"batch-{index}"
+            path = jsonl_factory(
+                "-Users-alice-code-myapp", session_id,
+                [
+                    make_user_msg(
+                        f"Implement outcome {index}",
+                        _ts(2026, 5, 10, 10, index, 0),
+                    ),
+                    make_assistant_msg(
+                        f"Completed outcome {index}",
+                        _ts(2026, 5, 10, 10, index, 5),
+                        f"batch-msg-{index}",
+                    ),
+                ],
+            )
+            stat = provider.parse_session(path)
+            assert stat is not None
+            sessions.append(stat)
+        return sessions
+
+    def test_backfill_batches_and_records_exact_provenance(
+        self, tmp_home: Path, jsonl_factory, monkeypatch
+    ):
+        sessions = self._sessions(jsonl_factory, 3)
+        calls: list[str] = []
+
+        def fake_run(prompt: str, timeout: int):
+            calls.append(prompt)
+            ids = re.findall(r"\[session_id=([^;]+);", prompt)
+            return ss.NarrativeCall(
+                "\n".join(
+                    json.dumps({
+                        "session_id": sid,
+                        "summary": f"Completed {sid} safely",
+                    })
+                    for sid in ids
+                ),
+                "antigravity", "gemini-3.6-flash-low",
+            )
+
+        monkeypatch.setattr(ss, "llm_available", lambda: True)
+        monkeypatch.setattr(ss, "run_llm_p", fake_run)
+        result = ss.backfill_for_sessions(
+            sessions, use_llm=True, batch_size=2,
+        )
+
+        assert len(calls) == 2  # 2 + 1, never one subprocess per session
+        assert result["summarized"] == 3
+        for session in sessions:
+            stored = get(session.session_id)
+            assert stored is not None
+            assert stored.source == "auto"
+            assert stored.narrator_provider == "antigravity"
+            assert stored.narrator_model == "gemini-3.6-flash-low"
+
+    def test_batch_omission_falls_back_and_never_overwrites_auto(
+        self, tmp_home: Path, jsonl_factory, monkeypatch
+    ):
+        sessions = self._sessions(jsonl_factory, 3)
+        kept = sessions[1]
+        upsert(
+            kept.session_id, "keep this proven summary", "auto",
+            project=kept.project, prompt_version=ss.PROMPT_VERSION - 1,
+        )
+
+        def fake_run(_prompt: str, _timeout: int):
+            return ss.NarrativeCall(
+                "\n".join([
+                    json.dumps({
+                        "session_id": sessions[0].session_id,
+                        "summary": "Completed the first task safely",
+                    }),
+                    json.dumps({
+                        "session_id": "invented-id",
+                        "summary": "This must never reach the cache",
+                    }),
+                ]),
+                "claude", "sonnet",
+            )
+
+        monkeypatch.setattr(ss, "llm_available", lambda: True)
+        monkeypatch.setattr(ss, "run_llm_p", fake_run)
+        result = ss.backfill_for_sessions(sessions, use_llm=True)
+
+        assert result["summarized"] == 1
+        assert get(kept.session_id).summary == "keep this proven summary"
+        assert get(sessions[2].session_id).source == "fallback"
+        assert get("invented-id") is None
 
 
 class TestNeedsLlm:
