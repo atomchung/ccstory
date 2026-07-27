@@ -1193,9 +1193,13 @@ def render_terminal_card(
         highlight_block.append(headline)
         top_text = _top_focus_terminal_text(top_focus)
         if top_text:
-            sub = Text(no_wrap=True, overflow="ellipsis")
+            # Keep Top focus a compact two-line module: category/time on the
+            # headline, then one muted, width-bounded project/work detail.
+            # The muted treatment matches the supporting project text below
+            # instead of competing with the category hierarchy.
+            sub = Text(no_wrap=True, overflow="ellipsis", style="dim")
             sub.append("  ↳ ", style="dim")
-            sub.append(top_text, style="italic")
+            sub.append(top_text, style="dim")
             highlight_block.append(sub)
         highlight_block.append(Text(""))
 
@@ -1288,8 +1292,8 @@ def render_terminal_card(
 
     if artifacts and (artifacts.repos or artifacts.github_repos_total):
         parts.append(Text(""))
+        parts.append(Text("Repo activity", style="bold underline"))
         activity = Text()
-        activity.append("Repo activity  ", style="bold")
         bits = [f"{artifacts.total_commits} commits"]
         if artifacts.github_complete and artifacts.total_prs:
             bits.append(f"{artifacts.total_prs} PRs merged")

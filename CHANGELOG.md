@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The terminal card now keeps Top focus to a two-line module with muted,
+  width-bounded supporting text. Repo activity is rendered as its own title
+  plus a separate metrics line for faster scanning.
 - A normal recap now defaults to per-category narrative. Every eligible
   category remains visible through a deterministic local fallback when the
   narrator is unavailable or its lane deadline is reached; report and JSON

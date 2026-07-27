@@ -150,6 +150,18 @@ class TestRepoActivityCard:
         assert "commit activity only" in out
         assert "PRs merged" not in out
 
+    def test_title_is_a_separate_module_from_activity_metrics(self):
+        out = self._render(ArtifactsReport(
+            repos=[RepoArtifacts(root=Path("/x/p"), name="p", commits=4)],
+            repos_discovered=1,
+            github_status="not_connected",
+            github_repos_total=1,
+        ))
+        lines = out.splitlines()
+        title = next(i for i, line in enumerate(lines) if "Repo activity" in line)
+        metrics = next(i for i, line in enumerate(lines) if "4 commits" in line)
+        assert metrics == title + 1
+
     def test_partial_github_totals_are_not_rendered_as_complete(self):
         out = self._render(ArtifactsReport(
             repos=[RepoArtifacts(
