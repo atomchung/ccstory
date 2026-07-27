@@ -363,12 +363,42 @@ def _top_focus_detail(focus: TopFocusNarrative) -> str | None:
 
 
 def _top_focus_terminal_text(focus: TopFocusNarrative) -> str | None:
-    """One-line terminal projection of the same category/project narrative."""
+    """Compact terminal projection of the same category/project narrative."""
     parts: list[str] = []
     if focus.project:
         parts.append(focus.project)
     parts.extend(focus.strongest_session_summaries)
     return " · ".join(parts) or None
+
+
+_TOP_FOCUS_DETAIL_WIDTH = 62
+_TOP_FOCUS_DETAIL_MAX_LINES = 2
+_TOP_FOCUS_WRAP_CONSOLE = Console(
+    width=_TOP_FOCUS_DETAIL_WIDTH,
+    color_system=None,
+)
+
+
+def _top_focus_terminal_detail_lines(text: str) -> list[Text]:
+    """Wrap the muted Top focus detail to its bounded card allocation.
+
+    The panel has a fixed 72-cell width; after border/padding and the hanging
+    ``↳`` column, the detail gets 62 cells.  Rich's normal ``overflow='fold'``
+    preserves words and CJK cell widths, while this helper caps only the third
+    and later lines rather than prematurely ellipsizing the whole detail.
+    """
+    detail = Text(text, style="dim")
+    lines = detail.wrap(
+        _TOP_FOCUS_WRAP_CONSOLE,
+        _TOP_FOCUS_DETAIL_WIDTH,
+        overflow="fold",
+    )
+    if len(lines) > _TOP_FOCUS_DETAIL_MAX_LINES:
+        final = lines[_TOP_FOCUS_DETAIL_MAX_LINES - 1]
+        final.append(" …", style="dim")
+        final.truncate(_TOP_FOCUS_DETAIL_WIDTH, overflow="ellipsis")
+        return lines[: _TOP_FOCUS_DETAIL_MAX_LINES - 1] + [final]
+    return lines
 
 
 _BOLD_HEADER_RE = re.compile(r"^\*\*(.+)\*\*$")
@@ -1193,14 +1223,17 @@ def render_terminal_card(
         highlight_block.append(headline)
         top_text = _top_focus_terminal_text(top_focus)
         if top_text:
-            # Keep Top focus a compact two-line module: category/time on the
-            # headline, then one muted, width-bounded project/work detail.
-            # The muted treatment matches the supporting project text below
-            # instead of competing with the category hierarchy.
-            sub = Text(no_wrap=True, overflow="ellipsis", style="dim")
-            sub.append("  ↳ ", style="dim")
-            sub.append(top_text, style="dim")
-            highlight_block.append(sub)
+            # The gray supporting detail is allowed two wrapped lines.  A
+            # hanging indent makes the continuation read as one compact
+            # module rather than a fresh, misaligned card section.
+            detail = Table.grid(padding=0)
+            detail.add_column(width=4, no_wrap=True)
+            detail.add_column(width=_TOP_FOCUS_DETAIL_WIDTH)
+            detail.add_row(
+                Text("  ↳ ", style="dim"),
+                Group(*_top_focus_terminal_detail_lines(top_text)),
+            )
+            highlight_block.append(detail)
         highlight_block.append(Text(""))
 
     # --- Metrics row ---
