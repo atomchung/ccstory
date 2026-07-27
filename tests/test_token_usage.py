@@ -124,6 +124,7 @@ class TestCollectUsage:
         assert patterns == [
             str(provider.projects_dir / "*" / "*.jsonl"),
             str(provider.projects_dir / "*" / "subagents" / "*.jsonl"),
+            str(provider.projects_dir / "*" / "*" / "subagents" / "*.jsonl"),
         ]
 
     def _records(self):
@@ -287,6 +288,30 @@ class TestCollectUsage:
             datetime(2026, 5, 31, tzinfo=timezone.utc),
         )
         assert [session.session_id for session in sessions] == ["session-old"]
+
+    def test_claude_usage_includes_parent_session_subagent_layout(
+        self, jsonl_factory,
+    ):
+        records = [
+            make_user_msg("delegate", _ts(2026, 5, 10, 10, 0, 0)),
+            make_assistant_msg(
+                "done", _ts(2026, 5, 10, 10, 0, 5), "subagent-msg",
+                input_tokens=300, output_tokens=150,
+            ),
+        ]
+        jsonl_factory(
+            "myproj/parent-session/subagents", "nested-subagent", records,
+        )
+
+        report = collect_usage(
+            datetime(2026, 5, 1, tzinfo=timezone.utc),
+            datetime(2026, 5, 31, tzinfo=timezone.utc),
+            agent="claude",
+        )
+
+        assert report.assistant_turns == 1
+        assert report.total_input == 300
+        assert report.total_output == 150
 
 def make_codex_token_count(
     ts: str,

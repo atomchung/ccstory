@@ -206,10 +206,14 @@ class ClaudeCodeProvider(BaseAgentProvider):
         assistant_turns = {key: 0 for key in windows}
         seen_ids = {key: set() for key in windows}
 
-        # Target top-level project jsonls and nested subagent jsonls
+        # Target top-level project jsonls plus the two observed, fixed-depth
+        # subagent layouts.  Claude Code's current layout nests subagents
+        # below a parent-session directory; the shorter form remains for
+        # older logs and fixtures.
         search_patterns = [
             str(self.projects_dir / "*" / "*.jsonl"),
             str(self.projects_dir / "*" / "subagents" / "*.jsonl"),
+            str(self.projects_dir / "*" / "*" / "subagents" / "*.jsonl"),
         ]
         matching_paths: list[str] = []
         for pattern in search_patterns:
