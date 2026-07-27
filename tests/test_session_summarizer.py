@@ -458,6 +458,33 @@ class TestBatchedNarrativeBackfill:
         assert get(sessions[2].session_id).source == "fallback"
         assert get("invented-id") is None
 
+    def test_batch_omission_retries_missing_ids_once(
+        self, tmp_home: Path, jsonl_factory, monkeypatch,
+    ):
+        sessions = self._sessions(jsonl_factory, 3)
+        calls = 0
+
+        def fake_run(prompt: str, _timeout: int):
+            nonlocal calls
+            calls += 1
+            ids = re.findall(r"\[session_id=([^;]+);", prompt)
+            selected = ids[:1] if calls == 1 else ids
+            return ss.NarrativeCall(
+                "\n".join(
+                    json.dumps({"session_id": sid, "summary": f"Done {sid}"})
+                    for sid in selected
+                ),
+                "claude", "sonnet",
+            )
+
+        monkeypatch.setattr(ss, "llm_available", lambda: True)
+        monkeypatch.setattr(ss, "run_llm_p", fake_run)
+        result = ss.backfill_for_sessions(sessions, use_llm=True)
+
+        assert calls == 2
+        assert result["summarized"] == 3
+        assert all(get(session.session_id).source == "auto" for session in sessions)
+
     def test_probe_grows_next_batch_and_budget_exhaustion_falls_back(
         self, tmp_home: Path, jsonl_factory, monkeypatch
     ):
@@ -1265,4 +1292,3 @@ class TestImportFromClaudeRecap:
         # Idempotent: a second run inserts nothing new
         second = import_from_claude_recap()
         assert second == 0
-
