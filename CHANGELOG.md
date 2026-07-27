@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A normal recap now takes one in-memory transcript snapshot spanning the
+  current and previous comparison windows, rather than reparsing overlapping
+  session files twice. The snapshot is per invocation (not an mtime cache),
+  preserving boundary-overlap and resumed-session semantics.
+- Claude and Codex exact token usage now use the same one-scan, multi-window
+  path for a report and its previous-window comparison. Each usage event keeps
+  its existing inclusive window-boundary behavior; Codex branch-baseline and
+  inherited-prefix handling remain unchanged.
+- `--llm-narrative` now sends up to 40 bounded session excerpts in one
+  narrator request rather than spawning one local CLI process per session.
+  Each returned JSONL row is accepted only for a requested session ID; omitted
+  rows fall back individually and a failed refresh never overwrites a cached
+  automatic summary. Recap now delegates to the shared backfill implementation
+  instead of retaining a second, divergent per-session loop.
 - Restored the category-centered recap structure: `Top focus` shows the
   largest Category, its time share, and a representative session; `What you
   did` remains the separate cross-Category integration of 2-4 goal threads.

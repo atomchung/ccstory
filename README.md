@@ -417,7 +417,7 @@ not use an API key or add a separate API charge.
 | Overall narrative | 0 or 1 on a cache miss | Reused while its rendered inputs and prompt are unchanged |
 | Per-category narrative | Up to 1 per eligible bucket on a cache miss | Reused while that bucket's inputs and prompt are unchanged |
 | Previous-window narrative | 0 or 1 on a cache miss | Reused while its comparison inputs and prompt are unchanged |
-| `--llm-narrative` | 1 per uncached or stale session | Reused per session; `--refresh` deliberately regenerates |
+| `--llm-narrative` | 1 per 40 uncached or stale sessions | Reused per session; `--refresh` deliberately regenerates |
 
 The default recap uses hybrid classification, an overall narrative, and a
 previous-window narrative; per-session LLM prose remains opt-in. Use
@@ -426,9 +426,13 @@ calls. `--no-aggregate`, `--no-compare-narrative`, and `--classify folder`
 remove those call types; `--minimal --classify folder` makes the recap itself
 use zero local-narrator calls.
 
-Deep/content classification is batched; per-session `--llm-narrative` work is
-linear and the CLI budgets roughly 40 seconds per cold session, showing an ETA
-before it starts. Aggregate call latency varies with the selected CLI startup and
+Deep/content classification and per-session `--llm-narrative` work are batched.
+The latter sends up to 40 bounded excerpts in one strict JSONL request, validates
+every returned session id, and falls back only entries the model omitted. The CLI
+currently shows a conservative fixed first-run estimate of roughly 20 seconds
+per summary batch. It does not yet learn timing from prior runs: a batch writes
+many cache rows together, so the old per-session timestamp heuristic is no
+longer valid. Aggregate call latency varies with the selected CLI startup and
 input size. A same-window rerun is usually cache-only, but new sessions,
 changed inputs/config, `--refresh`, or a newer prompt version can trigger fresh
 calls. Content classification carries accepted bucket names into later

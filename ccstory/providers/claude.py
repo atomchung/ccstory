@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import glob
 import json
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -183,6 +184,15 @@ class ClaudeCodeProvider(BaseAgentProvider):
         until: datetime,
         by_model: dict,
     ) -> int:
+        return self.collect_usage_for_windows(
+            {"window": (since, until)}, {"window": by_model},
+        )["window"]
+
+    def collect_usage_for_windows(
+        self,
+        windows: Mapping[str, tuple[datetime, datetime]],
+        by_model_by_window: Mapping[str, dict],
+    ) -> dict[str, int]:
         """Scan all Claude Code jsonl files and aggregate token usage in [since, until].
 
         Note: Claude Code logs usage per assistant message (non-cumulative). Subagent
@@ -193,8 +203,8 @@ class ClaudeCodeProvider(BaseAgentProvider):
         """
         from ..token_usage import ModelUsage
 
-        assistant_turns = 0
-        seen_ids: set[str] = set()
+        assistant_turns = {key: 0 for key in windows}
+        seen_ids = {key: set() for key in windows}
 
         for path_str in glob.glob(
             str(self.projects_dir / "**" / "*.jsonl"), recursive=True
@@ -220,24 +230,29 @@ class ClaudeCodeProvider(BaseAgentProvider):
                             t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
                         except ValueError:
                             continue
-                        if t < since or t > until:
-                            continue
-
                         mid = msg.get("id")
-                        if mid:
-                            if mid in seen_ids:
-                                continue
-                            seen_ids.add(mid)
-
                         u = msg["usage"]
                         model = msg.get("model") or "unknown"
-                        mu = by_model.setdefault(model, ModelUsage(model=model))
-                        mu.turns += 1
-                        mu.input_tokens   += u.get("input_tokens", 0) or 0
-                        mu.cache_creation += u.get("cache_creation_input_tokens", 0) or 0
-                        mu.cache_read     += u.get("cache_read_input_tokens", 0) or 0
-                        mu.output_tokens  += u.get("output_tokens", 0) or 0
-                        assistant_turns += 1
+                        for key, (since, until) in windows.items():
+                            if t < since or t > until:
+                                continue
+                            if mid:
+                                if mid in seen_ids[key]:
+                                    continue
+                                seen_ids[key].add(mid)
+                            mu = by_model_by_window[key].setdefault(
+                                model, ModelUsage(model=model),
+                            )
+                            mu.turns += 1
+                            mu.input_tokens += u.get("input_tokens", 0) or 0
+                            mu.cache_creation += (
+                                u.get("cache_creation_input_tokens", 0) or 0
+                            )
+                            mu.cache_read += (
+                                u.get("cache_read_input_tokens", 0) or 0
+                            )
+                            mu.output_tokens += u.get("output_tokens", 0) or 0
+                            assistant_turns[key] += 1
             except OSError:
                 continue
 

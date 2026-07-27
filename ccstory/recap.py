@@ -16,8 +16,6 @@ from __future__ import annotations
 
 import os
 import re
-import sqlite3
-import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -40,12 +38,14 @@ from .categorizer import (
     normalize_project_name,
     resolve_session_bucket,
 )
-from .providers import TranscriptResolver, agent_label, provider_data_roots
+from .providers import agent_label, provider_data_roots
 from .report import build_report_json, render_report
 from .session_summarizer import (
     CCSTORY_LANG_ENV,
     _classify_cache_get_many,
     _needs_llm,
+    SUMMARY_BATCH_SIZE,
+    backfill_for_sessions,
     llm_available,
     classify_sessions_by_content,
     get_many,
@@ -56,29 +56,32 @@ from .session_summarizer import (
     invalidate_content_buckets,
     invalidate_period_aggregates,
     language_directive,
-    recent_auto_timestamps,
-    summarize_session,
     synthesize_category_for_period,
     synthesize_comparison,
     synthesize_overall_for_period,
-    upsert,
 )
-from .time_tracking import CLAUDE_PROJECTS, collect_sessions, rollup_by_category
-from .token_usage import apply_prices, collect_usage, load_prices_config
-from .trends import PeriodComparison, compare_to_previous
+from .time_tracking import (
+    CLAUDE_PROJECTS,
+    collect_sessions,
+    collect_sessions_for_windows,
+    rollup_by_category,
+)
+from .token_usage import (
+    apply_prices,
+    collect_usage,
+    collect_usage_for_windows,
+    load_prices_config,
+)
+from .trends import PeriodComparison, compare_to_previous, previous_window
 
 REPORTS_DIR = Path.home() / ".ccstory" / "reports"
 CONFIG_PATH = Path.home() / ".ccstory" / "config.toml"
 
-# First-run guess, used only until the cache has real timings to learn from.
-# Deliberately pessimistic: with no history, over-stating is safer than
-# promising a speed this machine may not deliver. `_sec_per_session()` takes
-# over from the second run on (#113).
-CLAUDE_P_SEC_FALLBACK = 40
-
-_ETA_HISTORY = 60        # how many past `auto` rows to learn from
-_ETA_MIN_SAMPLES = 8     # fewer gaps than this and the median is just noise
-_ETA_RUN_GAP_SEC = 300   # a wider gap separates two runs, not two sessions
+# A new batch produces forty cache rows almost simultaneously, so the old
+# per-row timestamp-gap heuristic cannot infer narrator latency any more.
+# Keep the first-run estimate explicit until batch timings gain their own
+# persisted measurement lane.
+SUMMARY_BATCH_SEC_FALLBACK = 20
 
 
 class RecapUnavailable(RuntimeError):
@@ -232,7 +235,7 @@ def _synthesize_overall(
     category_hours = [(r.category, r.active_min / 60) for r in rollups]
 
     with console.status(
-        "[dim]Synthesizing overall narrative (configured narrator)…[/dim]"
+        "[dim]Synthesizing overall narrative (configured narrator)…[/dim]",
     ):
         return synthesize_overall_for_period(
             period_key=label,
@@ -368,31 +371,6 @@ def _resolve_all_sessions(
             s.category_source = "fallback"
 
 
-def _sec_per_session() -> tuple[float, bool]:
-    """How long one configured narrator summary actually takes on this machine.
-
-    Learns from the cache rather than guessing: a backfill writes one `auto`
-    row per call, so gaps between consecutive rows are real timings for
-    exactly the work being predicted. Gaps wider than `_ETA_RUN_GAP_SEC` fall
-    between separate runs, not between sessions, so they are dropped. The
-    median, not the mean, keeps one stalled call from skewing the estimate.
-
-    Returns `(seconds, measured)`; `measured` is False when there is not yet
-    enough history, so the caller can label the number honestly instead of
-    presenting a guess as a measurement.
-    """
-    try:
-        stamps = recent_auto_timestamps(_ETA_HISTORY)
-    except sqlite3.Error:
-        return CLAUDE_P_SEC_FALLBACK, False
-    gaps = [
-        b - a for a, b in zip(stamps, stamps[1:]) if b - a < _ETA_RUN_GAP_SEC
-    ]
-    if len(gaps) < _ETA_MIN_SAMPLES:
-        return CLAUDE_P_SEC_FALLBACK, False
-    return statistics.median(gaps), True
-
-
 def _backfill_summaries(
     sessions,
     console: Console,
@@ -411,27 +389,28 @@ def _backfill_summaries(
     by_id = {s.session_id: s for s in sessions if getattr(s, "session_id", None)}
     ids = list(by_id.keys())
     existing = get_many(ids)
-    if use_llm:
-        todo = [sid for sid in ids if _needs_llm(existing.get(sid), force)]
-    else:
-        todo = [sid for sid in ids if existing.get(sid) is None]
-    regen = sum(1 for sid in todo if existing.get(sid) is not None)
-    counts = {"summarized": 0, "fallback": 0, "skipped": 0,
-              "regenerated": regen, "already": len(ids) - len(todo)}
+    todo = [
+        sid for sid in ids
+        if (_needs_llm(existing.get(sid), force) if use_llm else existing.get(sid) is None)
+    ]
     if not todo:
-        return counts
+        return {
+            "summarized": 0, "fallback": 0, "skipped": 0,
+            "regenerated": 0, "already": len(ids),
+        }
 
     if use_llm:
-        sec, measured = _sec_per_session()
-        eta_min = max(1, int((len(todo) * sec + 59) // 60))
+        batch_count = (len(todo) + SUMMARY_BATCH_SIZE - 1) // SUMMARY_BATCH_SIZE
+        eta_min = max(1, int((batch_count * SUMMARY_BATCH_SEC_FALLBACK + 59) // 60))
+        regen = sum(1 for sid in todo if existing.get(sid) is not None)
         breakdown = f"{len(todo) - regen} new"
         if regen:
             breakdown += f" + {regen} regenerated"
-        basis = "measured on this machine" if measured else "first-run estimate"
         console.print(
             f"[yellow]![/yellow] {len(todo)} session(s) to summarize "
-            f"({breakdown}). [bold]Narrator ETA ~{eta_min} min[/bold] "
-            f"(~{sec:.0f}s/session, {basis}). "
+            f"({breakdown}) in {batch_count} batch(es). "
+            f"[bold]Narrator ETA ~{eta_min} min[/bold] "
+            f"(~{SUMMARY_BATCH_SEC_FALLBACK}s/batch, first-run estimate). "
             f"Press Ctrl+C to abort, or rerun without --llm-narrative "
             f"for an instant first/last-message fallback.\n"
         )
@@ -449,38 +428,20 @@ def _backfill_summaries(
         transient=False,
     ) as progress:
         task = progress.add_task(progress_desc, total=len(todo))
-        # One resolver for the whole loop: each provider builds whatever index
-        # it needs once, not once per session.
-        resolver = TranscriptResolver()
-        for sid in todo:
-            sess = by_id[sid]
-            jsonl_path = resolver.path_for(sess)
-            if jsonl_path is None:
-                # Don't clobber a cached summary when the jsonl has since
-                # gone missing; only record a skip for never-seen ids.
-                if existing.get(sid) is None:
-                    upsert(sid, "(jsonl not found)", "skipped",
-                           project=sess.project)
-                counts["skipped"] += 1
-                progress.advance(task)
-                continue
-            result = summarize_session(
-                sid,
-                jsonl_path,
-                use_llm=use_llm,
-                force=force,
-                provider=resolver.provider_for(sess),
-            )
-            if result and result.source == "auto":
-                counts["summarized"] += 1
-                latest = result.summary
-                progress.update(task, description=f"[dim]↳ {latest[:50]}[/dim]")
-            elif result and result.source == "fallback":
-                counts["fallback"] += 1
-            else:
-                counts["skipped"] += 1
+        def _progress(done: int, _total: int, _sid: str, source: str) -> None:
+            progress.update(task, description=f"[dim]completed {done}/{len(todo)} ({source})[/dim]")
             progress.advance(task)
-    return counts
+
+        def _chunk_progress(done: int, total: int) -> None:
+            progress.update(
+                task,
+                description=f"[dim]narrator batch {done}/{total} complete[/dim]",
+            )
+
+        return backfill_for_sessions(
+            sessions, on_progress=_progress, use_llm=use_llm, force=force,
+            on_chunk_complete=_chunk_progress if use_llm else None,
+        )
 
 
 def _agent_data_roots(agent: str) -> list[tuple[str, Path]]:
@@ -581,17 +542,47 @@ def build_recap(
         f"[dim]({label})[/dim]\n"
     )
 
+    previous_sessions = None
+    previous_usage = None
     with console.status("[dim]Parsing sessions and token usage…[/dim]"):
-        sessions = collect_sessions(since, until, agent=agent)
+        if compare and window != "all":
+            prev_since, prev_until = previous_window(since, until)
+            session_windows = collect_sessions_for_windows(
+                {
+                    "current": (since, until),
+                    "previous": (prev_since, prev_until),
+                },
+                agent=agent,
+            )
+            sessions = session_windows["current"]
+            previous_sessions = session_windows["previous"]
+        else:
+            sessions = collect_sessions(since, until, agent=agent)
         if not sessions:
             raise RecapUnavailable("No engaged sessions in this window.")
-        # since/until are tz-aware local; collect_usage normalizes to UTC.
-        usage = collect_usage(
-            since,
-            until,
-            agent=agent,
-            active_agents={session.agent for session in sessions},
-        )
+        # Read current/previous exact usage in one provider scan whenever the
+        # comparison needs both windows. Token usage normalizes local bounds.
+        if previous_sessions is not None:
+            usage_windows = collect_usage_for_windows(
+                {
+                    "current": (since, until),
+                    "previous": (prev_since, prev_until),
+                },
+                agent=agent,
+                active_agents_by_window={
+                    "current": {session.agent for session in sessions},
+                    "previous": {session.agent for session in previous_sessions},
+                },
+            )
+            usage = usage_windows["current"]
+            previous_usage = usage_windows["previous"]
+        else:
+            usage = collect_usage(
+                since,
+                until,
+                agent=agent,
+                active_agents={session.agent for session in sessions},
+            )
 
     console.print(
         f"[green]✓[/green] {len(sessions)} sessions · "
@@ -716,6 +707,8 @@ def build_recap(
                 mode=classify,
                 fallback=fallback_bucket,
                 agent=agent,
+                previous_sessions=previous_sessions,
+                previous_usage=previous_usage,
             )
         if comparison and compare_narrative and summaries:
             prev_summaries = get_many(comparison.previous_session_ids)

@@ -12,6 +12,7 @@ session.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 
@@ -72,6 +73,22 @@ class BaseAgentProvider(ABC):
         whose normal logs lack exact usage returns zero and declares partial or
         unavailable coverage in its ``AgentProviderSpec``.
         """
+
+    def collect_usage_for_windows(
+        self,
+        windows: Mapping[str, tuple[datetime, datetime]],
+        by_model_by_window: Mapping[str, dict],
+    ) -> dict[str, int]:
+        """Collect exact usage for several windows in one invocation.
+
+        The conservative default preserves third-party provider compatibility.
+        Bundled providers override it to parse their source files once and
+        attribute each exact event to every matching window.
+        """
+        return {
+            key: self.collect_usage(since, until, by_model_by_window[key])
+            for key, (since, until) in windows.items()
+        }
 
     def transcript_path(self, sess: SessionStat) -> Path | None:
         """Locate the transcript backing ``sess``, or None if it is gone.

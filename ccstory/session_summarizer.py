@@ -818,6 +818,26 @@ Excerpt:
 Output only the one-sentence summary, no quotes, no prefix."""
 
 
+SUMMARY_BATCH_SIZE = 40
+_SUMMARY_BATCH_EXCERPT_CHARS = 700
+_SUMMARY_BATCH_PROMPT = """{language_directive}
+
+Below are excerpts from several AI coding-agent conversations. For EACH input
+session, write one outcome-focused summary of what the session actually did.
+
+Return exactly one JSON object per line, in the same order as the inputs:
+{{"session_id":"the supplied id","summary":"one sentence, maximum 18 words"}}
+
+Rules:
+- Preserve every supplied session_id exactly. Never invent or omit an id.
+- Describe outcomes, not the conversation process or a user request.
+- Keep each summary between 4 and 200 characters.
+- Output JSON lines only: no Markdown fence, array, explanation, or prefix.
+
+Sessions:
+{rows}"""
+
+
 def claude_bin_available() -> bool:
     return shutil.which(CLAUDE_BIN) is not None
 
@@ -964,6 +984,84 @@ def summarize_via_claude_p(excerpt: str, timeout: int = 60) -> NarrativeCall | N
     except (subprocess.SubprocessError, OSError) as e:
         LOG.warning("narrative backend errored: %s", e)
         return None
+
+
+def _parse_batch_summaries(text: str, requested_ids: set[str]) -> dict[str, str]:
+    """Accept only valid JSONL summaries for requested session ids.
+
+    A batch narrator has more opportunity to omit or hallucinate ids than the
+    old one-session request. Keep the cache fail-closed: malformed rows and
+    unknown ids are ignored, so callers can fall back only those sessions.
+    """
+    parsed: dict[str, str] = {}
+    cleaned = text.strip()
+    for fence in ("```json", "```JSON", "```"):
+        cleaned = cleaned.replace(fence, "")
+    for line in cleaned.splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        session_id = row.get("session_id")
+        summary = row.get("summary")
+        if not isinstance(session_id, str) or session_id not in requested_ids:
+            continue
+        if not isinstance(summary, str):
+            continue
+        summary = " ".join(summary.split()).strip().strip('"').strip("'")
+        if 4 <= len(summary) <= 200:
+            parsed[session_id] = summary
+    return parsed
+
+
+def summarize_sessions_via_llm_batch(
+    items: list[tuple[str, str, str]],
+    *,
+    timeout: int = 120,
+    batch_size: int = SUMMARY_BATCH_SIZE,
+    on_chunk_complete: Callable[[int, int], None] | None = None,
+) -> dict[str, NarrativeCall]:
+    """Generate per-session prose in bounded batches.
+
+    ``items`` is ``[(session_id, project, excerpt)]``. The returned mapping is
+    intentionally sparse: a model omission, malformed JSON, or failed batch
+    does not manufacture a cache entry. ``backfill_for_sessions`` owns the
+    existing per-session fallback policy for those cases.
+    """
+    if not items or not llm_available():
+        return {}
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+
+    out: dict[str, NarrativeCall] = {}
+    total_chunks = (len(items) + batch_size - 1) // batch_size
+    for chunk_index, start in enumerate(range(0, len(items), batch_size), start=1):
+        chunk = items[start:start + batch_size]
+        rows = "\n\n".join(
+            f"[session_id={session_id}; project={project}]\n{excerpt[:_SUMMARY_BATCH_EXCERPT_CHARS]}"
+            for session_id, project, excerpt in chunk
+        )
+        prompt = _SUMMARY_BATCH_PROMPT.format(
+            language_directive=language_directive(), rows=rows,
+        )
+        try:
+            call = run_llm_p(prompt, timeout)
+        except (subprocess.SubprocessError, OSError) as exc:
+            LOG.warning("batch session summarization errored: %s", exc)
+            call = None
+        if call is not None:
+            requested_ids = {session_id for session_id, _, _ in chunk}
+            for session_id, summary in _parse_batch_summaries(
+                call.stdout, requested_ids,
+            ).items():
+                out[session_id] = NarrativeCall(
+                    summary, call.provider, call.model,
+                )
+        if on_chunk_complete is not None:
+            on_chunk_complete(chunk_index, total_chunks)
+    return out
 
 
 def _fallback_narrative(excerpt: str) -> str:
@@ -1917,6 +2015,8 @@ def backfill_for_sessions(
     on_progress=None,
     use_llm: bool = False,
     force: bool = False,
+    batch_size: int = SUMMARY_BATCH_SIZE,
+    on_chunk_complete: Callable[[int, int], None] | None = None,
 ) -> dict:
     """Summarize sessions that are missing or, under `use_llm`, stale.
 
@@ -1924,7 +2024,9 @@ def backfill_for_sessions(
     `use_llm=False` (default) only summarizes never-seen sessions with the
     instant first/last-user-message fallback. `use_llm=True` additionally upgrades
     `fallback` rows to `auto` and regenerates stale `auto` rows (older
-    prompt_version, or every in-window `auto` when `force=True`).
+    prompt_version, or every in-window `auto` when `force=True`) in bounded
+    batch narrator calls. ``on_chunk_complete`` receives completed/total LLM
+    batches; ``on_progress`` remains a per-session completion callback.
     Returns {"summarized": N, "fallback": F, "skipped": M, "already": K,
              "regenerated": R}.
     """
@@ -1940,7 +2042,10 @@ def backfill_for_sessions(
     from .providers import TranscriptResolver
 
     resolver = TranscriptResolver()
-    for i, sid in enumerate(todo):
+    prepared: list[tuple[str, str, str]] = []
+    projects: dict[str, str] = {}
+
+    for sid in todo:
         sess = by_id[sid]
         jsonl_path = resolver.path_for(sess)
         if jsonl_path is None:
@@ -1949,24 +2054,63 @@ def backfill_for_sessions(
             if existing.get(sid) is None:
                 upsert(sid, "(jsonl not found)", "skipped", project=sess.project)
             skipped += 1
-            if on_progress:
-                on_progress(i + 1, len(todo), sid, "skipped")
             continue
-        result = summarize_session(
-            sid,
-            jsonl_path,
-            use_llm=use_llm,
-            force=force,
-            provider=resolver.provider_for(sess),
+        if not use_llm:
+            result = summarize_session(
+                sid, jsonl_path, use_llm=False, force=force,
+                provider=resolver.provider_for(sess),
+            )
+            if result and result.source == "fallback":
+                fallback += 1
+            else:
+                skipped += 1
+            continue
+
+        project, excerpt = _extract_excerpt(
+            jsonl_path, provider=resolver.provider_for(sess),
         )
-        if result and result.source == "auto":
-            summarized += 1
-        elif result and result.source == "fallback":
-            fallback += 1
-        else:
+        if not excerpt:
+            # Retain a useful existing auto/fallback result rather than
+            # replacing it with an empty-excerpt marker.
+            if existing.get(sid) is None:
+                upsert(sid, "(no meaningful conversation)", "skipped", project=project)
             skipped += 1
-        if on_progress:
-            on_progress(i + 1, len(todo), sid, result.source if result else "fail")
+            continue
+        projects[sid] = project
+        prepared.append((sid, project, excerpt))
+
+    generated = (
+        summarize_sessions_via_llm_batch(
+            prepared, batch_size=batch_size,
+            on_chunk_complete=on_chunk_complete,
+        )
+        if use_llm else {}
+    )
+    for sid, _project, excerpt in prepared:
+        call = generated.get(sid)
+        if call is not None:
+            upsert(
+                sid, call.stdout, "auto", project=projects[sid],
+                prompt_version=PROMPT_VERSION,
+                narrator_provider=call.provider,
+                narrator_model=call.model,
+                narrator_fingerprint=narrative_config_fingerprint(),
+            )
+            summarized += 1
+            continue
+        # Exactly preserve the old non-destructive contract: a failed refresh
+        # retains an existing auto summary; only a missing/fallback row falls
+        # back to the extractive narrative.
+        if existing.get(sid) and existing[sid].source == "auto":
+            continue
+        upsert(sid, _fallback_narrative(excerpt), "fallback", project=projects[sid])
+        fallback += 1
+
+    if on_progress:
+        results = get_many(todo)
+        for i, sid in enumerate(todo, start=1):
+            result = results.get(sid)
+            on_progress(i, len(todo), sid, result.source if result else "fail")
     return {
         "summarized": summarized,
         "fallback": fallback,

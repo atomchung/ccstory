@@ -129,6 +129,8 @@ def compare_to_previous(
     mode: str = "hybrid",
     fallback: str = "coding",
     agent: str = "all",
+    previous_sessions: list[SessionStat] | None = None,
+    previous_usage: UsageReport | None = None,
 ) -> PeriodComparison | None:
     """Build a comparison record against the previous same-length window.
 
@@ -145,12 +147,17 @@ def compare_to_previous(
     from .time_tracking import collect_sessions  # local to avoid cycle hassle
 
     prev_since, prev_until = previous_window(since, until)
-    prev_sessions = collect_sessions(prev_since, prev_until, agent=agent)
+    # A recap can supply an invocation-local snapshot that already scanned
+    # both adjacent windows. Keep the standalone API's old collection path
+    # for callers that only have the current window in hand.
+    prev_sessions = previous_sessions
+    if prev_sessions is None:
+        prev_sessions = collect_sessions(prev_since, prev_until, agent=agent)
     if not prev_sessions:
         return None
     _resolve_sessions_from_cache(prev_sessions, mode=mode, fallback=fallback)
     prev_rollups = rollup_by_category(prev_sessions)
-    prev_usage = collect_usage(
+    prev_usage = previous_usage or collect_usage(
         prev_since,
         prev_until,
         agent=agent,
