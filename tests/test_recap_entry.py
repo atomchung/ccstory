@@ -116,6 +116,7 @@ class TestBuildRecap:
             "completed_calls": 0,
             "timed_out_calls": 0,
             "stopped_reason": None,
+            "partial": False,
         }
 
     def test_write_report_false_skips_file(self, tmp_home, jsonl_factory):

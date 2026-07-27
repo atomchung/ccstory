@@ -405,6 +405,7 @@ class NarrativeBudget:
             "completed_calls": self.completed_calls,
             "timed_out_calls": self.timed_out_calls,
             "stopped_reason": self.stopped_reason,
+            "partial": bool(self.stopped_reason or self.timed_out_calls),
         }
 
 
@@ -899,7 +900,10 @@ _flag_confirmed_broken = False
 
 
 def run_claude_p(
-    prompt: str, timeout: int, model: str = "sonnet",
+    prompt: str,
+    timeout: float,
+    model: str = "sonnet",
+    deadline: float | None = None,
 ) -> subprocess.CompletedProcess:
     """Run `claude -p --model <model> --output-format text <prompt>`, preferring
     `--no-session-persistence` so one-off summarization calls don't clutter
@@ -916,17 +920,28 @@ def run_claude_p(
     """
     global _flag_confirmed_broken
     base = [CLAUDE_BIN, "-p", "--model", model, "--output-format", "text"]
+
+    def _remaining_timeout() -> float:
+        if deadline is None:
+            return timeout
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(str(CLAUDE_BIN), timeout)
+        return remaining
+
     if not _flag_confirmed_broken:
         r = subprocess.run(
             [*base, "--no-session-persistence", prompt],
-            capture_output=True, text=True, timeout=timeout, check=False,
+            capture_output=True, text=True,
+            timeout=_remaining_timeout(), check=False,
         )
         if r.returncode != 0 or r.stdout.strip():
             return r
         _flag_confirmed_broken = True
     return subprocess.run(
         [*base, prompt],
-        capture_output=True, text=True, timeout=timeout, check=False,
+        capture_output=True, text=True,
+        timeout=_remaining_timeout(), check=False,
     )
 
 
@@ -1020,7 +1035,12 @@ def run_llm_p(
                 break
         try:
             if backend.provider == "claude":
-                result = run_claude_p(prompt, remaining, backend.model)
+                if deadline is None:
+                    result = run_claude_p(prompt, remaining, backend.model)
+                else:
+                    result = run_claude_p(
+                        prompt, remaining, backend.model, deadline=deadline,
+                    )
             elif backend.provider == "codex":
                 result = _run_codex_p(prompt, remaining, backend.model)
             else:

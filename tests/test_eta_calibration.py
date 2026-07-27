@@ -10,3 +10,8 @@ class TestNarrativeBudget:
         budget = ss.NarrativeBudget()
         assert budget.total_sec == 90
         assert budget.batch_deadline_sec == 45
+
+    def test_timeout_marks_budget_status_partial(self):
+        budget = ss.NarrativeBudget()
+        budget.finish_call(0.0, timed_out=True)
+        assert budget.status()["partial"] is True

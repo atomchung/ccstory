@@ -742,11 +742,17 @@ def build_recap(
 
     if narrative_budget is not None:
         narrative_provenance["budget"] = narrative_budget.status()
-        if narrative_budget.stopped_reason:
+        if narrative_budget.stopped_reason == "budget_exhausted":
             console.print(
                 "[yellow]![/yellow] [dim]LLM analysis partial: "
                 f"stopped at {narrative_budget.total_sec:.0f}s budget; "
                 "remaining session work used local fallback and later prose was skipped[/dim]\n"
+            )
+        elif narrative_budget.timed_out_calls:
+            console.print(
+                "[yellow]![/yellow] [dim]LLM analysis partial: one or more "
+                "calls reached the 45s deadline; affected session work used "
+                "local fallback[/dim]\n"
             )
 
     artifacts_report = None
