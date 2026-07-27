@@ -205,7 +205,6 @@ class ClaudeCodeProvider(BaseAgentProvider):
 
         assistant_turns = {key: 0 for key in windows}
         seen_ids = {key: set() for key in windows}
-        earliest_ts = min(since for since, _until in windows.values()).timestamp()
 
         # Target top-level project jsonls and nested subagent jsonls
         search_patterns = [
@@ -279,7 +278,6 @@ class ClaudeCodeProvider(BaseAgentProvider):
             until = until.replace(tzinfo=timezone.utc)
 
         stats: list[SessionStat] = []
-        since_ts = since.timestamp()
 
         for path_str in glob.glob(str(self.projects_dir / "*" / "*.jsonl")):
             path = Path(path_str)
