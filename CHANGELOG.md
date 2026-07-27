@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Antigravity subagent discovery now caches its transcript pass and extracts
+  legacy UUID references directly, avoiding a comparison against every known
+  session ID for each `INVOKE_SUBAGENT` record. Regression tests now protect
+  bounded Claude discovery, CWD lookup reuse, and unchanged-cache migration
+  verification.
 - The terminal card now keeps Top focus to a two-line module with muted,
   width-bounded supporting text. Repo activity is rendered as its own title
   plus a separate metrics line for faster scanning.

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+import ccstory.providers.antigravity as antigravity_module
 from ccstory import cli
 from ccstory.providers import (
     TranscriptResolver,
@@ -385,6 +386,41 @@ class TestAntigravityUsageCollection:
         assert by_model["gemini-3.6-flash"].input_tokens == 100
         assert by_model["gemini-3.6-flash"].output_tokens == 50
 
+    def test_child_discovery_is_cached_and_reads_structured_id_once(
+        self, antigravity_factory, tmp_home, monkeypatch
+    ):
+        parent_sid = "77777777-7777-7777-7777-777777777777"
+        child_sid = "88888888-8888-8888-8888-888888888888"
+        antigravity_factory(
+            parent_sid,
+            [
+                _user("delegate this", 1),
+                {
+                    "type": "INVOKE_SUBAGENT",
+                    "tool_calls": [{
+                        "arguments": {"Subagents": [{"conversationId": child_sid}]},
+                    }],
+                },
+                _planner("delegated", 2),
+            ],
+        )
+        antigravity_factory(child_sid, [_user("child task", 1), _planner("done", 2)])
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
+        real_glob = antigravity_module.glob.glob
+        calls: list[str] = []
+
+        def recording_glob(pattern: str):
+            calls.append(pattern)
+            return real_glob(pattern)
+
+        monkeypatch.setattr(antigravity_module.glob, "glob", recording_glob)
+
+        assert provider._get_child_session_ids() == {child_sid}
+        assert provider._get_child_session_ids() == {child_sid}
+        assert len(calls) == 1
+
     def test_user_request_containing_conversation_id_is_not_misidentified(
         self, antigravity_factory, tmp_home
     ):
@@ -570,6 +606,32 @@ class TestAntigravityExcerptExtraction:
         assert project == "-Users-x-Side-project-ccstory"
         assert "[USER 1]\nFirst user request" in excerpt
         assert "[ASSISTANT END]\nFirst planner response" in excerpt
+
+    def test_parse_and_excerpt_share_one_cwd_db_lookup(
+        self, antigravity_factory, tmp_home, monkeypatch
+    ):
+        path = antigravity_factory(
+            SID,
+            [_user("First user request", 1), _planner("First planner response", 2)],
+        )
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
+        lookups: list[Path] = []
+
+        def fake_extract(db_path: Path) -> str:
+            lookups.append(db_path)
+            return "/Users/x/Side_project/ccstory"
+
+        monkeypatch.setattr(antigravity_module, "extract_cwd_from_db", fake_extract)
+
+        assert provider.parse_session(path) is not None
+        project, _ = provider.extract_excerpt(path)
+
+        assert project == "-Users-x-Side-project-ccstory"
+        assert lookups == [
+            tmp_home / ".gemini" / "antigravity" / "conversations" / f"{SID}.db"
+        ]
 
     def test_model_tool_events_are_not_narrative_assistant_text(
         self, antigravity_factory, tmp_home

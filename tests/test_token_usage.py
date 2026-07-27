@@ -17,6 +17,7 @@ from ccstory.token_usage import (
     collect_usage,
     fmt_tokens,
 )
+import ccstory.providers.claude as claude_module
 from ccstory.providers.claude import ClaudeCodeProvider
 
 from tests.conftest import _ts, make_assistant_msg, make_user_msg, write_jsonl
@@ -104,6 +105,27 @@ class TestFmtTokens:
 
 
 class TestCollectUsage:
+    def test_usage_discovery_uses_bounded_claude_patterns(self, monkeypatch):
+        provider = ClaudeCodeProvider()
+        patterns: list[str] = []
+
+        def recording_glob(pattern: str):
+            patterns.append(pattern)
+            return []
+
+        monkeypatch.setattr(claude_module.glob, "glob", recording_glob)
+        turns = provider.collect_usage(
+            datetime(2026, 5, 1, tzinfo=timezone.utc),
+            datetime(2026, 5, 31, tzinfo=timezone.utc),
+            {},
+        )
+
+        assert turns == 0
+        assert patterns == [
+            str(provider.projects_dir / "*" / "*.jsonl"),
+            str(provider.projects_dir / "*" / "subagents" / "*.jsonl"),
+        ]
+
     def _records(self):
         return [
             make_user_msg("hello", _ts(2026, 5, 10, 10, 0, 0)),

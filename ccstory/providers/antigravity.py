@@ -22,6 +22,14 @@ from .excerpts import build_excerpt, include_message
 from .projects import encode_project_dir, worktree_origin
 
 
+# Antigravity conversation IDs are UUIDs.  Restrict the legacy text fallback
+# to this shape instead of comparing every known session ID with every invoke.
+_CONVERSATION_ID_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+    re.IGNORECASE,
+)
+
+
 def decode_varint(data: bytes, pos: int) -> tuple[int, int]:
     """Decode a varint starting at pos. Returns (val, new_pos).
     Raises ValueError on unexpected EOF, varint > 10 bytes, or uint64 overflow.
@@ -478,8 +486,12 @@ class AntigravityProvider(BaseAgentProvider):
                                             cid = sub["conversationId"]
                                             if cid in all_session_ids and cid != curr_sid:
                                                 child_ids.add(cid)
-                            for sid in all_session_ids:
-                                if sid != curr_sid and sid in line:
+                            # Older logs put the child ID in free-form text
+                            # rather than ``tool_calls``.  Extract UUID-shaped
+                            # candidates from that one line; iterating every
+                            # session ID here made this O(invokes × sessions).
+                            for sid in _CONVERSATION_ID_RE.findall(line):
+                                if sid != curr_sid and sid in all_session_ids:
                                     child_ids.add(sid)
             except OSError:
                 continue
