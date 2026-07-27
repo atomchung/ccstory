@@ -21,7 +21,9 @@ from ccstory.artifacts import ArtifactsReport, RepoArtifacts
 from ccstory.report import (
     _narrative_headers,
     _top_focus_terminal_detail_lines,
+    _top_focus_terminal_text,
     render_terminal_card,
+    TopFocusNarrative,
 )
 from ccstory.session_summarizer import SessionSummary
 from ccstory.time_tracking import CategoryRollup, ProjectRollup, SessionStat
@@ -273,6 +275,24 @@ class TestWhatYouDidCard:
 
 
 class TestCardWrapping:
+    def test_top_focus_terminal_text_uses_short_subject_and_one_outcome(self):
+        focus = TopFocusNarrative(
+            category="輸出",
+            active_min=60.0,
+            share=1.0,
+            project="kol-collector-fomo-kernel",
+            project_active_min=60.0,
+            project_sessions=1,
+            strongest_session_summaries=(
+                "解決跨 session 測試環境不一致。",
+                "這段不應該出現在終端卡片。",
+            ),
+        )
+
+        assert _top_focus_terminal_text(focus) == (
+            "fomo-kernel: 解決跨 session 測試環境不一致"
+        )
+
     def test_top_focus_detail_wraps_at_readable_boundaries_and_caps_at_two_lines(self):
         detail = (
             "kol-collector-fomo-kernel · 理解跨 session 開發測試環境不一致，"
@@ -287,7 +307,7 @@ class TestCardWrapping:
         assert "TOP_FOCUS_THIRD_LINE" not in "".join(line.plain for line in lines)
         assert lines[-1].plain.endswith("…")
 
-    def test_top_focus_detail_uses_hanging_indent_in_card(self):
+    def test_top_focus_detail_renders_one_concise_subject_outcome_line(self):
         top_session = SessionStat(
             project="kol-collector-fomo-kernel",
             category="輸出",
@@ -308,10 +328,7 @@ class TestCardWrapping:
         summary = SessionSummary(
             session_id="wrapped-focus",
             source="auto",
-            summary=(
-                "理解跨 session 開發測試環境不一致，完成可重現的驗收流程與回歸"
-                "測試，並整理公開 issue 的效能改善路徑 TOP_FOCUS_CARD_END"
-            ),
+            summary="解決跨 session 測試環境不一致，建立可重現的 QA 驗證。",
         )
         console = Console(width=72, record=True)
         console.print(render_terminal_card(
@@ -330,9 +347,9 @@ class TestCardWrapping:
             line for line in lines[detail_start:metrics_start]
             if line.strip("│ ")
         ]
-        assert len(detail_lines) == 2
-        assert detail_lines[1].index("開") > detail_lines[0].index("↳")
-        assert "TOP_FOCUS_CARD_END" not in "".join(detail_lines)
+        assert len(detail_lines) == 1
+        assert "fomo-kernel: 解決跨 session 測試環境不一致" in detail_lines[0]
+        assert "…" not in detail_lines[0]
 
     def test_highlight_omits_raw_prompt_fallback_while_project_and_narrative_wrap(self):
         top_session = SessionStat(
@@ -387,7 +404,7 @@ class TestCardWrapping:
         assert "WRAP_END" not in text
         # With no eligible generated summary, the compact line is just the
         # deterministic primary project — never the raw prompt fallback.
-        assert "↳ kol-collector-fomo-kernel-with-a-long-project-name" in text
+        assert "↳ project-name" in text
         assert "personal-os-project-tail" in text
         assert "HEADER_END" in text
 

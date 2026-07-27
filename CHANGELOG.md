@@ -22,10 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session ID for each `INVOKE_SUBAGENT` record. Regression tests now protect
   bounded Claude discovery, CWD lookup reuse, and unchanged-cache migration
   verification.
-- The terminal card now gives Top focus a muted, hanging-indented supporting
-  detail that wraps at readable boundaries for up to two lines before it is
-  ellipsized. Repo activity is rendered as its own title plus a separate
-  metrics line for faster scanning.
+- The terminal card now gives Top focus a concise muted `subject: outcome`
+  detail: it uses a short project label and the first problem/result clause
+  from only the strongest work summary, while Markdown and JSON retain the
+  full project metadata and evidence. Repo activity is rendered as its own
+  title plus a separate metrics line for faster scanning.
 - A normal recap now defaults to per-category narrative. Every eligible
   category remains visible through a deterministic local fallback when the
   narrator is unavailable or its lane deadline is reached; report and JSON

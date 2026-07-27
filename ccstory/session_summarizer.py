@@ -1154,7 +1154,11 @@ def run_llm_p(
             continue
         remaining = allowed_timeout
         if deadline is not None:
-            remaining = deadline - time.monotonic()
+            # Floating-point subtraction can produce a value fractionally
+            # greater than the reservation (for example 45.00000000000003).
+            # Never pass that excess to a subprocess: the batch deadline is a
+            # hard responsiveness limit, not an approximate target.
+            remaining = min(allowed_timeout, deadline - time.monotonic())
             if remaining <= 0:
                 timed_out = True
                 break
