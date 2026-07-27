@@ -205,10 +205,18 @@ class ClaudeCodeProvider(BaseAgentProvider):
 
         assistant_turns = {key: 0 for key in windows}
         seen_ids = {key: set() for key in windows}
+        earliest_ts = min(since for since, _until in windows.values()).timestamp()
 
-        for path_str in glob.glob(
-            str(self.projects_dir / "**" / "*.jsonl"), recursive=True
-        ):
+        # Target top-level project jsonls and nested subagent jsonls
+        search_patterns = [
+            str(self.projects_dir / "*" / "*.jsonl"),
+            str(self.projects_dir / "*" / "subagents" / "*.jsonl"),
+        ]
+        matching_paths: list[str] = []
+        for pattern in search_patterns:
+            matching_paths.extend(glob.glob(pattern))
+
+        for path_str in matching_paths:
             fp = Path(path_str)
             try:
                 with fp.open() as f:
@@ -271,10 +279,9 @@ class ClaudeCodeProvider(BaseAgentProvider):
             until = until.replace(tzinfo=timezone.utc)
 
         stats: list[SessionStat] = []
+        since_ts = since.timestamp()
 
-        for path_str in glob.glob(
-            str(self.projects_dir / "**" / "*.jsonl"), recursive=True
-        ):
+        for path_str in glob.glob(str(self.projects_dir / "*" / "*.jsonl")):
             path = Path(path_str)
             # Skip nested subagent traces (double-count guard)
             if _is_subagent_path(path):
@@ -300,10 +307,8 @@ class ClaudeCodeProvider(BaseAgentProvider):
         if direct.exists():
             return direct
         # The project folder can differ from where the file actually sits
-        # (renamed repo, moved worktree). One targeted glob on a filename we
-        # know, not a whole-tree walk.
+        # (renamed repo, moved worktree). Target project dirs directly.
         matches = glob.glob(
-            str(self.projects_dir / "**" / f"{sess.session_id}.jsonl"),
-            recursive=True,
+            str(self.projects_dir / "*" / f"{sess.session_id}.jsonl"),
         )
         return Path(matches[0]) if matches else None

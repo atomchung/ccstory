@@ -363,6 +363,14 @@ class AntigravityProvider(BaseAgentProvider):
     def __init__(self, antigravity_dir: Path | None = None) -> None:
         self._antigravity_dir = antigravity_dir
         self._title_map: dict[str, str] | None = None
+        self._cwd_cache: dict[str, str] = {}
+        self._child_ids_cache: set[str] | None = None
+
+    def _get_cwd(self, session_id: str) -> str:
+        if session_id not in self._cwd_cache:
+            db_path = self.antigravity_dir / "conversations" / f"{session_id}.db"
+            self._cwd_cache[session_id] = extract_cwd_from_db(db_path)
+        return self._cwd_cache[session_id]
 
     def _get_title_map(self) -> dict[str, str]:
         if self._title_map is None:
@@ -399,8 +407,7 @@ class AntigravityProvider(BaseAgentProvider):
         assistant_msgs: list[str] = []
 
         session_id = _extract_session_id(path)
-        db_path = self.antigravity_dir / "conversations" / f"{session_id}.db"
-        cwd = extract_cwd_from_db(db_path)
+        cwd = self._get_cwd(session_id)
         project = (
             encode_project_dir(worktree_origin(cwd)) if cwd else "antigravity"
         )
@@ -437,6 +444,9 @@ class AntigravityProvider(BaseAgentProvider):
 
     def _get_child_session_ids(self) -> set[str]:
         """Discover child subagent conversation IDs referenced by INVOKE_SUBAGENT records."""
+        if self._child_ids_cache is not None:
+            return self._child_ids_cache
+
         all_paths = glob.glob(self._transcript_glob())
         all_session_ids = {_extract_session_id(Path(p)) for p in all_paths}
         child_ids: set[str] = set()
@@ -447,6 +457,8 @@ class AntigravityProvider(BaseAgentProvider):
             try:
                 with path.open("r", encoding="utf-8", errors="ignore") as f:
                     for line in f:
+                        if "INVOKE_SUBAGENT" not in line:
+                            continue
                         line = line.strip()
                         if not line:
                             continue
@@ -456,13 +468,23 @@ class AntigravityProvider(BaseAgentProvider):
                             continue
 
                         if d.get("type") == "INVOKE_SUBAGENT":
-                            record_str = json.dumps(d)
+                            tool_calls = d.get("tool_calls", [])
+                            for tc in tool_calls:
+                                args = tc.get("arguments", {}) if isinstance(tc, dict) else {}
+                                subagents = args.get("Subagents", []) if isinstance(args, dict) else []
+                                if isinstance(subagents, list):
+                                    for sub in subagents:
+                                        if isinstance(sub, dict) and "conversationId" in sub:
+                                            cid = sub["conversationId"]
+                                            if cid in all_session_ids and cid != curr_sid:
+                                                child_ids.add(cid)
                             for sid in all_session_ids:
-                                if sid != curr_sid and sid in record_str:
+                                if sid != curr_sid and sid in line:
                                     child_ids.add(sid)
             except OSError:
                 continue
 
+        self._child_ids_cache = child_ids
         return child_ids
 
     def _is_child_session(
@@ -488,8 +510,7 @@ class AntigravityProvider(BaseAgentProvider):
         first_user_text = ""
 
         session_id = _extract_session_id(jsonl_path)
-        db_path = self.antigravity_dir / "conversations" / f"{session_id}.db"
-        cwd = extract_cwd_from_db(db_path)
+        cwd = self._get_cwd(session_id)
 
         try:
             with jsonl_path.open("r", encoding="utf-8", errors="ignore") as f:
