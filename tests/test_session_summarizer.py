@@ -408,6 +408,80 @@ class TestBatchedNarrativeBackfill:
         assert get(sessions[2].session_id).source == "fallback"
         assert get("invented-id") is None
 
+    def test_probe_grows_next_batch_and_budget_exhaustion_falls_back(
+        self, tmp_home: Path, jsonl_factory, monkeypatch
+    ):
+        sessions = self._sessions(jsonl_factory, 25)
+        seen_sizes: list[int] = []
+
+        def fake_run(prompt: str, _timeout: int, *, budget):
+            ids = re.findall(r"\[session_id=([^;]+);", prompt)
+            seen_sizes.append(len(ids))
+            return ss.NarrativeCall(
+                "\n".join(
+                    json.dumps({"session_id": sid, "summary": f"Done {sid}"})
+                    for sid in ids
+                ),
+                "antigravity", "gemini-3.6-flash-low",
+            )
+
+        monkeypatch.setattr(ss, "llm_available", lambda: True)
+        monkeypatch.setattr(ss, "run_llm_p", fake_run)
+        budget = ss.NarrativeBudget(total_sec=90)
+        result = ss.backfill_for_sessions(
+            sessions, use_llm=True, batch_size=40, budget=budget,
+        )
+
+        assert seen_sizes == [10, 15]  # probe, then bounded growth to remaining work
+        assert result["summarized"] == 25
+
+    def test_slow_probe_keeps_following_batches_at_ten(
+        self, tmp_home: Path, jsonl_factory, monkeypatch
+    ):
+        sessions = self._sessions(jsonl_factory, 25)
+        seen_sizes: list[int] = []
+
+        def fake_run(prompt: str, _timeout: int, *, budget):
+            ids = re.findall(r"\[session_id=([^;]+);", prompt)
+            seen_sizes.append(len(ids))
+            return ss.NarrativeCall(
+                "\n".join(
+                    json.dumps({"session_id": sid, "summary": f"Done {sid}"})
+                    for sid in ids
+                ),
+                "antigravity", "gemini-3.6-flash-low",
+            )
+
+        monkeypatch.setattr(ss, "llm_available", lambda: True)
+        monkeypatch.setattr(ss, "run_llm_p", fake_run)
+        monkeypatch.setattr(ss, "SUMMARY_BATCH_SLOW_SEC", 0)
+
+        ss.backfill_for_sessions(
+            sessions,
+            use_llm=True,
+            batch_size=40,
+            budget=ss.NarrativeBudget(),
+        )
+
+        assert seen_sizes == [10, 10, 5]
+
+    def test_exhausted_budget_makes_no_call_and_uses_fallback(
+        self, tmp_home: Path, jsonl_factory, monkeypatch
+    ):
+        sessions = self._sessions(jsonl_factory, 2)
+        budget = ss.NarrativeBudget(total_sec=0)
+        monkeypatch.setattr(ss, "llm_available", lambda: True)
+        monkeypatch.setattr(
+            ss, "run_llm_p",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no call")),
+        )
+
+        result = ss.backfill_for_sessions(sessions, use_llm=True, budget=budget)
+
+        assert result["summarized"] == 0
+        assert result["fallback"] == 2
+        assert budget.stopped_reason == "budget_exhausted"
+
 
 class TestNeedsLlm:
     def test_matrix(self):

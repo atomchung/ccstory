@@ -264,7 +264,7 @@ class TestGetRecap:
             calls["overall"] += 1
             return "fake overall narrative"
 
-        def _fake_categories(label, sessions, rollups, summaries, console):
+        def _fake_categories(label, sessions, rollups, summaries, console, budget=None):
             calls["categories"] += 1
             return {r.category: "fake category narrative" for r in rollups}
 

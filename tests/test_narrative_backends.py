@@ -107,6 +107,28 @@ def test_antigravity_command_uses_explicit_flash_model_and_effort(monkeypatch):
     assert kwargs["timeout"] == 180
 
 
+def test_budgeted_antigravity_call_is_capped_at_deadline(monkeypatch):
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return _result("flash prose")
+
+    monkeypatch.setattr(ss.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        ss,
+        "narrative_backends",
+        lambda: (ss.NarrativeBackend("antigravity", "gemini-3.6-flash-low", "low"),),
+    )
+    monkeypatch.setattr(ss, "narrative_backend_available", lambda _backend: True)
+
+    budget = ss.NarrativeBudget(total_sec=90, batch_deadline_sec=45)
+    assert ss.run_llm_p("prompt", 120, budget=budget) == ss.NarrativeCall(
+        "flash prose", "antigravity", "gemini-3.6-flash-low",
+    )
+    assert calls[0][1]["timeout"] <= 45
+
+
 def test_session_provenance_and_backend_config_change_invalidate_auto_cache():
     fingerprint = ss.narrative_config_fingerprint()
     ss.upsert(

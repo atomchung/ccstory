@@ -21,7 +21,7 @@ import sqlite3
 import subprocess
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
@@ -357,6 +357,57 @@ class NarrativeCall:
     model: str
 
 
+@dataclass
+class NarrativeBudget:
+    """One wall-clock allowance shared by every narrator lane in a recap.
+
+    This is deliberately invocation-local: it controls responsiveness without
+    persisting transcript-derived timing data.  A cache hit consumes no budget.
+    """
+
+    total_sec: float = 90.0
+    batch_deadline_sec: float = 45.0
+    started_at: float | None = None
+    completed_calls: int = 0
+    timed_out_calls: int = 0
+    stopped_reason: str | None = None
+    batch_durations: list[float] = field(default_factory=list)
+
+    def remaining_sec(self) -> float:
+        if self.started_at is None:
+            return self.total_sec
+        return max(0.0, self.total_sec - (time.monotonic() - self.started_at))
+
+    def begin_call(self, requested_timeout: float) -> tuple[float, float] | None:
+        if self.started_at is None:
+            self.started_at = time.monotonic()
+        remaining = self.remaining_sec()
+        if remaining <= 0:
+            self.stopped_reason = "budget_exhausted"
+            return None
+        allowed = min(float(requested_timeout), self.batch_deadline_sec, remaining)
+        return time.monotonic(), max(0.01, allowed)
+
+    def finish_call(self, started: float, *, timed_out: bool = False) -> None:
+        self.batch_durations.append(time.monotonic() - started)
+        self.completed_calls += 1
+        if timed_out:
+            self.timed_out_calls += 1
+        if self.remaining_sec() <= 0:
+            self.stopped_reason = "budget_exhausted"
+
+    def status(self) -> dict[str, object]:
+        spent = 0.0 if self.started_at is None else self.total_sec - self.remaining_sec()
+        return {
+            "total_sec": round(self.total_sec, 1),
+            "spent_sec": round(max(0.0, spent), 1),
+            "remaining_sec": round(self.remaining_sec(), 1),
+            "completed_calls": self.completed_calls,
+            "timed_out_calls": self.timed_out_calls,
+            "stopped_reason": self.stopped_reason,
+        }
+
+
 _DEFAULT_NARRATIVE_BACKENDS: tuple[NarrativeBackend, ...] = (
     NarrativeBackend("claude", "sonnet"),
     NarrativeBackend("codex", "gpt-5.6-terra"),
@@ -682,9 +733,8 @@ def get_many(session_ids: list[str]) -> dict[str, SessionSummary]:
 def recent_auto_timestamps(limit: int = 60) -> list[float]:
     """`created_at` of the most recent `auto` summaries, oldest first.
 
-    A backfill writes one row per `claude -p` call, so the gaps between
-    consecutive rows are how long the calls actually took on this machine.
-    That lets the ETA measure itself instead of trusting a constant (#113).
+    Retained as a cache-inspection helper for callers; batch writes mean these
+    row timestamps are not a reliable measure of narrator-call latency.
     """
     conn = _connect()
     try:
@@ -819,6 +869,9 @@ Output only the one-sentence summary, no quotes, no prefix."""
 
 
 SUMMARY_BATCH_SIZE = 40
+SUMMARY_PROBE_BATCH_SIZE = 10
+SUMMARY_MIN_BATCH_SIZE = 10
+SUMMARY_BATCH_SLOW_SEC = 30
 _SUMMARY_BATCH_EXCERPT_CHARS = 700
 _SUMMARY_BATCH_PROMPT = """{language_directive}
 
@@ -914,13 +967,19 @@ def _run_codex_p(
 
 
 def _run_antigravity_p(
-    prompt: str, timeout: int, model: str, effort: str,
+    prompt: str, timeout: float, model: str, effort: str,
+    deadline: float | None = None,
 ) -> subprocess.CompletedProcess | None:
-    """Run Antigravity prose generation with bounded transient retries."""
+    """Run Antigravity prose generation with retries bounded by one deadline."""
     for attempt in range(3):
+        attempt_timeout = max(timeout, 180)
+        if deadline is not None:
+            attempt_timeout = min(attempt_timeout, deadline - time.monotonic())
+            if attempt_timeout <= 0:
+                raise subprocess.TimeoutExpired(str(ANTIGRAVITY_BIN), timeout)
         result = subprocess.run(
             [str(ANTIGRAVITY_BIN), "-p", prompt, "--model", model, "--effort", effort],
-            capture_output=True, text=True, timeout=max(timeout, 180), check=False,
+            capture_output=True, text=True, timeout=attempt_timeout, check=False,
         )
         if result.returncode == 0 and result.stdout.strip():
             return result
@@ -930,7 +989,11 @@ def _run_antigravity_p(
     return None
 
 
-def run_llm_p(prompt: str, timeout: int) -> NarrativeCall | None:
+def run_llm_p(
+    prompt: str,
+    timeout: int,
+    budget: NarrativeBudget | None = None,
+) -> NarrativeCall | None:
     """Run the configured local narrators in order until one returns prose.
 
     This dispatcher is shared by summaries, classification, init, aggregate,
@@ -938,26 +1001,58 @@ def run_llm_p(prompt: str, timeout: int) -> NarrativeCall | None:
     carries one explicit model id, and a failed/unavailable provider simply
     advances to the next configured provider.
     """
+    reservation = budget.begin_call(timeout) if budget is not None else None
+    if budget is not None and reservation is None:
+        return None
+    started, allowed_timeout = reservation if reservation is not None else (
+        time.monotonic(), float(timeout),
+    )
+    deadline = started + allowed_timeout if budget is not None else None
+    timed_out = False
     for backend in narrative_backends():
         if not narrative_backend_available(backend):
             continue
+        remaining = allowed_timeout
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
         try:
             if backend.provider == "claude":
-                result = run_claude_p(prompt, timeout, backend.model)
+                result = run_claude_p(prompt, remaining, backend.model)
             elif backend.provider == "codex":
-                result = _run_codex_p(prompt, timeout, backend.model)
+                result = _run_codex_p(prompt, remaining, backend.model)
             else:
                 result = _run_antigravity_p(
-                    prompt, timeout, backend.model, backend.effort or "low",
+                    prompt, remaining, backend.model, backend.effort or "low",
+                    deadline=deadline,
                 )
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            LOG.warning("%s narrative call reached its deadline", backend.provider)
+            break
         except (subprocess.SubprocessError, OSError) as exc:
             LOG.warning("%s narrative call errored: %s", backend.provider, exc)
             continue
         if result is not None and result.returncode == 0 and result.stdout.strip():
+            if budget is not None:
+                budget.finish_call(started, timed_out=timed_out)
             return NarrativeCall(result.stdout, backend.provider, backend.model)
         stderr = result.stderr.strip()[:200] if result is not None else "no result"
         LOG.warning("%s narrative call failed: %s", backend.provider, stderr)
+    if budget is not None:
+        budget.finish_call(started, timed_out=timed_out)
     return None
+
+
+def _run_budgeted_llm_p(
+    prompt: str, timeout: int, budget: NarrativeBudget | None,
+) -> NarrativeCall | None:
+    """Keep the historical two-argument narrator seam intact when unbudgeted."""
+    if budget is None:
+        return run_llm_p(prompt, timeout)
+    return run_llm_p(prompt, timeout, budget=budget)
 
 
 def summarize_via_claude_p(excerpt: str, timeout: int = 60) -> NarrativeCall | None:
@@ -1021,6 +1116,7 @@ def summarize_sessions_via_llm_batch(
     *,
     timeout: int = 120,
     batch_size: int = SUMMARY_BATCH_SIZE,
+    budget: NarrativeBudget | None = None,
     on_chunk_complete: Callable[[int, int], None] | None = None,
 ) -> dict[str, NarrativeCall]:
     """Generate per-session prose in bounded batches.
@@ -1036,9 +1132,15 @@ def summarize_sessions_via_llm_batch(
         raise ValueError("batch_size must be positive")
 
     out: dict[str, NarrativeCall] = {}
-    total_chunks = (len(items) + batch_size - 1) // batch_size
-    for chunk_index, start in enumerate(range(0, len(items), batch_size), start=1):
-        chunk = items[start:start + batch_size]
+    chunk_index = 0
+    start = 0
+    current_batch_size = min(SUMMARY_PROBE_BATCH_SIZE, batch_size)
+    while start < len(items):
+        if budget is not None and budget.remaining_sec() <= 0:
+            budget.stopped_reason = "budget_exhausted"
+            break
+        chunk_index += 1
+        chunk = items[start:start + current_batch_size]
         rows = "\n\n".join(
             f"[session_id={session_id}; project={project}]\n{excerpt[:_SUMMARY_BATCH_EXCERPT_CHARS]}"
             for session_id, project, excerpt in chunk
@@ -1046,8 +1148,9 @@ def summarize_sessions_via_llm_batch(
         prompt = _SUMMARY_BATCH_PROMPT.format(
             language_directive=language_directive(), rows=rows,
         )
+        started = time.monotonic()
         try:
-            call = run_llm_p(prompt, timeout)
+            call = _run_budgeted_llm_p(prompt, timeout, budget)
         except (subprocess.SubprocessError, OSError) as exc:
             LOG.warning("batch session summarization errored: %s", exc)
             call = None
@@ -1059,8 +1162,21 @@ def summarize_sessions_via_llm_batch(
                 out[session_id] = NarrativeCall(
                     summary, call.provider, call.model,
                 )
+        elapsed = time.monotonic() - started
+        # Probe first, then react to current-model speed without assuming
+        # linear token latency. Failed or slow chunks shrink the next request;
+        # a quick probe grows toward the normal 40-session ceiling.
+        if call is None or elapsed >= SUMMARY_BATCH_SLOW_SEC:
+            current_batch_size = max(SUMMARY_MIN_BATCH_SIZE, current_batch_size // 2)
+        elif current_batch_size < batch_size:
+            current_batch_size = min(batch_size, current_batch_size * 2)
+        start += len(chunk)
         if on_chunk_complete is not None:
-            on_chunk_complete(chunk_index, total_chunks)
+            remaining = len(items) - start
+            projected_total = chunk_index + (
+                (remaining + current_batch_size - 1) // current_batch_size
+            )
+            on_chunk_complete(chunk_index, projected_total)
     return out
 
 
@@ -1218,6 +1334,7 @@ def synthesize_overall_for_period(
     sessions_by_category: dict[str, list[tuple[str, str]]],
     force_refresh: bool = False,
     timeout: int = 90,
+    budget: NarrativeBudget | None = None,
 ) -> str | None:
     """Synthesize the overall goal-thread narrative for the whole period.
 
@@ -1295,7 +1412,7 @@ def synthesize_overall_for_period(
     if not llm_available():
         return None
 
-    call = run_llm_p(prompt, timeout)
+    call = _run_budgeted_llm_p(prompt, timeout, budget)
     if call is None:
         return None
     narrative = call.stdout.strip().strip('"').strip("'")
@@ -1346,6 +1463,7 @@ def synthesize_category_for_period(
     summaries: list[str],
     force_refresh: bool = False,
     timeout: int = 90,
+    budget: NarrativeBudget | None = None,
 ) -> str | None:
     """Synthesize a header + 2-4 bullets narrative for ONE category in a period (#57).
 
@@ -1393,7 +1511,7 @@ def synthesize_category_for_period(
     if not llm_available():
         return None
 
-    call = run_llm_p(prompt, timeout)
+    call = _run_budgeted_llm_p(prompt, timeout, budget)
     if call is None:
         return None
     narrative = call.stdout.strip().strip('"').strip("'")
@@ -1592,6 +1710,7 @@ def synthesize_comparison(
     deltas: list[tuple[str, float, float]] | None = None,
     force_refresh: bool = False,
     timeout: int = 90,
+    budget: NarrativeBudget | None = None,
 ) -> str | None:
     """Cross-period prose synthesis. ~50-word delta narrative.
 
@@ -1660,7 +1779,7 @@ def synthesize_comparison(
     if not llm_available():
         return None
 
-    call = run_llm_p(prompt, timeout)
+    call = _run_budgeted_llm_p(prompt, timeout, budget)
     if call is None:
         return None
     narrative = call.stdout.strip().strip('"').strip("'")
@@ -1897,6 +2016,7 @@ def classify_sessions_by_content(
     force_refresh: bool = False,
     timeout: int = 120,
     batch_size: int = 80,
+    budget: NarrativeBudget | None = None,
     on_chunk_complete: Callable[[int, int], None] | None = None,
 ) -> dict[str, str]:
     """Batch-classify sessions by content.
@@ -1952,6 +2072,9 @@ def classify_sessions_by_content(
     for chunk_idx, chunk_start in enumerate(
         range(0, len(pending), batch_size), start=1,
     ):
+        if budget is not None and budget.remaining_sec() <= 0:
+            budget.stopped_reason = "budget_exhausted"
+            break
         chunk = pending[chunk_start:chunk_start + batch_size]
         rows = "\n".join(
             f"[{sid}] folder: {leaf} | summary: {summ[:200]}"
@@ -1966,7 +2089,7 @@ def classify_sessions_by_content(
         )
         fresh: dict[str, str] = {}
         try:
-            call = run_llm_p(prompt, timeout)
+            call = _run_budgeted_llm_p(prompt, timeout, budget)
             if call is not None:
                 parsed = _parse_classification_lines(call.stdout)
                 # Validate ids and vocabulary before anything reaches SQLite.
@@ -2016,6 +2139,7 @@ def backfill_for_sessions(
     use_llm: bool = False,
     force: bool = False,
     batch_size: int = SUMMARY_BATCH_SIZE,
+    budget: NarrativeBudget | None = None,
     on_chunk_complete: Callable[[int, int], None] | None = None,
 ) -> dict:
     """Summarize sessions that are missing or, under `use_llm`, stale.
@@ -2081,7 +2205,7 @@ def backfill_for_sessions(
 
     generated = (
         summarize_sessions_via_llm_batch(
-            prepared, batch_size=batch_size,
+            prepared, batch_size=batch_size, budget=budget,
             on_chunk_complete=on_chunk_complete,
         )
         if use_llm else {}

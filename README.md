@@ -428,16 +428,23 @@ use zero local-narrator calls.
 
 Deep/content classification and per-session `--llm-narrative` work are batched.
 The latter sends up to 40 bounded excerpts in one strict JSONL request, validates
-every returned session id, and falls back only entries the model omitted. The CLI
-currently shows a conservative fixed first-run estimate of roughly 20 seconds
-per summary batch. It does not yet learn timing from prior runs: a batch writes
-many cache rows together, so the old per-session timestamp heuristic is no
-longer valid. Aggregate call latency varies with the selected CLI startup and
-input size. A same-window rerun is usually cache-only, but new sessions,
+every returned session id, and falls back only entries the model omitted.
+Aggregate call latency varies with the selected CLI startup and input size. A
+same-window rerun is usually cache-only, but new sessions,
 changed inputs/config, `--refresh`, or a newer prompt version can trigger fresh
 calls. Content classification carries accepted bucket names into later
 80-session batches and enforces one run-wide vocabulary cap, preventing a
 large first run from fragmenting one theme into several near-duplicate labels.
+
+Every recap has one invocation-local **90-second LLM budget**, shared by
+per-session narration, content classification, and aggregate/comparison prose.
+The first summary request is a 10-session probe; later requests grow toward 40
+or shrink toward 10 according to observed latency. Each narrator call has a
+45-second deadline. When either limit is reached, already-completed summaries
+remain usable, untouched sessions use the local first/last-message fallback,
+uncached classifications use folder/fallback rules, and aggregate prose is
+omitted rather than starting another model call. The terminal and JSON
+provenance report this partial-LLM state explicitly.
 
 If no configured local narrator is available, LLM classification and synthesis degrade
 gracefully: classification uses folder/fallback rules, per-session prose uses
