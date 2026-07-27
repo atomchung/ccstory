@@ -374,6 +374,38 @@ class TestBatchedNarrativeBackfill:
             assert stored.narrator_provider == "antigravity"
             assert stored.narrator_model == "gemini-3.6-flash-low"
 
+    def test_batch_trace_reports_progress_without_session_content(
+        self, tmp_home: Path, jsonl_factory, monkeypatch,
+    ):
+        sessions = self._sessions(jsonl_factory, 3)
+
+        def fake_run(prompt: str, _timeout: int, *, budget):
+            ids = re.findall(r"\[session_id=([^;]+);", prompt)
+            return ss.NarrativeCall(
+                "\n".join(
+                    json.dumps({"session_id": sid, "summary": f"Done {sid}"})
+                    for sid in ids
+                ),
+                "codex", "gpt-5.6-terra",
+            )
+
+        monkeypatch.setattr(ss, "llm_available", lambda: True)
+        monkeypatch.setattr(ss, "run_llm_p", fake_run)
+        budget = ss.NarrativeBudget()
+        result = ss.backfill_for_sessions(
+            sessions, use_llm=True, batch_size=2, budget=budget,
+        )
+
+        assert result["summarized"] == 3
+        batches = [event for event in budget.status()["trace"] if event["event"] == "batch"]
+        assert batches == [
+            {"event": "batch", "lane": "session_summaries", "completed": 1,
+             "total": 2, "item_count": 2, "outcome": "completed"},
+            {"event": "batch", "lane": "session_summaries", "completed": 2,
+             "total": 2, "item_count": 1, "outcome": "completed"},
+        ]
+        assert all("session_id" not in event and "summary" not in event for event in batches)
+
     def test_batch_omission_falls_back_and_never_overwrites_auto(
         self, tmp_home: Path, jsonl_factory, monkeypatch
     ):

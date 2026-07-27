@@ -13,7 +13,7 @@ Flags:
                        summaries; add --refresh to force-regenerate all.
     --minimal          Skip per-session narrative entirely (fastest)
                        (deprecated alias: --no-summary)
-    --no-aggregate     Skip per-category aggregate narrative
+    --no-aggregate     Skip the overall goal-thread narrative
     --reports-dir PATH Override default ~/.ccstory/reports/
 
 The recap pipeline itself lives in `ccstory.recap.build_recap()` — this
@@ -495,8 +495,8 @@ def _dispatch(argv: list[str] | None = None) -> int:
             "      `mcp` extra: pip install 'ccstory[mcp]'.\n"
             "\n"
             "Examples:\n"
-            "  ccstory week                  # last 7 days, instant fallback\n"
-            "                                # narratives + overall synthesis\n"
+            "  ccstory week                  # last 7 days, per-category local\n"
+            "                                # narratives with LLM enhancement when available\n"
             "  ccstory week --llm-narrative  # polish per-session via configured narrator\n"
             "                                # (shared 90s LLM budget)\n"
             "  ccstory week --no-aggregate   # skip overall synthesis\n"
@@ -531,11 +531,12 @@ def _dispatch(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-compare", action="store_true",
                         help="Skip the vs-previous-window comparison block")
     parser.add_argument("--narrative", choices=["overall", "per-category", "both"],
-                        default="overall",
-                        help="Narrative depth. `overall` (default) = 2-4 "
+                        default="per-category",
+                        help="Narrative depth. `per-category` (default) = a header + "
+                             "bullets per bucket; an unavailable narrator uses a "
+                             "deterministic local fallback. `overall` = 2-4 "
                              "goal threads (bold header + bullets) across "
-                             "all buckets. `per-category` = a header + "
-                             "bullets per bucket instead (one configured narrator call per "
+                             "all buckets. Each category can use one configured narrator call per "
                              "bucket, cached until the bucket's session set "
                              "changes). `both` = overall first, then "
                              "per-bucket sections.")

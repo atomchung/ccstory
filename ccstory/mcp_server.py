@@ -44,7 +44,11 @@ from . import recap  # noqa: E402 — module import so recap.CONFIG_PATH reads l
 from .categorizer import load_rules, load_settings, normalize_project_name  # noqa: E402
 from .session_summarizer import CacheUnavailable  # noqa: E402
 from .recap import RecapUnavailable, build_recap, parse_window  # noqa: E402
-from .report import _session_summary_text, agent_breakdown  # noqa: E402
+from .report import (  # noqa: E402
+    _session_summary_text,
+    agent_breakdown,
+    top_focus_narrative,
+)
 from .time_tracking import collect_sessions, rollup_by_category  # noqa: E402
 from .token_usage import apply_prices, collect_usage, load_prices_config  # noqa: E402
 from .trends import _resolve_sessions_from_cache  # noqa: E402
@@ -117,6 +121,30 @@ def _compact_recap(result) -> dict:
     top = sorted(result.sessions, key=lambda s: -s.active_min)[:5]
     narrative_provenance = getattr(result, "narrative_provenance", {}) or {}
     category_provenance = narrative_provenance.get("categories", {})
+    focus = top_focus_narrative(result.rollups, result.summaries)
+    top_focus_projection = (
+        {
+            "category": focus.category,
+            "active_hours": round(focus.active_min / 60, 2),
+            "share": round(focus.share, 4),
+            "project": (
+                {
+                    "name": focus.project,
+                    "active_hours": round(
+                        (focus.project_active_min or 0) / 60, 2,
+                    ),
+                    "sessions": focus.project_sessions,
+                }
+                if focus.project
+                else None
+            ),
+            "strongest_session_summaries": list(
+                focus.strongest_session_summaries,
+            ),
+        }
+        if focus
+        else None
+    )
     return {
         "ok": True,
         "agent": result.agent,
@@ -146,6 +174,10 @@ def _compact_recap(result) -> dict:
         ],
         "top_focus": result.overall_narrative,
         "top_focus_narrator": narrative_provenance.get("overall"),
+        # Additive counterpart to the deterministic Top focus rendered by the
+        # terminal, Markdown report, and full JSON envelope.  Keep the legacy
+        # `top_focus` overall-narrative field stable for existing MCP clients.
+        "top_focus_projection": top_focus_projection,
         "top_sessions": [
             {
                 "id": s.session_id,

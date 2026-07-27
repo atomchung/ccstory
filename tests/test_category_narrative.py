@@ -101,6 +101,22 @@ class TestSynthesizeCategoryCache:
         assert synthesize_category_for_period("k", "coding", ["s1"], ["a"]) is not None
         assert ok.calls == 1
 
+    def test_category_lane_is_exposed_in_shared_budget_trace(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        fake = _FakeRun()
+        monkeypatch.setattr(ss.subprocess, "run", fake)
+        budget = ss.NarrativeBudget()
+
+        assert synthesize_category_for_period(
+            "trace-k", "coding", ["s1"], ["fixed auth"], budget=budget,
+        ) is not None
+
+        assert budget.status()["lanes"]["category"] == {
+            "calls": 1, "successful_calls": 1, "failed_calls": 0,
+            "timed_out_calls": 0, "fallback_successes": 0, "batches": 0,
+        }
+
     def test_degenerate_output_rejected(self, monkeypatch: pytest.MonkeyPatch):
         short = _FakeRun(stdout="ok")
         monkeypatch.setattr(ss.subprocess, "run", short)
@@ -194,11 +210,11 @@ class TestNarrativeFlag:
         p = argparse.ArgumentParser()
         p.add_argument("window", nargs="?", default="month")
         p.add_argument("--narrative", choices=["overall", "per-category", "both"],
-                       default="overall")
+                       default="per-category")
         return p
 
-    def test_default_overall(self):
-        assert self._parser().parse_args(["week"]).narrative == "overall"
+    def test_default_per_category(self):
+        assert self._parser().parse_args(["week"]).narrative == "per-category"
 
     def test_choices(self):
         for v in ("overall", "per-category", "both"):

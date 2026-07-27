@@ -251,6 +251,126 @@ def _top_session_text(
     return text
 
 
+@dataclass(frozen=True)
+class TopFocusNarrative:
+    """Deterministic, category-first projection for the Top focus surface.
+
+    This is deliberately derived only from rollup facts and generated session
+    summaries.  ``first_user_text`` is useful in the detailed session list as
+    an explicit fallback, but it is often a raw command or a prompt containing
+    local paths, so it must not become the recap's primary headline.
+    """
+
+    category: str
+    active_min: float
+    share: float
+    project: str | None
+    project_active_min: float | None
+    project_sessions: int | None
+    strongest_session_summaries: tuple[str, ...]
+
+
+_TOP_FOCUS_ABSOLUTE_PATH_RE = re.compile(
+    r"(?<![\w/])(?:~|/(?:Users|home|private|tmp|var|opt|etc))/(?=[^\s])\S+"
+)
+
+
+def _top_rollup(rollups: list[CategoryRollup]) -> CategoryRollup | None:
+    """Largest category with an explicit tie-break independent of input order."""
+    if not rollups:
+        return None
+    return max(rollups, key=lambda r: (r.active_min, r.category))
+
+
+def _safe_top_focus_summary(s: SessionStat, summaries: dict | None) -> str | None:
+    """Return a generated session summary that is safe for the recap headline.
+
+    ``fallback`` summaries are extracted directly from user messages.  Showing
+    them in Top focus leaked prompts such as slash commands and absolute local
+    paths.  Only an ``auto`` summary is eligible here; all other sources leave
+    the deterministic category/project facts intact without inventing prose.
+    """
+    summary = summaries.get(s.session_id) if summaries else None
+    if not summary or getattr(summary, "source", None) != "auto":
+        return None
+    text = _terminal_plain_text(getattr(summary, "summary", ""))
+    text = " ".join(text.split()).lstrip(">•- ").strip()
+    if not text:
+        return None
+    # An auto summary should normally be high-level prose, but redact a local
+    # absolute path if a narrator copied one through.  Top focus has no need
+    # for an actionable filesystem path.
+    return _TOP_FOCUS_ABSOLUTE_PATH_RE.sub("[path]", text)
+
+
+def top_focus_narrative(
+    rollups: list[CategoryRollup],
+    summaries: dict | None = None,
+) -> TopFocusNarrative | None:
+    """Build the compact, repeatable Top focus narrative.
+
+    The primary project comes from the category's project rollup; the first
+    two unique eligible summaries come from its strongest sessions, ordered by
+    active time and then stable session identity.  The result never depends on
+    raw prompt text or on a narrator's cross-category interpretation.
+    """
+    top = _top_rollup(rollups)
+    if top is None:
+        return None
+    total_min = sum(r.active_min for r in rollups)
+    project = (
+        max(top.projects, key=lambda p: (p.active_min, p.project))
+        if top.projects
+        else None
+    )
+    strongest = sorted(
+        top.top_sessions,
+        key=lambda s: (-s.active_sec, s.start, s.session_id),
+    )
+    highlights: list[str] = []
+    for session in strongest:
+        text = _safe_top_focus_summary(session, summaries)
+        if text and text not in highlights:
+            highlights.append(text)
+        if len(highlights) == 2:
+            break
+    return TopFocusNarrative(
+        category=top.category,
+        active_min=top.active_min,
+        share=(top.active_min / total_min) if total_min else 0.0,
+        project=project.project if project else None,
+        project_active_min=project.active_min if project else None,
+        project_sessions=project.sessions if project else None,
+        strongest_session_summaries=tuple(highlights),
+    )
+
+
+def _top_focus_detail(focus: TopFocusNarrative) -> str | None:
+    """Full report/JSON wording for the deterministic Top focus projection."""
+    parts: list[str] = []
+    if focus.project:
+        parts.append(
+            f"Primary project: `{focus.project}` — "
+            f"{(focus.project_active_min or 0) / 60:.1f}h across "
+            f"{focus.project_sessions or 0} session(s)."
+        )
+    if focus.strongest_session_summaries:
+        parts.append(
+            "Strongest work: "
+            + "; ".join(focus.strongest_session_summaries)
+        )
+    return " ".join(parts) or None
+
+
+def _top_focus_terminal_text(focus: TopFocusNarrative) -> str | None:
+    """One-line terminal projection of the same category/project narrative."""
+    parts: list[str] = []
+    if focus.project:
+        parts.append(focus.project)
+    parts.extend(focus.strongest_session_summaries)
+    return " · ".join(parts) or None
+
+
 _BOLD_HEADER_RE = re.compile(r"^\*\*(.+)\*\*$")
 _INNER_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 
@@ -522,16 +642,15 @@ def render_report(
     )
     lines.append("")
 
-    if rollups:
-        top_r = rollups[0]
-        top_pct = (top_r.active_min / total_min * 100) if total_min else 0
+    top_focus = top_focus_narrative(rollups, summaries)
+    if top_focus:
         lines.append(
-            f"**★ Top focus: `{top_r.category}` — {top_r.active_min/60:.1f}h "
-            f"({top_pct:.0f}% of active time)**"
+            f"**★ Top focus: `{top_focus.category}` — {top_focus.active_min/60:.1f}h "
+            f"({top_focus.share*100:.0f}% of active time)**"
         )
-        top_text = _top_session_text(top_r, summaries)
-        if top_text:
-            lines.append(f"> {top_text}")
+        top_detail = _top_focus_detail(top_focus)
+        if top_detail:
+            lines.append(f"> {top_detail}")
         lines.append("")
 
     # Time distribution
@@ -751,6 +870,7 @@ def build_report_json(
     category_narratives = category_narratives or {}
     narrative_provenance = narrative_provenance or {}
     agent_scope = _report_agent_scope(agent, sessions)
+    top_focus = top_focus_narrative(rollups, summaries)
     payload: dict = {
         "schema_version": JSON_SCHEMA_VERSION,
         "kind": "recap",
@@ -875,6 +995,33 @@ def build_report_json(
         "narrative": {
             "overall": overall_narrative,
             "provenance": narrative_provenance,
+            # Additive deterministic counterpart to the Top focus rendered in
+            # Markdown and the terminal card.  Raw session fallback prompts
+            # intentionally never appear here.
+            "top_focus": (
+                {
+                    "category": top_focus.category,
+                    "active_hours": round(top_focus.active_min / 60, 2),
+                    "share": round(top_focus.share, 4),
+                    "project": (
+                        {
+                            "name": top_focus.project,
+                            "active_hours": round(
+                                (top_focus.project_active_min or 0) / 60, 2
+                            ),
+                            "sessions": top_focus.project_sessions,
+                        }
+                        if top_focus.project
+                        else None
+                    ),
+                    "strongest_session_summaries": list(
+                        top_focus.strongest_session_summaries
+                    ),
+                    "summary": _top_focus_detail(top_focus),
+                }
+                if top_focus
+                else None
+            ),
         },
     }
     if comparison:
@@ -1035,17 +1182,16 @@ def render_terminal_card(
 
     # --- Highlight row: biggest category + its representative session ---
     highlight_block: list = []
-    if rollups:
-        top_r = rollups[0]
-        top_color = colors[top_r.category]
-        top_pct = (top_r.active_min / total_min * 100) if total_min else 0
+    top_focus = top_focus_narrative(rollups, summaries)
+    if top_focus:
+        top_color = colors[top_focus.category]
         headline = Text()
         headline.append("★ Top focus  ", style="bold")
-        headline.append(top_r.category, style=f"bold {top_color}")
-        headline.append(f"  {top_r.active_min/60:.1f}h", style="bold")
-        headline.append(f"  ({top_pct:.0f}% of active time)", style="dim")
+        headline.append(top_focus.category, style=f"bold {top_color}")
+        headline.append(f"  {top_focus.active_min/60:.1f}h", style="bold")
+        headline.append(f"  ({top_focus.share*100:.0f}% of active time)", style="dim")
         highlight_block.append(headline)
-        top_text = _top_session_text(top_r, summaries)
+        top_text = _top_focus_terminal_text(top_focus)
         if top_text:
             sub = Text(no_wrap=True, overflow="ellipsis")
             sub.append("  ↳ ", style="dim")

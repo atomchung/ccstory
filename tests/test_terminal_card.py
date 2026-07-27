@@ -256,7 +256,7 @@ class TestWhatYouDidCard:
 
 
 class TestCardWrapping:
-    def test_highlight_is_bounded_while_project_and_narrative_text_can_wrap(self):
+    def test_highlight_omits_raw_prompt_fallback_while_project_and_narrative_wrap(self):
         top_session = SessionStat(
             project="demo",
             category="輸出",
@@ -303,11 +303,13 @@ class TestCardWrapping:
         )
 
         text = console.export_text()
-        assert "$record" in text
+        assert "$record" not in text
         assert "/Users/demo" not in text
         assert "**" not in text
         assert "WRAP_END" not in text
-        assert "…" in text
+        # With no eligible generated summary, the compact line is just the
+        # deterministic primary project — never the raw prompt fallback.
+        assert "↳ kol-collector-fomo-kernel-with-a-long-project-name" in text
         assert "personal-os-project-tail" in text
         assert "HEADER_END" in text
 

@@ -352,21 +352,23 @@ pypi = ["my-package"]        # extra packages beyond auto-detection
 
 ## Narrative depth
 
-`Top focus` is the largest Category and its representative session. `## What
-you did` is the separate cross-Category integration: 2-4 goal threads (bold
-header + bullets) that explain what the period added up to. For real
-retrospectives, `--narrative` goes deeper:
+`Top focus` is the largest Category plus a compact, multi-session account of
+the strongest work and projects in it. It never promotes a raw prompt, command,
+or path as the explanation. `## What you did` is the separate cross-Category
+integration: 2-4 goal threads (bold header + bullets) that explain what the
+period added up to. Per-category narrative is the normal recap flow; choose a
+different depth explicitly:
 
 ```bash
 ccstory week --narrative per-category   # header + bullets per bucket instead
 ccstory week --narrative both           # overall first, then per-bucket
 ```
 
-Each bucket costs one configured local-narrator call, cached until its exact
-input, prompt, or narrator policy changes — rerunning the same window is
-normally free. A bucket whose synthesis fails (or that has no real summaries)
-is simply omitted; the report never blocks on it. In `--json` mode the same
-text lands in `buckets[].narrative`.
+Eligible buckets use cached or configured local-narrator prose, but always
+fall back to a deterministic local category summary when narration is absent,
+unavailable, or reaches its lane deadline. Rerunning the same inputs is
+normally free. In `--json` mode the same text and its provenance land in
+`buckets[].narrative`.
 
 ## Narrative backends, latency, and quota
 
@@ -419,10 +421,10 @@ not use an API key or add a separate API charge.
 | Previous-window narrative | 0 or 1 on a cache miss | Reused while its comparison inputs and prompt are unchanged |
 | `--llm-narrative` | 1 per 40 uncached or stale sessions | Reused per session; `--refresh` deliberately regenerates |
 
-The default recap uses hybrid classification, an overall narrative, and a
+The default recap uses hybrid classification, a per-category narrative, and a
 previous-window narrative; per-session LLM prose remains opt-in. Use
-`--narrative per-category|both` to trade the overall call for, or add, bucket
-calls. `--no-aggregate`, `--no-compare-narrative`, and `--classify folder`
+`--narrative overall|both` to trade the category lane for, or add, an overall
+call. `--no-aggregate`, `--no-compare-narrative`, and `--classify folder`
 remove those call types; `--minimal --classify folder` makes the recap itself
 use zero local-narrator calls.
 
@@ -442,9 +444,11 @@ The first summary request is a 10-session probe; later requests grow toward 40
 or shrink toward 10 according to observed latency. Each narrator call has a
 45-second deadline. When either limit is reached, already-completed summaries
 remain usable, untouched sessions use the local first/last-message fallback,
-uncached classifications use folder/fallback rules, and aggregate prose is
-omitted rather than starting another model call. The terminal and JSON
-provenance report this partial-LLM state explicitly.
+uncached classifications use folder/fallback rules, and aggregate/category
+prose uses its deterministic local fallback rather than starting another model
+call. The terminal and JSON provenance report this partial-LLM state,
+successful provider/model, lane timing, attempts, and coarse batch progress
+without exposing transcript text or prompts.
 
 If no configured local narrator is available, LLM classification and synthesis degrade
 gracefully: classification uses folder/fallback rules, per-session prose uses
@@ -693,7 +697,7 @@ Four read-only tools:
 
 | Tool | Returns |
 |---|---|
-| `get_recap(window, classify, allow_llm, agent)` | Totals, per-category active hours + narrative + a `children` per-project breakdown (name + hours), the overall narrative, top 5 sessions, cost, usage coverage, and unpriced models. |
+| `get_recap(window, classify, allow_llm, agent)` | Totals, per-category active hours + narrative + a `children` per-project breakdown (name + hours), legacy overall narrative, additive deterministic `top_focus_projection`, top 5 sessions, cost, usage coverage, and unpriced models. |
 | `compare_to_previous(window, classify, agent)` | Active-hours and cost deltas vs. the immediately preceding same-length window, with current/previous usage coverage and unpriced models. |
 | `get_trend(period, count, classify, agent)` | Per-period series over the last `count` weeks/months (oldest first): active hours, cost, per-category hours, usage coverage, and unpriced models. `count` clamped to 1..24. |
 | `list_categories()` | The bucket rules ccstory classifies sessions into (user + built-in defaults). |
