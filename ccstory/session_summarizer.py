@@ -1900,6 +1900,48 @@ def _needs_llm(
     )
 
 
+def _order_backfill_candidates(
+    candidates: list[str],
+    by_id: dict,
+    existing: dict,
+) -> list[str]:
+    """Order narrator work by the sampling plan, not by encounter order.
+
+    Before this, ``candidates`` arrived in whatever order the providers were
+    registered and the filesystem enumerated their transcripts. When the
+    narrator budget ran out mid-run — which is the normal case on a large
+    window — that arbitrary order silently decided whose work got prose and
+    whose got a local fallback. A user with one alphabetically-late project
+    could watch it never get summarized, for no reason they could see.
+
+    Every candidate is still attempted; only the order changes (#188 0.8-F:
+    "budget exhaustion may change how many rows finish, but never which
+    provider/filesystem order gets priority"). Sessions the plan kept for a
+    *coverage* reason go first, so an exhausted budget still leaves every
+    provider, project, and local day represented; the rest follow in the
+    plan's own deterministic order.
+    """
+
+    from .sampling import REASON_BUDGET_FILL, plan_for_sessions
+
+    if len(candidates) < 2:
+        return candidates
+
+    plan = plan_for_sessions([by_id[sid] for sid in candidates], existing)
+    rank = {sid: index for index, sid in enumerate(plan.ordered_ids)}
+
+    def sort_key(sid: str) -> tuple[int, int, str]:
+        # Every reason code except the plain capacity fill is a coverage
+        # reason — provider/project/day top pick, or a salience hint.
+        reasons = plan.reasons.get(sid, ())
+        covered = any(reason != REASON_BUDGET_FILL for reason in reasons)
+        # A candidate the plan never saw sorts last but stays deterministic
+        # via its id, so it is delayed rather than dropped.
+        return (0 if covered else 1, rank.get(sid, len(rank)), sid)
+
+    return sorted(candidates, key=sort_key)
+
+
 def prepare_backfill_plan(
     sessions: list,
     *,
@@ -1938,6 +1980,8 @@ def prepare_backfill_plan(
         ]
     else:
         candidates = [sid for sid in ids if existing.get(sid) is None]
+
+    candidates = _order_backfill_candidates(candidates, by_id, existing)
 
     from .providers import TranscriptResolver
 
@@ -2133,6 +2177,122 @@ Output only the thread blocks (bold header + bullet lines) — no preamble, no q
 
 OVERALL_KEY = "__overall__"
 
+# Character budgets for the narrator prompts below. These were previously
+# applied as an undocumented `[:N]` slice on the *joined* string, which made
+# selection a side effect of whatever order the caller happened to assemble
+# its sessions in: everything past the cut vanished, so a quiet project or a
+# late-scanned provider could never reach the narrator no matter how
+# significant its work was. They are now explicit budgets that whole items
+# are fitted into (#188 0.8-F).
+AGGREGATE_CHAR_BUDGET = 6000
+COMPARISON_CHAR_BUDGET = 3000
+
+
+def fit_within_char_budget(
+    items: list[tuple[str, str]],
+    budget: int,
+    *,
+    per_item_overhead: int = 0,
+) -> list[tuple[str, str]]:
+    """Keep as many whole ``(id, text)`` items as ``budget`` allows, in order.
+
+    An item that does not fit is **skipped and the scan continues** to later
+    items (#188 step 8); it is never truncated, and one oversized item never
+    hides everything behind it. That is the entire difference from the
+    `[:N]` prefix slice this replaces: a prefix cut is silently positional,
+    whereas skipping is a decision about one item that leaves the rest of the
+    population reachable.
+
+    ``per_item_overhead`` accounts for the prompt scaffolding each item
+    carries (a ``"- "`` bullet and a newline, say), so the budget describes
+    the text the narrator actually receives rather than the payload alone.
+
+    This runs even when a caller has already applied a ``SamplingPlan``: the
+    plan budgets on ``evidence_chars`` — the summary text itself — while the
+    prompt adds scaffolding per item, so this is the backstop that keeps the
+    real prompt inside the real budget. For a caller that passes no plan it
+    is also the only bound, which is why it must stay deterministic rather
+    than depending on iteration order.
+    """
+
+    kept: list[tuple[str, str]] = []
+    remaining = budget
+    for internal_id, text in items:
+        cost = len(text) + per_item_overhead
+        if cost > remaining:
+            continue
+        kept.append((internal_id, text))
+        remaining -= cost
+    return kept
+
+
+def _sampling_policy_fingerprint(plan: "SamplingPlan | None") -> str:
+    """Name the sampling policy that chose a prompt's representatives.
+
+    Folded into every aggregate cache fingerprint so a policy change rotates
+    the cached narrative even when the resulting prompt text happens to be
+    identical. Without it, bumping ``sampling.POLICY_VERSION`` could leave a
+    row cached under the old policy looking valid forever.
+
+    ``"none"`` for an unplanned caller is deliberately a distinct value from
+    any real version: falling back to plain budget fitting is itself a
+    selection policy, and a row produced under it must not be reused once a
+    plan starts being supplied.
+    """
+
+    if plan is None:
+        return "sampling-policy:none"
+    return f"sampling-policy:{plan.policy_version}"
+
+
+def _select_for_prompt(
+    items_by_category: dict[str, list[tuple[str, str]]],
+    category_order: list[str],
+    *,
+    plan: "SamplingPlan | None",
+    budget: int,
+    per_item_overhead: int,
+) -> tuple[dict[str, list[tuple[str, str]]], list[str]]:
+    """Choose which ``(id, summary)`` pairs reach a category-grouped prompt.
+
+    Flattens the categories into one population because the budget is one
+    budget: fitting each category separately would hand the largest category
+    the whole allowance and starve the rest, which is the same positional
+    bias the prefix slice had, only rotated.
+
+    With a ``plan``, order comes from the plan — deterministic regardless of
+    how the caller assembled its list. Without one, the caller's own order is
+    preserved and only the budget bounds it. Either way the result is
+    regrouped by category so the prompt's structure is unchanged.
+
+    ``sampling`` is imported here rather than at module scope: it imports
+    ``SessionSummary`` from this module, so a top-level import would form a
+    cycle — the same reason ``session_identity`` defers its import of
+    ``SOURCE_PROVIDED``.
+    """
+
+    from .sampling import select_representatives
+
+    category_by_id: dict[str, str] = {}
+    flattened: list[tuple[str, str]] = []
+    for category in category_order:
+        for internal_id, summary in items_by_category.get(category) or []:
+            category_by_id[internal_id] = category
+            flattened.append((internal_id, summary))
+
+    if plan is not None:
+        flattened = select_representatives(flattened, plan)
+    fitted = fit_within_char_budget(
+        flattened, budget, per_item_overhead=per_item_overhead,
+    )
+
+    grouped: dict[str, list[tuple[str, str]]] = {}
+    for internal_id, summary in fitted:
+        grouped.setdefault(category_by_id[internal_id], []).append(
+            (internal_id, summary)
+        )
+    return grouped, [internal_id for internal_id, _ in fitted]
+
 
 def synthesize_overall_for_period(
     period_key: str,
@@ -2141,6 +2301,7 @@ def synthesize_overall_for_period(
     force_refresh: bool = False,
     timeout: int = 90,
     budget: NarrativeBudget | None = None,
+    plan: "SamplingPlan | None" = None,
 ) -> str | None:
     """Synthesize the overall goal-thread narrative for the whole period.
 
@@ -2149,27 +2310,52 @@ def synthesize_overall_for_period(
     [(session_id, summary), ...]}` — only sessions with a real summary
     should be passed in.
 
+    `plan` is the caller's `SamplingPlan` over the same population. Only the
+    sessions it selected reach the narrator, in the plan's order. The plan
+    has to be built by the caller rather than here: a `SamplingPlan` weighs
+    provider, project, local day and activity, and this function only ever
+    receives `(id, summary)` pairs — none of those dimensions survive the
+    hand-off. Without a plan, selection falls back to fitting whole items
+    into `AGGREGATE_CHAR_BUDGET` in the caller's own order, which is bounded
+    and deterministic but has no coverage guarantee.
+
     Cache key: (period_key, "__overall__"). Reuses the period_aggregates
-    table; invalidates when the union of session ids differs.
+    table; invalidates when the *selected* session ids differ. A population
+    that grows without changing which sessions represent it stays a cache
+    hit, which is the point of making selection explicit — but the sampling
+    policy version is folded into the input fingerprint, so a policy change
+    that would reshuffle representatives still rotates the row.
     Returns None on LLM failure or empty input.
     """
-    all_ids: list[str] = sorted(
-        sid for items in sessions_by_category.values() for sid, _ in items
-    )
-    if not all_ids:
+    if not any(sessions_by_category.values()):
         return None
+
+    selected_by_category, selected_ids = _select_for_prompt(
+        sessions_by_category,
+        [cat for cat, _ in category_hours],
+        plan=plan,
+        budget=AGGREGATE_CHAR_BUDGET,
+        # "  - " plus the newline joining it to the next bullet.
+        per_item_overhead=5,
+    )
+    if not selected_ids:
+        return None
+    # Sorted so the cached row identifies *which* sessions were represented,
+    # independent of the order the plan happened to present them in — the
+    # prompt text itself already carries the order, via input_fingerprint.
+    cache_ids = sorted(selected_ids)
 
     cat_hours_line = ", ".join(
         f"{cat} {hrs:.1f}h" for cat, hrs in category_hours if hrs > 0
     ) or "(none)"
     breakdown_blocks: list[str] = []
     for cat, _ in category_hours:
-        items = sessions_by_category.get(cat) or []
+        items = selected_by_category.get(cat) or []
         if not items:
             continue
         bullets = "\n".join(f"  - {summary}" for _, summary in items)
         breakdown_blocks.append(f"{cat}:\n{bullets}")
-    breakdown = "\n\n".join(breakdown_blocks)[:6000]
+    breakdown = "\n\n".join(breakdown_blocks)
     prompt = _OVERALL_PROMPT.format(
         language_directive=language_directive(),
         period=period_key,
@@ -2194,6 +2380,7 @@ def synthesize_overall_for_period(
             breakdown=breakdown,
         ),
         narrative_config_fingerprint(),
+        _sampling_policy_fingerprint(plan),
     )
 
     conn = _connect()
@@ -2208,7 +2395,7 @@ def synthesize_overall_for_period(
         if (
             cur
             and not force_refresh
-            and cached_ids == all_ids
+            and cached_ids == cache_ids
             and cur[2] == input_fingerprint
         ):
             return cur[0]
@@ -2233,7 +2420,7 @@ def synthesize_overall_for_period(
                 input_fingerprint, narrator_provider, narrator_model)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (period_key, OVERALL_KEY, narrative,
-             ",".join(all_ids), time.time(), input_fingerprint,
+             ",".join(cache_ids), time.time(), input_fingerprint,
              call.provider, call.model),
         )
         conn.commit()
@@ -2270,29 +2457,52 @@ def synthesize_category_for_period(
     force_refresh: bool = False,
     timeout: int = 90,
     budget: NarrativeBudget | None = None,
+    plan: "SamplingPlan | None" = None,
 ) -> str | None:
     """Synthesize a header + 2-4 bullets narrative for ONE category in a period (#57).
+
+    `plan` is the caller's `SamplingPlan` over the whole window; only the
+    sessions it selected within this category reach the narrator, in plan
+    order. Without a plan, whole items are fitted into
+    `AGGREGATE_CHAR_BUDGET` in the caller's order — bounded and
+    deterministic, but with no coverage guarantee. See
+    `synthesize_overall_for_period` for why the plan cannot be built here.
 
     Cache key: (period_key, category) in the same period_aggregates table
     the overall narrative uses — OVERALL_KEY ("__overall__") is reserved,
     so a user bucket by that name is skipped rather than colliding.
-    Invalidates when the category's session-id set differs (sessions
-    unchanged → no recompute; same dedup contract as the overall row).
+    Invalidates when the category's *selected* session-id set differs, with
+    the sampling policy version folded into the input fingerprint.
     Returns None on LLM failure or empty input — never blocks the report.
     """
     if not session_ids or not summaries or category == OVERALL_KEY:
         return None
-    ids_sorted = sorted(session_ids)
 
-    bullets = "\n".join(f"- {s}" for s in summaries)[:6000]
+    selected_by_category, selected_ids = _select_for_prompt(
+        {category: list(zip(session_ids, summaries))},
+        [category],
+        plan=plan,
+        budget=AGGREGATE_CHAR_BUDGET,
+        # "- " plus the newline joining it to the next bullet.
+        per_item_overhead=3,
+    )
+    selected = selected_by_category.get(category) or []
+    if not selected:
+        return None
+    ids_sorted = sorted(selected_ids)
+
+    bullets = "\n".join(f"- {summary}" for _, summary in selected)
     prompt = _CATEGORY_PROMPT.format(
         language_directive=language_directive(),
         category=category,
-        count=len(summaries),
+        count=len(selected),
         bullets=bullets,
     )
     input_fingerprint = _cache_fingerprint(
-        "period-category", prompt, narrative_config_fingerprint(),
+        "period-category",
+        prompt,
+        narrative_config_fingerprint(),
+        _sampling_policy_fingerprint(plan),
     )
 
     conn = _connect()
@@ -2517,6 +2727,8 @@ def synthesize_comparison(
     force_refresh: bool = False,
     timeout: int = 90,
     budget: NarrativeBudget | None = None,
+    current_plan: "SamplingPlan | None" = None,
+    previous_plan: "SamplingPlan | None" = None,
 ) -> str | None:
     """Cross-period prose synthesis. ~50-word delta narrative.
 
@@ -2524,6 +2736,13 @@ def synthesize_comparison(
     lists. `deltas` is an optional `[(category, current_min, previous_min), ...]`
     list passed into the prompt so the model can ground the "biggest shift"
     claim on real numbers rather than inferring from summary text.
+
+    Each side takes its **own** plan, because each side is its own
+    population: the two windows have different sessions, and a plan built
+    over one cannot say which sessions represent the other. Each side is
+    then fitted into `COMPARISON_CHAR_BUDGET` independently so a busy
+    current window cannot crowd out the previous window it is being compared
+    against — the failure mode a single shared budget would introduce.
 
     The cache key is `(current_key, previous_key)`; the cached row is
     invalidated when the signature (hash of both id+summary sets and the
@@ -2533,6 +2752,24 @@ def synthesize_comparison(
     Returns the narrative string, or None on claude -p failure / absent
     summaries.
     """
+    if not current_summaries or not previous_summaries:
+        return None
+
+    def _select(
+        items: list[tuple[str, str]], plan: "SamplingPlan | None",
+    ) -> list[tuple[str, str]]:
+        grouped, _ids = _select_for_prompt(
+            {"side": items},
+            ["side"],
+            plan=plan,
+            budget=COMPARISON_CHAR_BUDGET,
+            # "- " plus the newline joining it to the next bullet.
+            per_item_overhead=3,
+        )
+        return grouped.get("side") or []
+
+    current_summaries = _select(current_summaries, current_plan)
+    previous_summaries = _select(previous_summaries, previous_plan)
     if not current_summaries or not previous_summaries:
         return None
 
@@ -2556,12 +2793,18 @@ def synthesize_comparison(
         previous_label=previous_key,
         current_label=current_key,
         deltas=_fmt_deltas(deltas),
-        previous_summaries=_fmt(previous_summaries)[:3000],
-        current_summaries=_fmt(current_summaries)[:3000],
+        previous_summaries=_fmt(previous_summaries),
+        current_summaries=_fmt(current_summaries),
     )
+    # The signature now hashes the *selected* pairs, so a window that grows
+    # without changing which sessions represent it stays a cache hit.
     sig = _comparison_signature(current_summaries, previous_summaries, deltas)
     input_fingerprint = _cache_fingerprint(
-        "period-comparison", prompt, narrative_config_fingerprint(),
+        "period-comparison",
+        prompt,
+        narrative_config_fingerprint(),
+        _sampling_policy_fingerprint(current_plan),
+        _sampling_policy_fingerprint(previous_plan),
     )
 
     conn = _connect()

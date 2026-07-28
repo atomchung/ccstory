@@ -190,6 +190,9 @@ class RecapResult:
     # RecapResult(...) callers do not silently bind report_path as agent.
     agent: str = "all"
     narrative_provenance: dict = field(default_factory=dict)
+    # The window's SamplingPlan. Appended last so positional construction
+    # stays compatible. None for a run that produced no narrative lanes.
+    sampling: object | None = None
 
     def to_json(self) -> dict:
         """The machine-readable envelope (`schema_version: 1`), same shape
@@ -209,10 +212,31 @@ class RecapResult:
             category_narratives=self.category_narratives or None,
             agent=self.agent,
             narrative_provenance=self.narrative_provenance,
+            sampling=self.sampling,
         )
         if self.report_path is not None:
             payload["report_path"] = str(self.report_path)
         return payload
+
+
+def _narrative_sampling_plan(sessions: list, summaries: dict):
+    """Build the window's `SamplingPlan` once, for every narrative lane.
+
+    One plan per window rather than one per lane, so the overall narrative,
+    each category narrative, and the comparison all reason about the same
+    representatives. Building it per lane would let them disagree about
+    which sessions matter, which is exactly the incoherence between report
+    sections that explicit sampling is meant to remove.
+
+    No `char_budget` here: the budgets differ per lane (aggregate vs.
+    comparison) and each lane applies its own. This plan's job is to fix the
+    deterministic *order and coverage*; the lane decides how much of it
+    fits.
+    """
+
+    from .sampling import plan_for_sessions
+
+    return plan_for_sessions(sessions, summaries)
 
 
 def _synthesize_overall(
@@ -222,12 +246,13 @@ def _synthesize_overall(
     summaries: dict,
     console: Console,
     budget: NarrativeBudget | None = None,
+    plan=None,
 ) -> str | None:
     """Synthesize the overall goal-thread narrative for the period.
 
     Single configured-narrator call across all categories — replaces the old
-    per-bucket aggregate path. Cache-friendly: only re-runs when the set
-    of session ids changes since the cached narrative was written.
+    per-bucket aggregate path. Cache-friendly: only re-runs when the set of
+    *selected* session ids changes since the cached narrative was written.
     """
     sessions_by_cat: dict[str, list[tuple[str, str]]] = {}
     for s in sessions:
@@ -251,6 +276,7 @@ def _synthesize_overall(
             category_hours=category_hours,
             sessions_by_category=sessions_by_cat,
             budget=budget,
+            plan=plan,
         )
 
 
@@ -261,6 +287,7 @@ def _synthesize_categories(
     summaries: dict,
     console: Console,
     budget: NarrativeBudget | None = None,
+    plan=None,
 ) -> dict[str, str]:
     """One 2-3 line narrative per bucket (#57), rollup order.
 
@@ -291,6 +318,7 @@ def _synthesize_categories(
                 session_ids=[sid for sid, _ in items],
                 summaries=[text for _, text in items],
                 budget=budget,
+                plan=plan,
             )
         if narrative:
             out[cat] = narrative
@@ -740,11 +768,15 @@ def build_recap(
 
     category_narratives: dict[str, str] = {}
     narrative_provenance: dict[str, object] = {"overall": None, "categories": {}, "comparison": None}
+    # One plan for the whole window, shared by every narrative lane below so
+    # they cannot disagree about which sessions represent this window.
+    sampling_plan = _narrative_sampling_plan(sessions, summaries)
     if not minimal:
         if aggregate and summaries and narrative in ("overall", "both"):
             overall_narrative = _synthesize_overall(
                 label, sessions, rollups, summaries, console,
                 budget=narrative_budget,
+                plan=sampling_plan,
             )
             if overall_narrative:
                 narrative_provenance["overall"] = get_period_narrative_provenance(label)
@@ -758,6 +790,7 @@ def build_recap(
                 category_narratives = _synthesize_categories(
                     label, sessions, rollups, summaries, console,
                     budget=narrative_budget,
+                    plan=sampling_plan,
                 )
                 generated_count = len(category_narratives)
                 narrative_provenance["categories"] = {
@@ -815,6 +848,13 @@ def build_recap(
                         for d in comparison.deltas
                     ],
                     budget=narrative_budget,
+                    current_plan=sampling_plan,
+                    # The previous window is its own population, so it needs
+                    # its own plan — this window's plan has never seen those
+                    # sessions and could not say which of them represent it.
+                    previous_plan=_narrative_sampling_plan(
+                        comparison.previous_sessions, prev_summaries,
+                    ) if comparison.previous_sessions else None,
                 )
                 if comparison.narrative:
                     narrative_provenance["comparison"] = get_comparison_narrative_provenance(
@@ -885,4 +925,5 @@ def build_recap(
         report_path=report_path,
         counts=counts,
         narrative_provenance=narrative_provenance,
+        sampling=sampling_plan,
     )

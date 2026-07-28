@@ -152,12 +152,25 @@ def _compact_recap(result) -> dict:
         if focus
         else None
     )
+    plan = getattr(result, "sampling", None)
+    sampling_projection = None
+    if plan is not None:
+        from .sampling import plan_compact_projection
+
+        try:
+            sampling_projection = plan_compact_projection(plan)
+        except AttributeError:
+            sampling_projection = None
     return {
         "ok": True,
         "agent": result.agent,
         "label": result.label,
         "since": result.since.isoformat(),
         "until": result.until.isoformat(),
+        # Counts and a single coverage verdict only — the full per-dimension
+        # breakdown lives in the private JSON envelope. MCP results are read
+        # inside a live session where every field costs the caller context.
+        "sampling": sampling_projection,
         "active_hours": round(sum(r.active_min for r in result.rollups) / 60, 2),
         "categories": [
             {

@@ -984,6 +984,23 @@ def _session_json(
     }
 
 
+def _sampling_projection(plan: object) -> dict | None:
+    """Project a `SamplingPlan` for JSON, tolerating a caller that has none.
+
+    Imported lazily because `report` is on the CLI's startup path and
+    `sampling` is only needed once a narrative lane has actually run.
+    """
+
+    from .sampling import plan_public_projection
+
+    try:
+        return plan_public_projection(plan)
+    except AttributeError:
+        # A caller passed something that is not a plan. A malformed trace
+        # field must never take down a recap that is otherwise correct.
+        return None
+
+
 def build_report_json(
     label: str,
     since: datetime,
@@ -998,6 +1015,7 @@ def build_report_json(
     category_narratives: dict[str, str] | None = None,
     agent: str | None = None,
     narrative_provenance: dict | None = None,
+    sampling: object | None = None,
 ) -> dict:
     """Machine-readable envelope mirroring the markdown report's content.
 
@@ -1102,6 +1120,12 @@ def build_report_json(
         "narrative": {
             "overall": overall_narrative,
             "provenance": narrative_provenance,
+            # How this window's narrative representatives were chosen (#188
+            # 0.8-F). Additive and id-free — see sampling.plan_public_projection
+            # for why no session id appears here.
+            "sampling": (
+                _sampling_projection(sampling) if sampling is not None else None
+            ),
             # Additive deterministic counterpart to the Top focus rendered in
             # Markdown and the terminal card.  Raw session fallback prompts
             # intentionally never appear here.

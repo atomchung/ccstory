@@ -50,6 +50,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from one shared scan of the whole range instead of re-scanning per period,
   but the numbers themselves come from the same exact per-record usage events
   as before.
+- Which sessions reach the narrator is now an explicit, explainable decision
+  rather than a side effect of ordering. Previously the overall, per-category,
+  and comparison prompts were assembled by joining every eligible summary and
+  cutting the result at a fixed character count. Everything past the cut
+  vanished no matter how short or how significant it was, and the cut landed
+  wherever the provider registration order and the filesystem's directory
+  listing happened to put it — so a quiet project could be permanently
+  invisible in your weekly narrative for no reason you could see. ccstory now
+  picks representatives deliberately: one session per provider, one per
+  project, one per remaining day, plus a few carrying error/test/security
+  signals, then fills the remaining room by active time. An entry that does
+  not fit is skipped and the next one is still considered, so a short summary
+  behind a long one is no longer lost.
+- Per-session narrative work is ordered the same way. When the narrator's
+  time budget runs out mid-run — normal on a large window — the sessions that
+  keep every provider, project, and day represented are attempted first,
+  instead of whichever the filesystem listed first.
+- Cached period narratives now key on the sessions that actually represented
+  the window rather than on the whole population, so adding a session that
+  did not change the narrative no longer forces a regeneration. Existing
+  cached rows regenerate once on first run under this version.
+
+### Added
+
+- The full recap JSON (`--json`, `RecapResult.to_json()`) gains an additive
+  `narrative.sampling` block reporting how representatives were chosen:
+  policy version, population and selected counts, per-dimension coverage
+  targets and hits, and a histogram over a fixed reason vocabulary. It names
+  no session — the ids sampling reasons about are internal cache keys, not
+  the physical sessions you know — and carries no transcript text, prompt,
+  path, or correction. MCP results gain a compact counterpart with counts and
+  a single `coverage_complete` verdict.
 
 ### Removed
 

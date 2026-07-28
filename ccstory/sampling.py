@@ -517,3 +517,118 @@ def build_sampling_plan(
         coverage_hits=coverage_hits,
         unselected_count=len(population) - len(selected),
     )
+
+
+def plan_for_sessions(
+    sessions: Sequence[SessionStat | SessionSlice],
+    summaries: Mapping[str, SessionSummary] | None = None,
+    *,
+    char_budget: int | None = None,
+    max_selected: int | None = None,
+) -> SamplingPlan:
+    """Sketch ``sessions`` and plan over them in one step.
+
+    Every consumer that feeds sessions to a narrator needs exactly this
+    two-step sequence, and each one writing it out by hand is how the
+    evidence lane and the identity lane drift apart. ``summaries`` is keyed
+    by evidence id — the shape ``session_identity.resolve_session_summaries``
+    already returns — so a caller passes its existing summary map straight
+    through instead of re-deriving which key a session caches under.
+    """
+
+    resolved = summaries or {}
+    return build_sampling_plan(
+        [
+            build_session_sketch(
+                session, summary=resolved.get(evidence_session_id(session)),
+            )
+            for session in sessions
+        ],
+        char_budget=char_budget,
+        max_selected=max_selected,
+    )
+
+
+def select_representatives(
+    items: Sequence[tuple[str, str]],
+    plan: SamplingPlan,
+) -> list[tuple[str, str]]:
+    """Keep the ``(internal_id, text)`` pairs ``plan`` selected, in plan order.
+
+    Plan order rather than caller order: the point of a plan is that a
+    narrator sees the same representatives in the same sequence no matter how
+    the caller's session list happened to be assembled. An item whose id the
+    plan never saw is dropped rather than appended — a pair the plan could
+    not weigh is exactly the kind of implicit selection this replaces.
+    """
+
+    by_id = dict(items)
+    return [
+        (internal_id, by_id[internal_id])
+        for internal_id in plan.selected_ids
+        if internal_id in by_id
+    ]
+
+
+def plan_public_projection(plan: SamplingPlan) -> dict:
+    """Project a plan into a dict safe to publish in the full recap JSON.
+
+    Deliberately **id-free**. A plan's own ``selected_ids``/``ordered_ids``
+    are *evidence* ids — internal cache keys that name one bounded fact set,
+    not the physical session a user knows (see ``session_identity``). For a
+    boundary-clipped slice that id is a ``slice-<hash>`` string that means
+    nothing outside this process and must never reach a public surface, so
+    the projection reports how sampling behaved without naming who it
+    picked. That also keeps #188's rule that a share projection can never
+    inherit internal ids true by construction rather than by review.
+
+    ``reasons`` is likewise aggregated to ``{reason_code: count}`` rather
+    than per-session, both to stay id-free and because the closed reason
+    vocabulary is the useful part: a reader wants to know that coverage
+    drove four picks and capacity drove nine, not which session was which.
+    No transcript text, prompt, path, correction, or stderr can appear here
+    — the plan does not carry any.
+    """
+
+    reason_counts: dict[str, int] = {code: 0 for code in sorted(REASON_VOCABULARY)}
+    for codes in plan.reasons.values():
+        for code in codes:
+            reason_counts[code] = reason_counts.get(code, 0) + 1
+    return {
+        "policy_version": plan.policy_version,
+        "population": plan.population_size,
+        "selected": len(plan.selected_ids),
+        "unselected": plan.unselected_count,
+        "char_budget": plan.char_budget,
+        "coverage": {
+            dimension: {
+                "target": plan.coverage_targets.get(dimension, 0),
+                "hit": plan.coverage_hits.get(dimension, 0),
+            }
+            for dimension in COVERAGE_DIMENSIONS
+        },
+        "reasons": reason_counts,
+    }
+
+
+def plan_compact_projection(plan: SamplingPlan) -> dict:
+    """The MCP-sized view: counts and whether coverage was complete.
+
+    MCP results are read by an agent inside a live session, where every
+    field competes for the same context budget as the user's actual work.
+    It gets the two facts a caller can act on — how much of the population
+    was represented, and whether any coverage dimension came up short — and
+    not the per-dimension breakdown that only matters when debugging the
+    policy itself.
+    """
+
+    return {
+        "policy_version": plan.policy_version,
+        "population": plan.population_size,
+        "selected": len(plan.selected_ids),
+        "coverage_complete": all(
+            plan.coverage_hits.get(dimension, 0)
+            >= plan.coverage_targets.get(dimension, 0)
+            for dimension in COVERAGE_DIMENSIONS
+        ),
+    }
