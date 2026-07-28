@@ -20,7 +20,7 @@ from ccstory.token_usage import (
 import ccstory.providers.claude as claude_module
 from ccstory.providers.claude import ClaudeCodeProvider
 
-from tests.conftest import _ts, make_assistant_msg, make_user_msg, write_jsonl
+from tests.conftest import _ts, make_assistant_msg, make_user_msg
 
 
 class TestPriceFor:
@@ -190,6 +190,41 @@ class TestCollectUsage:
         )
         assert rep.assistant_turns == 0
         assert rep.total_input == 0
+
+    def test_direct_provider_normalizes_naive_event_and_bounds(
+        self,
+        jsonl_factory,
+    ):
+        records = [
+            make_user_msg("naive event", "2026-05-10T10:00:00"),
+            make_assistant_msg(
+                "naive result",
+                "2026-05-10T10:00:05",
+                "naive-direct-message",
+                input_tokens=42,
+                cache_creation=3,
+                cache_read=7,
+                output_tokens=11,
+            ),
+        ]
+        jsonl_factory("-Users-alice-code-naive", "session-naive", records)
+        by_model: dict = {}
+
+        turns = ClaudeCodeProvider().collect_usage(
+            datetime(2026, 5, 10),
+            datetime(2026, 5, 11),
+            by_model,
+        )
+
+        assert turns == 1
+        assert by_model["claude-opus-4-7"] == ModelUsage(
+            model="claude-opus-4-7",
+            turns=1,
+            input_tokens=42,
+            cache_creation=3,
+            cache_read=7,
+            output_tokens=11,
+        )
 
     def test_malformed_line_doesnt_crash(self, tmp_home, jsonl_factory):
         # Write a file with a broken line — should be silently skipped

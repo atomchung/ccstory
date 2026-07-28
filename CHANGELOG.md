@@ -49,6 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   current and previous comparison windows, rather than reparsing overlapping
   session files twice. The snapshot is per invocation (not an mtime cache),
   preserving boundary-overlap and resumed-session semantics.
+- Claude provider snapshots now derive engaged top-level session facts and
+  current/previous exact usage from the same physical JSONL pass. Subagent
+  usage remains included while subagent sessions remain excluded, preserving
+  existing session-overlap and inclusive usage-boundary semantics.
 - Claude and Codex exact token usage now use the same one-scan, multi-window
   path for a report and its previous-window comparison. Each usage event keeps
   its existing inclusive window-boundary behavior; Codex branch-baseline and

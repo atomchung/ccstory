@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -11,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from ccstory import providers, recap
+import ccstory.providers.claude as claude_module
 from ccstory.providers import (
     AgentProviderSpec,
     ProviderSnapshot,
@@ -21,6 +23,7 @@ from ccstory.providers.base import (
     ProviderRecord,
     SnapshotMetrics,
 )
+from ccstory.providers.claude import ClaudeCodeProvider
 from ccstory.report import build_report_json, render_report
 from ccstory.time_tracking import (
     SessionStat,
@@ -366,6 +369,339 @@ def test_default_metrics_fail_closed_and_carry_no_sensitive_identifiers():
         "project",
     ):
         assert forbidden not in serialized
+
+
+def test_claude_snapshot_single_pass_matches_legacy_facts(
+    jsonl_factory,
+    monkeypatch,
+):
+    def timestamp(value: datetime) -> str:
+        return value.isoformat().replace("+00:00", "Z")
+
+    previous = jsonl_factory(
+        "previous-project",
+        "previous-session",
+        [
+            make_user_msg(
+                "Start previous work",
+                timestamp(PREVIOUS_START + timedelta(hours=1)),
+            ),
+            make_assistant_msg(
+                "Previous result",
+                timestamp(PREVIOUS_START + timedelta(hours=1, minutes=1)),
+                "previous-assistant",
+                model="claude-sonnet-4-6",
+                input_tokens=200,
+                cache_creation=20,
+                cache_read=40,
+                output_tokens=60,
+            ),
+            make_user_msg(
+                "Confirm previous result",
+                timestamp(PREVIOUS_START + timedelta(hours=1, minutes=2)),
+            ),
+        ],
+    )
+    with previous.open("a", encoding="utf-8") as handle:
+        handle.write("{malformed-json\n")
+
+    boundary_assistant = make_assistant_msg(
+        "Boundary result",
+        timestamp(BOUNDARY),
+        "boundary-assistant",
+        model="claude-opus-4-7",
+        input_tokens=100,
+        cache_creation=10,
+        cache_read=20,
+        output_tokens=30,
+    )
+    spanning = jsonl_factory(
+        "spanning-project",
+        "spanning-session",
+        [
+            make_user_msg(
+                "Start spanning work",
+                timestamp(BOUNDARY - timedelta(minutes=1)),
+            ),
+            boundary_assistant,
+            # Streaming duplicate: a session record, but one exact usage turn.
+            boundary_assistant,
+            make_user_msg(
+                "Finish spanning work",
+                timestamp(BOUNDARY + timedelta(minutes=1)),
+            ),
+        ],
+    )
+    unengaged = jsonl_factory(
+        "current-project",
+        "unengaged-session",
+        [
+            make_user_msg(
+                "One short request",
+                timestamp(BOUNDARY + timedelta(days=1)),
+            ),
+            make_assistant_msg(
+                "Short reply",
+                timestamp(BOUNDARY + timedelta(days=1, seconds=10)),
+                "current-assistant",
+                input_tokens=300,
+                output_tokens=50,
+            ),
+        ],
+    )
+    short_subagent = jsonl_factory(
+        "spanning-project/subagents",
+        "short-subagent",
+        [
+            make_assistant_msg(
+                "Delegated result",
+                timestamp(BOUNDARY + timedelta(days=2)),
+                "short-subagent-assistant",
+                model="claude-sonnet-4-6",
+                input_tokens=400,
+                output_tokens=70,
+            )
+        ],
+    )
+    nested_subagent = jsonl_factory(
+        "spanning-project/parent-session/subagents",
+        "nested-subagent",
+        [
+            make_assistant_msg(
+                "Nested delegated result",
+                timestamp(BOUNDARY + timedelta(days=3)),
+                "nested-subagent-assistant",
+                model="claude-haiku-4-5-20251001",
+                input_tokens=500,
+                output_tokens=80,
+            )
+        ],
+    )
+    sources = [
+        previous,
+        spanning,
+        unengaged,
+        short_subagent,
+        nested_subagent,
+    ]
+    parse_attempts = sum(
+        sum(
+            1
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        )
+        for path in sources
+    )
+
+    legacy_sessions = collect_sessions_for_windows(
+        WINDOWS,
+        agent="claude",
+    )
+    legacy_models = {key: {} for key in WINDOWS}
+    legacy_turns = ClaudeCodeProvider().collect_usage_for_windows(
+        WINDOWS,
+        legacy_models,
+    )
+    legacy_usage = collect_usage_for_windows(
+        WINDOWS,
+        agent="claude",
+        active_agents_by_window={
+            key: {session.agent for session in sessions}
+            for key, sessions in legacy_sessions.items()
+        },
+    )
+    unfiltered_sessions = collect_sessions_for_windows(
+        WINDOWS,
+        engaged_only=False,
+        agent="claude",
+    )
+    unfiltered_snapshot = ClaudeCodeProvider().collect_snapshot(
+        WINDOWS,
+        engaged_only=False,
+    )
+    assert unfiltered_snapshot.sessions_by_window == unfiltered_sessions
+    assert {
+        session.session_id
+        for session in unfiltered_snapshot.sessions_by_window["current"]
+    } == {"spanning-session", "unengaged-session"}
+
+    opened: list[Path] = []
+    parse_calls = 0
+    glob_patterns: list[str] = []
+    original_open = Path.open
+    original_loads = claude_module.json.loads
+    original_glob = claude_module.glob.glob
+
+    def counted_open(path: Path, *args, **kwargs):
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if path in sources and "r" in mode:
+            opened.append(path)
+        return original_open(path, *args, **kwargs)
+
+    def counted_loads(payload, *args, **kwargs):
+        nonlocal parse_calls
+        parse_calls += 1
+        return original_loads(payload, *args, **kwargs)
+
+    def counted_glob(pattern: str):
+        glob_patterns.append(pattern)
+        return original_glob(pattern)
+
+    monkeypatch.setattr(Path, "open", counted_open)
+    monkeypatch.setattr(claude_module.json, "loads", counted_loads)
+    monkeypatch.setattr(claude_module.glob, "glob", counted_glob)
+
+    provider = ClaudeCodeProvider()
+    snapshot = collect_provider_snapshot(WINDOWS, agent="claude")
+    record = snapshot.records[0]
+
+    assert glob_patterns == [
+        str(provider.projects_dir / "*" / "*.jsonl"),
+        str(provider.projects_dir / "*" / "subagents" / "*.jsonl"),
+        str(provider.projects_dir / "*" / "*" / "subagents" / "*.jsonl"),
+    ]
+    assert Counter(opened) == Counter({path: 1 for path in sources})
+    assert parse_calls == parse_attempts
+    assert record.sessions_by_window == legacy_sessions
+    assert record.by_model_by_window == legacy_models
+    assert record.assistant_turns_by_window == legacy_turns
+    assert snapshot.sessions_by_window == legacy_sessions
+    assert snapshot.usage_by_window == legacy_usage
+    assert {
+        session.session_id
+        for session in record.sessions_by_window["previous"]
+    } == {"previous-session", "spanning-session"}
+    assert {
+        session.session_id
+        for session in record.sessions_by_window["current"]
+    } == {"spanning-session"}
+    assert record.assistant_turns_by_window == {
+        "previous": 2,
+        "current": 4,
+    }
+    assert record.metrics == SnapshotMetrics(
+        sources_enumerated=5,
+        source_opens=5,
+        records_parsed=parse_attempts - 1,
+        companion_reads=0,
+        record_inventory_complete=False,
+    )
+
+
+def test_claude_snapshot_marks_clean_inventory_complete(jsonl_factory):
+    jsonl_factory(
+        "clean-project",
+        "clean-session",
+        [
+            make_user_msg(
+                "Start clean snapshot",
+                (BOUNDARY + timedelta(minutes=1)).isoformat(),
+            ),
+            make_assistant_msg(
+                "Clean result",
+                (BOUNDARY + timedelta(minutes=2)).isoformat(),
+                "clean-assistant",
+            ),
+            make_user_msg(
+                "Confirm clean result",
+                (BOUNDARY + timedelta(minutes=3)).isoformat(),
+            ),
+            {"type": "progress", "payload": {"status": "irrelevant"}},
+        ],
+    )
+
+    record = ClaudeCodeProvider().collect_snapshot(WINDOWS)
+
+    assert record.metrics == SnapshotMetrics(
+        sources_enumerated=1,
+        source_opens=1,
+        records_parsed=4,
+        companion_reads=0,
+        record_inventory_complete=True,
+    )
+
+
+def test_claude_snapshot_relevant_schema_corruption_fails_closed(
+    jsonl_factory,
+):
+    jsonl_factory(
+        "clean-project/subagents",
+        "corrupt-usage",
+        [
+            {
+                "type": "assistant",
+                # Exact usage is advertised, but cannot be event-windowed
+                # without the missing timestamp.
+                "message": {
+                    "role": "assistant",
+                    "id": "corrupt-assistant",
+                    "model": "claude-opus-4-7",
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 5,
+                    },
+                },
+            }
+        ],
+    )
+
+    record = ClaudeCodeProvider().collect_snapshot(WINDOWS)
+
+    assert record.by_model_by_window == {"previous": {}, "current": {}}
+    assert record.assistant_turns_by_window == {
+        "previous": 0,
+        "current": 0,
+    }
+    assert record.metrics == SnapshotMetrics(
+        sources_enumerated=1,
+        source_opens=1,
+        records_parsed=1,
+        companion_reads=0,
+        record_inventory_complete=False,
+    )
+
+
+def test_claude_snapshot_deduplicates_paths_and_counts_failed_open_attempt(
+    jsonl_factory,
+    monkeypatch,
+):
+    source = jsonl_factory(
+        "deduplicated-project",
+        "deduplicated-session",
+        [
+            make_user_msg(
+                "This source will become unreadable",
+                (BOUNDARY + timedelta(minutes=1)).isoformat(),
+            )
+        ],
+    )
+    open_attempts = 0
+    original_open = Path.open
+
+    def duplicate_glob(_pattern: str):
+        return [str(source)]
+
+    def failed_open(path: Path, *args, **kwargs):
+        nonlocal open_attempts
+        if path == source:
+            open_attempts += 1
+            raise OSError("synthetic read failure")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(claude_module.glob, "glob", duplicate_glob)
+    monkeypatch.setattr(Path, "open", failed_open)
+
+    record = ClaudeCodeProvider().collect_snapshot(WINDOWS)
+
+    assert open_attempts == 1
+    assert record.sessions_by_window == {"previous": [], "current": []}
+    assert record.metrics == SnapshotMetrics(
+        sources_enumerated=1,
+        source_opens=1,
+        records_parsed=0,
+        companion_reads=0,
+        record_inventory_complete=False,
+    )
 
 
 def test_snapshot_preserves_codex_cumulative_branch_lineage(codex_factory):
