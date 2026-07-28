@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
+from .providers.excerpts import compact_evidence_text, parse_excerpt_blocks
+
 LOG = logging.getLogger("ccstory.summarizer")
 DB_PATH = Path.home() / ".ccstory" / "cache.db"
 RECAP_DB_PATH = Path.home() / ".claude" / "session_summaries.db"
@@ -999,57 +1001,103 @@ SUMMARY_OMISSION_RETRY_SIZE = 10
 
 
 def _compact_batch_excerpt(excerpt: str, max_chars: int = _SUMMARY_BATCH_EXCERPT_CHARS) -> str:
-    """Keep the semantic endpoints of a provider-formatted excerpt.
+    """Keep semantic endpoints within any positive batch character budget.
 
-    Providers deliberately put the latest assistant response at the end of
-    the excerpt.  A raw ``excerpt[:max_chars]`` therefore drops the outcome
-    from long sessions and leaves the narrator with only the opening request.
-    Keep the first user request, the latest user request, and the final
-    assistant response within the batch budget.  The head/tail trim for each
-    block preserves both intent and likely outcome evidence without changing
-    the provider excerpt contract.
+    Marker/separator overhead is subtracted before content allocation. The
+    first user, latest user, and final assistant blocks share the remainder
+    with weights 1:1:2, and every selected block receives a minimum allocation.
+    The assistant is never dropped: if a very small budget cannot fit its
+    marker, its body is compacted directly, still retaining the outcome tail.
     """
     if max_chars <= 0 or not excerpt:
         return ""
 
-    marker = re.compile(r"(?m)^\[(USER \d+|USER LATE|ASSISTANT END)\]\n?")
-    matches = list(marker.finditer(excerpt))
-    if not matches:
-        return excerpt[:max_chars]
-
-    blocks: list[tuple[str, str]] = []
-    for index, match in enumerate(matches):
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(excerpt)
-        text = " ".join(excerpt[match.end():end].split()).strip()
-        if text:
-            blocks.append((match.group(1), text))
+    blocks = parse_excerpt_blocks(excerpt)
+    if not blocks:
+        return compact_evidence_text(excerpt, max_chars)
 
     user_blocks = [(label, text) for label, text in blocks if label.startswith("USER")]
     assistant_blocks = [(label, text) for label, text in blocks if label == "ASSISTANT END"]
-    selected: list[tuple[str, str, int]] = []
+    selected: list[tuple[str, str]] = []
     if user_blocks:
-        selected.append((*user_blocks[0], 180))
-        if len(user_blocks) > 1:
-            selected.append((*user_blocks[-1], 160))
+        selected.append(user_blocks[0])
+        if user_blocks[-1] != user_blocks[0]:
+            selected.append(user_blocks[-1])
     if assistant_blocks:
-        selected.append((*assistant_blocks[-1], 280))
+        selected.append(assistant_blocks[-1])
     if not selected:
-        return excerpt[:max_chars]
+        return compact_evidence_text(excerpt, max_chars)
 
-    def trim(text: str, budget: int) -> str:
-        if len(text) <= budget:
-            return text
-        if budget <= 3:
-            return text[:budget]
-        head = max(1, (budget - 1) // 2)
-        tail = budget - head - 1
-        return f"{text[:head]}…{text[-tail:]}"
+    def overhead(items: list[tuple[str, str]]) -> int:
+        return (
+            sum(len(f"[{label}]\n") for label, _text in items)
+            + 2 * max(0, len(items) - 1)
+        )
 
-    rendered = [f"[{label}]\n{trim(text, budget)}" for label, text, budget in selected]
+    def minimum_content(label: str, text: str) -> int:
+        # Three characters let compact_evidence_text retain head, ellipsis,
+        # and tail for an assistant response. User intent needs one character
+        # before larger budgets are apportioned proportionally.
+        return min(len(text), 3 if label == "ASSISTANT END" else 1)
+
+    assistant = assistant_blocks[-1] if assistant_blocks else None
+    while selected and (
+        overhead(selected)
+        + sum(minimum_content(label, text) for label, text in selected)
+        > max_chars
+    ):
+        user_indexes = [
+            index for index, (label, _text) in enumerate(selected)
+            if label.startswith("USER")
+        ]
+        if user_indexes:
+            # Drop the latest user first, then the first user. The final
+            # assistant outcome remains the non-negotiable endpoint.
+            selected.pop(user_indexes[-1])
+            continue
+        if assistant is not None:
+            return compact_evidence_text(assistant[1], max_chars)
+        return compact_evidence_text(selected[0][1], max_chars)
+
+    if not selected:
+        return compact_evidence_text(excerpt, max_chars)
+
+    content_budget = max_chars - overhead(selected)
+    allocations = [
+        minimum_content(label, text) for label, text in selected
+    ]
+    remaining = content_budget - sum(allocations)
+    weights = [2 if label == "ASSISTANT END" else 1 for label, _text in selected]
+    total_weight = sum(weights)
+    weighted_extra = [
+        remaining * weight // total_weight for weight in weights
+    ]
+    for index, extra in enumerate(weighted_extra):
+        capacity = len(selected[index][1]) - allocations[index]
+        allocations[index] += min(extra, capacity)
+
+    # Rounding or short blocks can leave budget unused. Give it to the final
+    # assistant first, then to the user endpoints.
+    remaining = content_budget - sum(allocations)
+    priority = sorted(
+        range(len(selected)),
+        key=lambda index: selected[index][0] != "ASSISTANT END",
+    )
+    for index in priority:
+        if remaining <= 0:
+            break
+        capacity = len(selected[index][1]) - allocations[index]
+        extra = min(remaining, capacity)
+        allocations[index] += extra
+        remaining -= extra
+
+    rendered = [
+        f"[{label}]\n{compact_evidence_text(text, budget)}"
+        for (label, text), budget in zip(selected, allocations)
+    ]
     compacted = "\n\n".join(rendered)
-    # Marker overhead is small and fixed, but keep the public limit exact if
-    # a future label or separator changes its size.
-    return compacted[:max_chars]
+    assert len(compacted) <= max_chars
+    return compacted
 
 
 _SUMMARY_BATCH_PROMPT = """{language_directive}
@@ -1469,19 +1517,11 @@ def _fallback_narrative(excerpt: str) -> str:
     if not excerpt:
         return ""
 
-    marker = re.compile(
-        r"(?m)^(?:\[(USER(?: \d+| LATE)|ASSISTANT END)\]|\.\.\.)\n?"
-    )
-    matches = list(marker.finditer(excerpt))
-    user_msgs: list[str] = []
-    for idx, match in enumerate(matches):
-        role = match.group(1)
-        if not role or not role.startswith("USER"):
-            continue
-        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(excerpt)
-        text = " ".join(excerpt[match.end():end].split())
-        if text:
-            user_msgs.append(text)
+    user_msgs = [
+        text
+        for role, text in parse_excerpt_blocks(excerpt)
+        if role.startswith("USER")
+    ]
 
     # Be defensive for direct callers that pass an unmarked string.
     if not user_msgs:
@@ -2528,4 +2568,3 @@ def backfill_for_sessions(
         "already": len(ids) - len(todo),
         "regenerated": regenerated,
     }
-

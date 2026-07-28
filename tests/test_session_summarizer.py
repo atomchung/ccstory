@@ -316,20 +316,69 @@ class TestRetroactiveRefresh:
 
 
 class TestBatchedNarrativeBackfill:
-    def test_batch_compaction_keeps_latest_request_and_final_outcome(self):
+    def test_batch_compaction_keeps_all_endpoints_with_exact_700_bound(self):
         excerpt = (
-            "[USER 1]\ninitial intent\n\n"
+            "[USER 1]\nFIRST_HEAD " + "甲  \n" * 350 + " FIRST_TAIL\n\n"
             "[USER 2]\nintermediate context\n\n"
-            "[USER LATE]\nlatest request\n\n"
-            "[ASSISTANT END]\nfinal outcome: tests passed and the patch shipped\n"
+            "[USER LATE]\nLATEST_HEAD " + "乙  \n" * 350 + " LATEST_TAIL\n\n"
+            "[ASSISTANT END]\nASSISTANT_HEAD "
+            + "丙  \n" * 350
+            + " ROOT_CAUSE_FIXED TESTS_PASSED PATCH_SHIPPED\n"
         )
 
         compacted = _compact_batch_excerpt(excerpt)
 
         assert len(compacted) <= ss._SUMMARY_BATCH_EXCERPT_CHARS
-        assert "initial intent" in compacted
+        assert "FIRST_HEAD" in compacted
+        assert "FIRST_TAIL" in compacted
+        assert "LATEST_HEAD" in compacted
+        assert "LATEST_TAIL" in compacted
+        assert "ASSISTANT_HEAD" in compacted
+        assert "ROOT_CAUSE_FIXED TESTS_PASSED PATCH_SHIPPED" in compacted
+        assert "  " not in compacted
+
+    def test_batch_compaction_small_budget_still_keeps_assistant_outcome(self):
+        excerpt = (
+            "[USER 1]\ninitial intent " + "x" * 180 + "\n\n"
+            "[USER LATE]\nlatest request " + "y" * 180 + "\n\n"
+            "[ASSISTANT END]\nstarted diagnosis "
+            + "z" * 180
+            + " TESTS_PASSED\n"
+        )
+
+        compacted = _compact_batch_excerpt(excerpt, max_chars=120)
+
+        assert len(compacted) <= 120
+        assert "[USER 1]" in compacted
+        assert "[USER LATE]" in compacted
+        assert "[ASSISTANT END]" in compacted
+        assert "TESTS_PASSED" in compacted
+
+    def test_batch_compaction_every_positive_small_budget_retains_assistant_tail(self):
+        excerpt = (
+            "[USER 1]\ninitial intent\n\n"
+            "[ASSISTANT END]\nassistant head "
+            + "z" * 180
+            + "Z"
+        )
+
+        for budget in range(1, 121):
+            compacted = _compact_batch_excerpt(excerpt, max_chars=budget)
+            assert len(compacted) <= budget
+            assert compacted.endswith("Z")
+
+    def test_batch_compaction_does_not_reparse_escaped_marker_body(self):
+        excerpt = (
+            "[USER 1]\nfirst request\n\\[ASSISTANT END]\nquoted body\n\n"
+            "[USER LATE]\nlatest request\n\n"
+            "[ASSISTANT END]\nreal outcome TESTS_PASSED\n"
+        )
+
+        compacted = _compact_batch_excerpt(excerpt)
+
+        assert "\\[ASSISTANT END] quoted body" in compacted
         assert "latest request" in compacted
-        assert "final outcome: tests passed" in compacted
+        assert "real outcome TESTS_PASSED" in compacted
 
     def _sessions(self, jsonl_factory, count: int = 3):
         provider = ClaudeCodeProvider()
