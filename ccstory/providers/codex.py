@@ -23,9 +23,22 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..time_tracking import GAP_CAP_SEC, SessionStat, _parse_ts
-from .base import BaseAgentProvider
-from .excerpts import build_excerpt, include_message
+from ..time_tracking import (
+    GAP_CAP_SEC,
+    SessionStat,
+    WindowEvidence,
+    _parse_ts,
+    active_intervals_for_timestamps,
+    clip_active_intervals,
+    make_window_evidence,
+)
+from .base import BaseAgentProvider, _usage_windows_utc
+from .excerpts import (
+    ASSISTANT_EVIDENCE_CHARS,
+    build_excerpt,
+    compact_evidence_text,
+    include_message,
+)
 from .projects import encode_project_dir, worktree_origin
 
 # Payload types whose timestamps count as "the agent was working". Bookkeeping
@@ -157,6 +170,140 @@ class CodexProvider(BaseAgentProvider):
         if cwd:
             project = encode_project_dir(worktree_origin(cwd)) or project
         return project, build_excerpt(user_msgs, assistant_msgs)
+
+    def extract_window_evidence(
+        self,
+        session: SessionStat,
+        since: datetime,
+        until: datetime,
+    ) -> WindowEvidence | None:
+        """Return Codex transcript facts authored inside ``[since, until)``.
+
+        The activity and message predicates mirror :meth:`parse_session`:
+        event user messages are the sole real-user source, while response
+        items supply assistant evidence and tool/message counts. A missing or
+        unreadable transcript has no safe bounded substitute, so callers
+        receive ``None`` rather than this provider's full-session excerpt from
+        ``extract_excerpt`` (which is intentionally unbounded).
+
+        ``session`` must be the **physical** ``SessionStat``: the clipped
+        active intervals are derived from its complete timestamp list, which a
+        window slice no longer carries.  Passing a slice would silently
+        under-report activity, so ``session_slice_for_window`` re-validates the
+        returned intervals against the physical session it was given.
+
+        A record whose timestamp does not parse is skipped rather than
+        counted: an event that cannot be placed in time cannot be proven to
+        belong to this window.
+        """
+
+        path = self.transcript_path(session)
+        if path is None:
+            return None
+
+        window_since, window_until = _usage_windows_utc(
+            {"window": (since, until)}
+        )["window"]
+        timestamps: list[float] = []
+        user_msgs: list[str] = []
+        assistant_msgs: list[str] = []
+        msg_count = 0
+        user_msg_count = 0
+        first_user_text = ""
+        latest_user_text = ""
+
+        try:
+            with path.open("r", encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    payload = record.get("payload")
+                    if not isinstance(payload, dict):
+                        continue
+
+                    kind = record.get("type")
+                    payload_type = payload.get("type")
+                    counts_as_activity = kind == "response_item" or (
+                        kind == "event_msg"
+                        and payload_type in _ACTIVITY_EVENT_TYPES
+                    )
+                    if not counts_as_activity:
+                        continue
+                    raw_timestamp = record.get("timestamp")
+                    timestamp = _parse_ts(
+                        raw_timestamp if isinstance(raw_timestamp, str) else None
+                    )
+                    if timestamp is None:
+                        continue
+                    if timestamp.tzinfo is None:
+                        timestamp = timestamp.replace(tzinfo=timezone.utc)
+                    else:
+                        timestamp = timestamp.astimezone(timezone.utc)
+                    if not window_since <= timestamp < window_until:
+                        continue
+
+                    timestamps.append(timestamp.timestamp())
+                    if kind == "response_item":
+                        is_message = (
+                            payload_type == "message"
+                            and payload.get("role") in ("user", "assistant")
+                        )
+                        is_tool_record = isinstance(payload_type, str) and (
+                            payload_type.endswith("_call")
+                            or payload_type.endswith("_call_output")
+                        )
+                        if is_message or is_tool_record:
+                            msg_count += 1
+                        if (
+                            payload_type == "message"
+                            and payload.get("role") == "assistant"
+                        ):
+                            text = _codex_text(payload.get("content", "")).strip()
+                            if include_message(text):
+                                # build_excerpt owns bounded head+tail compaction.
+                                assistant_msgs.append(text)
+                        continue
+
+                    if payload_type != "user_message":
+                        continue
+                    msg_count += 1
+                    text = strip_task_wrapper(
+                        _codex_text(payload.get("message", ""))
+                    ).strip()
+                    if text and "tool_use_id" not in text:
+                        user_msg_count += 1
+                        if not first_user_text:
+                            first_user_text = text[:200]
+                        latest_user_text = text[:200]
+                    if include_message(text):
+                        user_msgs.append(text)
+        except (OSError, UnicodeError):
+            return None
+
+        intervals = clip_active_intervals(
+            active_intervals_for_timestamps(session.timestamps),
+            window_since,
+            window_until,
+        )
+        final_assistant_text = (
+            compact_evidence_text(assistant_msgs[-1], ASSISTANT_EVIDENCE_CHARS)
+            if assistant_msgs
+            else ""
+        )
+        return make_window_evidence(
+            timestamps=timestamps,
+            active_intervals=intervals,
+            msg_count=msg_count,
+            user_msg_count=user_msg_count,
+            first_user_text=first_user_text,
+            latest_user_text=latest_user_text,
+            final_assistant_text=final_assistant_text,
+            excerpt=build_excerpt(user_msgs, assistant_msgs),
+        )
 
     def _transcript_globs(self) -> list[str]:
         return [str(root / "**" / "*.jsonl") for root in self.data_roots()]
