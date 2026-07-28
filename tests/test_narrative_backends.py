@@ -150,13 +150,15 @@ def test_antigravity_command_uses_explicit_flash_model_and_effort(monkeypatch):
 
 def test_antigravity_deadline_cannot_round_above_caller_reservation(monkeypatch):
     calls = []
+    responses = iter(["", "", "flash prose"])
 
     def fake_run(argv, **kwargs):
         calls.append((argv, kwargs))
-        return _result("flash prose")
+        return _result(next(responses))
 
     monkeypatch.setattr(ss.subprocess, "run", fake_run)
-    monkeypatch.setattr(ss.time, "monotonic", lambda: 100.0)
+    clock = iter([100.0, 110.0, 130.0])
+    monkeypatch.setattr(ss.time, "monotonic", lambda: next(clock))
 
     result = ss._run_antigravity_p(
         "prompt", 45, "gemini-3.6-flash-low", "low",
@@ -165,6 +167,8 @@ def test_antigravity_deadline_cannot_round_above_caller_reservation(monkeypatch)
 
     assert result is not None and result.stdout == "flash prose"
     assert calls[0][1]["timeout"] == 45
+    assert calls[1][1]["timeout"] <= 35.00000000000006
+    assert calls[2][1]["timeout"] <= 15.000000000000057
 
 
 def test_budgeted_antigravity_call_is_capped_at_deadline(monkeypatch):

@@ -1175,7 +1175,10 @@ def run_claude_p(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise subprocess.TimeoutExpired(str(CLAUDE_BIN), timeout)
-        return remaining
+        # Absolute-deadline subtraction can round fractionally above the
+        # caller's reservation.  The per-call budget remains a hard ceiling
+        # for both the flagged attempt and its compatibility retry.
+        return min(float(timeout), remaining)
 
     if not _flag_confirmed_broken:
         r = subprocess.run(
