@@ -16,9 +16,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import unquote
 
-from ..time_tracking import GAP_CAP_SEC, SessionStat, _parse_ts
+from ..time_tracking import (
+    GAP_CAP_SEC,
+    SessionStat,
+    WindowEvidence,
+    _parse_ts,
+    active_intervals_for_timestamps,
+    clip_active_intervals,
+    make_window_evidence,
+)
 from .base import BaseAgentProvider
-from .excerpts import build_excerpt, include_message
+from .excerpts import (
+    ASSISTANT_EVIDENCE_CHARS,
+    build_excerpt,
+    compact_evidence_text,
+    include_message,
+)
 from .projects import encode_project_dir, worktree_origin
 
 
@@ -449,6 +462,147 @@ class AntigravityProvider(BaseAgentProvider):
             pass
 
         return project, build_excerpt(user_msgs, assistant_msgs)
+
+    def extract_window_evidence(
+        self,
+        session: SessionStat,
+        since: datetime,
+        until: datetime,
+    ) -> WindowEvidence | None:
+        """Return Antigravity transcript facts authored inside ``[since, until)``.
+
+        Unlike the Claude and Codex adapters, the clipped active intervals
+        come directly from ``session.timestamps`` (the physical timestamp
+        inventory) rather than from timestamps collected during the
+        transcript rescan below: the transcript is reopened only to recover
+        role-gated, user-facing prose and message counts for this particular
+        window. That reuses the parser's authoritative role predicates
+        (``_is_user_step``/``_is_assistant_step``) and its ``<USER_REQUEST>``
+        unwrapping exactly as :meth:`parse_session` does, so a tool/model
+        event or a system-injected input can never surface as evidence.
+
+        A missing or unreadable transcript has no safe bounded substitute, so
+        callers receive ``None`` rather than this provider's full-session
+        excerpt from ``extract_excerpt`` (which is intentionally unbounded).
+
+        ``session`` must be the **physical** ``SessionStat``: the clipped
+        active intervals are derived from its complete timestamp list, which
+        a window slice no longer carries. Passing a slice would silently
+        under-report activity, so ``session_slice_for_window`` re-validates
+        the returned intervals against the physical session it was given.
+
+        A record whose timestamp does not parse is skipped rather than
+        counted: an event that cannot be placed in time cannot be proven to
+        belong to this window. ``parse_session`` still counts such a record
+        toward the physical session's ``msg_count``.
+        """
+        try:
+            since_utc = (
+                since.replace(tzinfo=timezone.utc)
+                if since.tzinfo is None
+                else since.astimezone(timezone.utc)
+            )
+            until_utc = (
+                until.replace(tzinfo=timezone.utc)
+                if until.tzinfo is None
+                else until.astimezone(timezone.utc)
+            )
+            if until_utc <= since_utc:
+                return None
+
+            # Do not reconstruct intervals from the reduced transcript scan:
+            # an interval can legitimately cross the whole window without a
+            # message event inside it.
+            physical_timestamps = [float(item) for item in session.timestamps]
+            bounded_timestamps = [
+                item
+                for item in physical_timestamps
+                if since_utc.timestamp() <= item < until_utc.timestamp()
+            ]
+            intervals = clip_active_intervals(
+                active_intervals_for_timestamps(physical_timestamps),
+                since_utc,
+                until_utc,
+            )
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+        path = self.transcript_path(session)
+        if path is None:
+            return None
+
+        user_msgs: list[str] = []
+        assistant_msgs: list[str] = []
+        msg_count = 0
+        user_msg_count = 0
+
+        try:
+            with path.open("r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+
+                    timestamp = _parse_ts(record.get("created_at"))
+                    if timestamp is None:
+                        continue
+                    if timestamp.tzinfo is None:
+                        timestamp = timestamp.replace(tzinfo=timezone.utc)
+                    else:
+                        timestamp = timestamp.astimezone(timezone.utc)
+                    if not since_utc <= timestamp < until_utc:
+                        continue
+
+                    stype = record.get("type")
+                    source = record.get("source")
+                    is_user = _is_user_step(stype, source)
+                    is_assistant = _is_assistant_step(stype, source)
+                    if not (is_user or is_assistant):
+                        continue
+
+                    msg_count += 1
+                    content = _content_text(record.get("content"))
+                    if is_user:
+                        text = extract_user_request_text(content)
+                        if include_message(text):
+                            user_msg_count += 1
+                            # ``build_excerpt`` owns bounded head+tail
+                            # compaction; supplying the full message
+                            # preserves outcome/request tails.
+                            user_msgs.append(text)
+                    else:
+                        text = content.strip()
+                        if include_message(text):
+                            assistant_msgs.append(text)
+        except (OSError, TypeError, ValueError, OverflowError, AttributeError):
+            return None
+
+        return make_window_evidence(
+            timestamps=bounded_timestamps,
+            active_intervals=intervals,
+            msg_count=msg_count,
+            user_msg_count=user_msg_count,
+            # Bound these exactly like the Claude and Codex adapters. The
+            # user-text fields mirror ``SessionStat.first_user_text``, which is
+            # capped at 200 characters everywhere else, and a slice with no
+            # cached summary renders ``first_user_text`` in the detailed
+            # session list. Leaving them unbounded here would print a full raw
+            # prompt for one provider and a 200-character one for the others.
+            first_user_text=user_msgs[0][:200] if user_msgs else "",
+            latest_user_text=user_msgs[-1][:200] if user_msgs else "",
+            final_assistant_text=(
+                compact_evidence_text(assistant_msgs[-1], ASSISTANT_EVIDENCE_CHARS)
+                if assistant_msgs
+                else ""
+            ),
+            excerpt=build_excerpt(user_msgs, assistant_msgs),
+        )
 
     def _get_child_session_ids(self) -> set[str]:
         """Discover child subagent conversation IDs referenced by INVOKE_SUBAGENT records."""
