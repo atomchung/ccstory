@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePath
 
 from .categorizer import alias_fold, normalize_project_name
+from .session_identity import public_session_id
 
 # Note: classify() is no longer called here. parse_session() leaves
 # SessionStat.category empty; the caller runs categorizer.resolve_session_bucket().
@@ -627,7 +628,12 @@ def _rollup_projects(
                 messages=sum(i.msg_count for i in sess),
             )
         )
-    out.sort(key=lambda p: p.active_min, reverse=True)
+    # Ties broken by name, not left to dict insertion order. Two projects
+    # with equal rounded hours are common — a 0.1h resolution collides
+    # easily — and without this the order fell out of whichever provider was
+    # registered first and whichever file the OS listed first, so the same
+    # data rendered differently between runs (#188 0.8-G).
+    out.sort(key=lambda p: (-p.active_min, p.project))
     return out
 
 
@@ -659,7 +665,12 @@ def rollup_by_category(
 
     rollups: list[CategoryRollup] = []
     for cat, items in buckets.items():
-        items.sort(key=lambda x: x.active_sec, reverse=True)
+        # Same deterministic-tie-break reasoning as `_rollup_projects`, and
+        # the same ordering `report.top_focus_narrative` already uses — this
+        # list becomes `top_sessions`, which reaches public output.
+        items.sort(
+            key=lambda x: (-x.active_sec, x.start, public_session_id(x)),
+        )
         cat_sec = sum(i.active_sec for i in items) * scale
         rollups.append(
             CategoryRollup(
@@ -671,7 +682,7 @@ def rollup_by_category(
                 projects=_rollup_projects(items, scale, aliases),
             )
         )
-    rollups.sort(key=lambda r: r.active_min, reverse=True)
+    rollups.sort(key=lambda r: (-r.active_min, r.category))
     return rollups
 
 

@@ -93,6 +93,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   externally supplied summary — see the README's "Library usage" section.
   Rows already imported into `~/.ccstory/cache.db` are unaffected.
 
+### Fixed
+
+- Projects, categories, and top sessions with equal rounded activity could
+  come back in a different order between two runs over the same data. Hours
+  round to 0.1, so ties are common, and the order then fell out of whichever
+  provider was registered first and whichever file the operating system
+  listed first — visible as the "By project" line and the detailed session
+  list reshuffling for no reason. All three now break ties by name (or, for
+  sessions, by start time and id), so the same data always renders the same
+  way.
+
 ### Notes
 
 - Reported active time and message counts can therefore drop slightly for
