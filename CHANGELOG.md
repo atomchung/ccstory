@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Recap and previous-window comparison are now window-pure. A session that
+  crosses a report boundary previously contributed its **whole** self to both
+  windows: a Monday-morning session that began Sunday night added all of its
+  active time, message counts, and summary text to both the previous week and
+  the current one. Each window now sees only the messages, active time, and
+  evidence that actually happened inside it, so the two windows' figures sum
+  to the session rather than double-counting it. Sessions fully inside one
+  window are unaffected and their output is unchanged.
+- A boundary-crossing session no longer reuses a summary generated from the
+  other window's conversation. Until prose exists for a given window, that
+  window falls back to its own bounded evidence rather than describing work
+  the report is not reporting.
 - Renamed the `session_summaries.source` vocabulary onto one axis — how the
   summary text came to be — rather than mixing in who wrote it or why:
   `record` → `provided`, `auto` → `generated`, `fallback` → `extracted`,
@@ -36,6 +48,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   summary, source="provided")` instead to feed ccstory an authoritative
   externally supplied summary — see the README's "Library usage" section.
   Rows already imported into `~/.ccstory/cache.db` are unaffected.
+
+### Notes
+
+- Reported active time and message counts can therefore drop slightly for
+  windows that contain a boundary-crossing session. That is the correction,
+  not a regression: the previous figures counted out-of-window work.
+- Token and cost attribution are unchanged. Those come from exact per-record
+  usage events and were never derived from session boundaries.
+- `collect_sessions()` and `collect_sessions_for_windows()` keep their
+  documented behavior as raw overlap primitives: a crossing session is still
+  returned unclipped in both windows. Window purity is a property of the
+  recap/report layer.
 
 ## [0.7.3] - 2026-07-28
 
