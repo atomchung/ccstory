@@ -465,13 +465,23 @@ class TestBatchedNarrativeBackfill:
 
         assert result["summarized"] == 3
         batches = [event for event in budget.status()["trace"] if event["event"] == "batch"]
-        assert batches == [
-            {"event": "batch", "lane": "session_summaries", "completed": 1,
-             "total": 2, "item_count": 2, "outcome": "completed"},
-            {"event": "batch", "lane": "session_summaries", "completed": 2,
-             "total": 2, "item_count": 1, "outcome": "completed"},
+        assert [
+            (
+                event["lane"], event["completed"], event["total"],
+                event["item_count"], event["outcome"],
+                event["requested_count"], event["valid_count"],
+                event["unresolved_count"],
+            )
+            for event in batches
+        ] == [
+            ("session_summaries", 1, 2, 2, "completed", 2, 2, 0),
+            ("session_summaries", 2, 2, 1, "completed", 1, 1, 0),
         ]
-        assert all("session_id" not in event and "summary" not in event for event in batches)
+        assert all(event["elapsed_sec"] >= 0 for event in batches)
+        assert all(
+            not {"session_id", "summary", "prompt", "response"} & event.keys()
+            for event in batches
+        )
 
     def test_batch_omission_falls_back_and_never_overwrites_auto(
         self, tmp_home: Path, jsonl_factory, monkeypatch
@@ -504,20 +514,120 @@ class TestBatchedNarrativeBackfill:
 
         assert result["summarized"] == 1
         assert get(kept.session_id).summary == "keep this proven summary"
+        assert get(kept.session_id).source == "auto"
         assert get(sessions[2].session_id).source == "fallback"
         assert get("invented-id") is None
 
-    def test_batch_omission_retries_missing_ids_once(
+    def test_batch_omission_retry_fully_recovers_and_parses_once(
         self, tmp_home: Path, jsonl_factory, monkeypatch,
     ):
         sessions = self._sessions(jsonl_factory, 3)
         calls = 0
+        parse_calls = 0
+        real_parse = ss._parse_batch_summaries
 
-        def fake_run(prompt: str, _timeout: int):
+        def fake_run(prompt: str, _timeout: int, *, budget):
             nonlocal calls
             calls += 1
             ids = re.findall(r"\[session_id=([^;]+);", prompt)
-            selected = ids[:1] if calls == 1 else ids
+            selected = ids[:2] if calls == 1 else ids
+            return ss.NarrativeCall(
+                "\n".join(
+                    json.dumps({"session_id": sid, "summary": f"Done {sid}"})
+                    for sid in selected
+                ),
+                "claude", "sonnet",
+            )
+
+        def counting_parse(text: str, requested_ids: set[str]):
+            nonlocal parse_calls
+            parse_calls += 1
+            return real_parse(text, requested_ids)
+
+        monkeypatch.setattr(ss, "llm_available", lambda: True)
+        monkeypatch.setattr(ss, "run_llm_p", fake_run)
+        monkeypatch.setattr(ss, "_parse_batch_summaries", counting_parse)
+        budget = ss.NarrativeBudget()
+        result = ss.backfill_for_sessions(
+            sessions, use_llm=True, budget=budget,
+        )
+
+        assert calls == 2
+        assert parse_calls == 2  # primary once, retry once
+        assert result["summarized"] == 3
+        assert all(get(session.session_id).source == "auto" for session in sessions)
+        retry = next(
+            event for event in budget.trace
+            if event.get("lane") == "session_summaries_retry"
+            and event["event"] == "batch"
+        )
+        assert retry["outcome"] == "recovered"
+        assert retry["requested_count"] == 1
+        assert retry["valid_count"] == 1
+        assert retry["recovered_count"] == 1
+        assert retry["untried_count"] == 0
+        assert retry["unresolved_count"] == 0
+
+    def test_batch_omission_retry_unknown_only_is_empty_and_fails_closed(
+        self, tmp_home: Path, jsonl_factory, monkeypatch,
+    ):
+        sessions = self._sessions(jsonl_factory, 4)
+        calls = 0
+
+        def fake_run(prompt: str, _timeout: int, *, budget):
+            nonlocal calls
+            calls += 1
+            ids = re.findall(r"\[session_id=([^;]+);", prompt)
+            if calls == 1:
+                stdout = "\n".join(
+                    json.dumps({"session_id": sid, "summary": f"Done {sid}"})
+                    for sid in ids[:2]
+                )
+            else:
+                stdout = "\n".join([
+                    "not-json",
+                    json.dumps({
+                        "session_id": "invented-id",
+                        "summary": "Must never reach cache",
+                    }),
+                ])
+            return ss.NarrativeCall(stdout, "claude", "sonnet")
+
+        monkeypatch.setattr(ss, "llm_available", lambda: True)
+        monkeypatch.setattr(ss, "run_llm_p", fake_run)
+        budget = ss.NarrativeBudget()
+
+        result = ss.backfill_for_sessions(
+            sessions, use_llm=True, budget=budget,
+        )
+
+        assert calls == 2
+        assert result["summarized"] == 2
+        assert result["fallback"] == 2
+        assert get("invented-id") is None
+        retry = next(
+            event for event in budget.trace
+            if event.get("lane") == "session_summaries_retry"
+            and event["event"] == "batch"
+        )
+        assert retry["outcome"] == "empty"
+        assert retry["requested_count"] == 2
+        assert retry["valid_count"] == 0
+        assert retry["recovered_count"] == 0
+        assert retry["unresolved_count"] == 2
+        assert not {"session_id", "summary", "prompt", "response"} & retry.keys()
+
+    def test_batch_omission_retry_partial_recovery_counts_all_unresolved(
+        self, tmp_home: Path, jsonl_factory, monkeypatch,
+    ):
+        sessions = self._sessions(jsonl_factory, 6)
+        calls = 0
+
+        def fake_run(prompt: str, _timeout: int, *, budget):
+            nonlocal calls
+            calls += 1
+            ids = re.findall(r"\[session_id=([^;]+);", prompt)
+            selected = ids[:2] if calls == 1 else ids[:1]
             return ss.NarrativeCall(
                 "\n".join(
                     json.dumps({"session_id": sid, "summary": f"Done {sid}"})
@@ -528,11 +638,176 @@ class TestBatchedNarrativeBackfill:
 
         monkeypatch.setattr(ss, "llm_available", lambda: True)
         monkeypatch.setattr(ss, "run_llm_p", fake_run)
-        result = ss.backfill_for_sessions(sessions, use_llm=True)
+        budget = ss.NarrativeBudget()
+
+        result = ss.backfill_for_sessions(
+            sessions, use_llm=True, budget=budget,
+        )
 
         assert calls == 2
         assert result["summarized"] == 3
-        assert all(get(session.session_id).source == "auto" for session in sessions)
+        assert result["fallback"] == 3
+        retry = next(
+            event for event in budget.trace
+            if event.get("lane") == "session_summaries_retry"
+            and event["event"] == "batch"
+        )
+        assert retry["outcome"] == "partial"
+        assert retry["requested_count"] == 3
+        assert retry["recovered_count"] == 1
+        assert retry["untried_count"] == 1
+        assert retry["unresolved_count"] == 3
+
+    def test_all_ten_probe_omissions_retry_strictly_smaller_subset(
+        self, tmp_home: Path, jsonl_factory, monkeypatch,
+    ):
+        sessions = self._sessions(jsonl_factory, 10)
+        seen_sizes: list[int] = []
+
+        def fake_run(prompt: str, _timeout: int, *, budget):
+            ids = re.findall(r"\[session_id=([^;]+);", prompt)
+            seen_sizes.append(len(ids))
+            selected = [] if len(seen_sizes) == 1 else ids
+            return ss.NarrativeCall(
+                "\n".join(
+                    json.dumps({"session_id": sid, "summary": f"Done {sid}"})
+                    for sid in selected
+                ),
+                "claude", "sonnet",
+            )
+
+        monkeypatch.setattr(ss, "llm_available", lambda: True)
+        monkeypatch.setattr(ss, "run_llm_p", fake_run)
+        budget = ss.NarrativeBudget()
+
+        result = ss.backfill_for_sessions(
+            sessions, use_llm=True, budget=budget,
+        )
+
+        assert seen_sizes == [10, 5]
+        assert result["summarized"] == 5
+        assert result["fallback"] == 5
+        retry = next(
+            event for event in budget.trace
+            if event.get("lane") == "session_summaries_retry"
+            and event["event"] == "batch"
+        )
+        assert retry["requested_count"] == 5
+        assert retry["untried_count"] == 5
+        assert retry["unresolved_count"] == 5
+
+    def test_omissions_over_retry_limit_leave_untried_rows_as_fallback(
+        self, tmp_home: Path, jsonl_factory, monkeypatch,
+    ):
+        sessions = self._sessions(jsonl_factory, 10)
+        calls = 0
+
+        def fake_run(prompt: str, _timeout: int, *, budget):
+            nonlocal calls
+            calls += 1
+            ids = re.findall(r"\[session_id=([^;]+);", prompt)
+            selected = ids[:2] if calls == 1 else ids
+            return ss.NarrativeCall(
+                "\n".join(
+                    json.dumps({"session_id": sid, "summary": f"Done {sid}"})
+                    for sid in selected
+                ),
+                "claude", "sonnet",
+            )
+
+        monkeypatch.setattr(ss, "llm_available", lambda: True)
+        monkeypatch.setattr(ss, "run_llm_p", fake_run)
+        budget = ss.NarrativeBudget()
+
+        result = ss.backfill_for_sessions(
+            sessions, use_llm=True, budget=budget,
+        )
+
+        assert calls == 2
+        assert result["summarized"] == 7
+        assert result["fallback"] == 3
+        retry = next(
+            event for event in budget.trace
+            if event.get("lane") == "session_summaries_retry"
+            and event["event"] == "batch"
+        )
+        assert retry["requested_count"] == ss.SUMMARY_OMISSION_RETRY_SIZE
+        assert retry["recovered_count"] == 5
+        assert retry["untried_count"] == 3
+        assert retry["unresolved_count"] == 3
+
+    def test_budget_exhausted_before_retry_records_zero_valid_rows(
+        self, tmp_home: Path, jsonl_factory, monkeypatch,
+    ):
+        sessions = self._sessions(jsonl_factory, 3)
+        budget = ss.NarrativeBudget(total_sec=90)
+        calls = 0
+
+        def fake_run(prompt: str, _timeout: int, *, budget):
+            nonlocal calls
+            calls += 1
+            ids = re.findall(r"\[session_id=([^;]+);", prompt)
+            budget.total_sec = 0
+            return ss.NarrativeCall(
+                "\n".join(
+                    json.dumps({"session_id": sid, "summary": f"Done {sid}"})
+                    for sid in ids[:2]
+                ),
+                "claude", "sonnet",
+            )
+
+        monkeypatch.setattr(ss, "llm_available", lambda: True)
+        monkeypatch.setattr(ss, "run_llm_p", fake_run)
+
+        result = ss.backfill_for_sessions(
+            sessions, use_llm=True, budget=budget,
+        )
+
+        assert calls == 1
+        assert result["summarized"] == 2
+        assert result["fallback"] == 1
+        retry = next(
+            event for event in budget.trace
+            if event.get("lane") == "session_summaries_retry"
+            and event["event"] == "batch"
+        )
+        assert retry["outcome"] == "budget_exhausted"
+        assert retry["requested_count"] == 1
+        assert retry["valid_count"] == 0
+        assert retry["recovered_count"] == 0
+        assert retry["unresolved_count"] == 1
+        assert budget.stopped_reason == "budget_exhausted"
+
+    def test_slow_retry_does_not_shrink_batch_after_fast_primary(
+        self, monkeypatch,
+    ):
+        items = [
+            (f"session-{index}", "project", f"[USER 1]\nTask {index}")
+            for index in range(25)
+        ]
+        seen_sizes: list[int] = []
+        clock = iter([0.0, 1.0, 2.0, 100.0, 101.0, 102.0])
+
+        def fake_run(prompt: str, _timeout: int):
+            ids = re.findall(r"\[session_id=([^;]+);", prompt)
+            seen_sizes.append(len(ids))
+            selected = ids[:-1] if len(seen_sizes) == 1 else ids
+            return ss.NarrativeCall(
+                "\n".join(
+                    json.dumps({"session_id": sid, "summary": f"Done {sid}"})
+                    for sid in selected
+                ),
+                "claude", "sonnet",
+            )
+
+        monkeypatch.setattr(ss, "llm_available", lambda: True)
+        monkeypatch.setattr(ss, "run_llm_p", fake_run)
+        monkeypatch.setattr(ss.time, "monotonic", lambda: next(clock))
+
+        result = ss.summarize_sessions_via_llm_batch(items, batch_size=40)
+
+        assert len(result) == 25
+        assert seen_sizes == [10, 1, 15]
 
     def test_probe_grows_next_batch_and_budget_exhaustion_falls_back(
         self, tmp_home: Path, jsonl_factory, monkeypatch
