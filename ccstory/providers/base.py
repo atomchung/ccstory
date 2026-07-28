@@ -13,10 +13,64 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
 from ..time_tracking import SessionStat
+from ..token_usage import ModelUsage
+
+
+@dataclass(frozen=True)
+class SnapshotMetrics:
+    """Privacy-safe operation counts for one provider snapshot.
+
+    Legacy providers cannot report these counts without changing their old
+    collection methods, so every counter is unknown by default.  ``None`` is
+    intentionally different from zero: zero is an observed fact, while the
+    default adapter simply has no complete record inventory yet.
+
+    Only aggregate operation counts belong here.  Transcript text, excerpts,
+    filesystem paths, and session/project identifiers must never be retained
+    as snapshot diagnostics.
+    """
+
+    sources_enumerated: int | None = None
+    source_opens: int | None = None
+    records_parsed: int | None = None
+    companion_reads: int | None = None
+    record_inventory_complete: bool = False
+
+
+@dataclass
+class ProviderRecord:
+    """One selected provider's contribution to an invocation snapshot."""
+
+    agent: str
+    sessions_by_window: dict[str, list[SessionStat]]
+    by_model_by_window: dict[str, dict[str, ModelUsage]]
+    assistant_turns_by_window: dict[str, int]
+    metrics: SnapshotMetrics = field(default_factory=SnapshotMetrics)
+
+
+def _datetime_utc(value: datetime) -> datetime:
+    """Treat naive provider timestamps as UTC and normalize aware values."""
+
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _usage_windows_utc(
+    windows: Mapping[str, tuple[datetime, datetime]],
+) -> dict[str, tuple[datetime, datetime]]:
+    """Normalize usage bounds exactly like ``token_usage`` public helpers."""
+
+    normalized: dict[str, tuple[datetime, datetime]] = {}
+    for key, (since, until) in windows.items():
+        normalized[key] = (_datetime_utc(since), _datetime_utc(until))
+    return normalized
 
 
 class BaseAgentProvider(ABC):
@@ -89,6 +143,70 @@ class BaseAgentProvider(ABC):
             key: self.collect_usage(since, until, by_model_by_window[key])
             for key, (since, until) in windows.items()
         }
+
+    def collect_snapshot(
+        self,
+        windows: Mapping[str, tuple[datetime, datetime]],
+        *,
+        engaged_only: bool = True,
+    ) -> ProviderRecord:
+        """Collect this provider's legacy session and exact-usage facts.
+
+        This conservative adapter keeps third-party providers source
+        compatible: implementations that only provide the pre-snapshot
+        abstract methods continue to work unchanged.  Session collection scans
+        the enclosing range once and reuses each ``SessionStat`` object in
+        every overlapping window.  Usage collection delegates to the existing
+        multi-window hook, preserving inclusive event boundaries, cumulative
+        provider lineage, model aggregation, and coverage semantics.
+
+        Bundled providers can override this method in later issue slices to
+        derive both fact sets from one physical pass and report complete
+        operation metrics.
+        """
+
+        if not windows:
+            return ProviderRecord(
+                agent=self.agent_name,
+                sessions_by_window={},
+                by_model_by_window={},
+                assistant_turns_by_window={},
+            )
+
+        earliest = min(since for since, _until in windows.values())
+        latest = max(until for _since, until in windows.values())
+        scanned = self.collect_sessions(
+            earliest,
+            latest,
+            engaged_only=engaged_only,
+        )
+        comparison_windows = _usage_windows_utc(windows)
+        sessions_by_window = {
+            key: [
+                session
+                for session in scanned
+                if _datetime_utc(session.end) >= since
+                and _datetime_utc(session.start) < until
+            ]
+            for key, (since, until) in comparison_windows.items()
+        }
+
+        usage_windows = comparison_windows
+        by_model_by_window = {key: {} for key in usage_windows}
+        assistant_turns = self.collect_usage_for_windows(
+            usage_windows,
+            by_model_by_window,
+        )
+        assistant_turns_by_window = {
+            key: assistant_turns.get(key, 0) for key in usage_windows
+        }
+
+        return ProviderRecord(
+            agent=self.agent_name,
+            sessions_by_window=sessions_by_window,
+            by_model_by_window=by_model_by_window,
+            assistant_turns_by_window=assistant_turns_by_window,
+        )
 
     def transcript_path(self, sess: SessionStat) -> Path | None:
         """Locate the transcript backing ``sess``, or None if it is gone.

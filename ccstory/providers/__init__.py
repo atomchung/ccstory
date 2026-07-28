@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Literal
 
 from ..time_tracking import SessionStat
+from ..token_usage import ModelUsage, UsageReport
 from .antigravity import AntigravityProvider
-from .base import BaseAgentProvider
+from .base import (
+    BaseAgentProvider,
+    ProviderRecord,
+    SnapshotMetrics as SnapshotMetrics,
+    _usage_windows_utc,
+)
 from .claude import ClaudeCodeProvider
 from .codex import CodexProvider
 
@@ -34,6 +41,16 @@ class AgentProviderSpec:
     label: str
     factory: Callable[[], BaseAgentProvider]
     usage_coverage: UsageCoverage = "unavailable"
+
+
+@dataclass
+class ProviderSnapshot:
+    """Ordered, invocation-local facts from the selected provider registry."""
+
+    windows: dict[str, tuple[datetime, datetime]]
+    records: tuple[ProviderRecord, ...]
+    sessions_by_window: dict[str, list[SessionStat]]
+    usage_by_window: dict[str, UsageReport]
 
 
 _PROVIDER_SPECS: dict[str, AgentProviderSpec] = {}
@@ -105,9 +122,12 @@ def provider_specs(agent: str = "all") -> list[AgentProviderSpec]:
     return [spec]
 
 
-def create_providers(agent: str = "all") -> list[BaseAgentProvider]:
-    """Instantiate the provider population selected for one operation."""
-    providers: list[BaseAgentProvider] = []
+def _selected_provider_pairs(
+    agent: str = "all",
+) -> list[tuple[AgentProviderSpec, BaseAgentProvider]]:
+    """Instantiate selected registry entries once, preserving registry order."""
+
+    selected: list[tuple[AgentProviderSpec, BaseAgentProvider]] = []
     for spec in provider_specs(agent):
         provider = spec.factory()
         if provider.agent_name != spec.name:
@@ -115,8 +135,124 @@ def create_providers(agent: str = "all") -> list[BaseAgentProvider]:
                 f"Provider descriptor '{spec.name}' created an adapter with "
                 f"agent_name '{provider.agent_name}'"
             )
-        providers.append(provider)
-    return providers
+        selected.append((spec, provider))
+    return selected
+
+
+def create_providers(agent: str = "all") -> list[BaseAgentProvider]:
+    """Instantiate the provider population selected for one operation."""
+    return [provider for _spec, provider in _selected_provider_pairs(agent)]
+
+
+def _merge_model_usage(
+    destination: dict[str, ModelUsage],
+    source: Mapping[str, ModelUsage],
+) -> None:
+    """Accumulate exact provider facts without sharing mutable usage objects."""
+
+    for model, incoming in source.items():
+        combined = destination.setdefault(model, ModelUsage(model=model))
+        combined.turns += incoming.turns
+        combined.input_tokens += incoming.input_tokens
+        combined.cache_creation += incoming.cache_creation
+        combined.cache_read += incoming.cache_read
+        combined.output_tokens += incoming.output_tokens
+
+
+def collect_provider_snapshot(
+    windows: Mapping[str, tuple[datetime, datetime]],
+    *,
+    engaged_only: bool = True,
+    agent: str = "all",
+) -> ProviderSnapshot:
+    """Collect selected provider contributions once and aggregate by window.
+
+    Registry order is retained both in ``records`` and in each aggregated
+    session list.  Each selected factory is instantiated exactly once for this
+    operation; its instance owns the complete provider-level snapshot call.
+    Usage reports derive coverage from the agents that produced sessions in
+    that exact window, matching ``build_recap``'s historical behavior while
+    still aggregating every exact usage fact the selected providers expose.
+    """
+
+    window_map = dict(windows)
+    if not window_map:
+        return ProviderSnapshot(
+            windows={},
+            records=(),
+            sessions_by_window={},
+            usage_by_window={},
+        )
+
+    selected = _selected_provider_pairs(agent)
+    records: list[ProviderRecord] = []
+    expected_keys = set(window_map)
+    for spec, provider in selected:
+        record = provider.collect_snapshot(
+            window_map,
+            engaged_only=engaged_only,
+        )
+        if record.agent != spec.name:
+            raise ValueError(
+                f"Provider snapshot for '{spec.name}' identified itself as "
+                f"'{record.agent}'"
+            )
+        for field_name, actual in (
+            ("sessions_by_window", record.sessions_by_window),
+            ("by_model_by_window", record.by_model_by_window),
+            ("assistant_turns_by_window", record.assistant_turns_by_window),
+        ):
+            missing = expected_keys.difference(actual)
+            if missing:
+                raise ValueError(
+                    f"Provider '{spec.name}' snapshot omitted "
+                    f"{field_name} keys: {sorted(missing)}"
+                )
+        records.append(record)
+
+    sessions_by_window: dict[str, list[SessionStat]] = {
+        key: [] for key in window_map
+    }
+    by_model_by_window: dict[str, dict[str, ModelUsage]] = {
+        key: {} for key in window_map
+    }
+    assistant_turns_by_window = {key: 0 for key in window_map}
+    for record in records:
+        for key in window_map:
+            sessions_by_window[key].extend(record.sessions_by_window[key])
+            _merge_model_usage(
+                by_model_by_window[key],
+                record.by_model_by_window[key],
+            )
+            assistant_turns_by_window[key] += (
+                record.assistant_turns_by_window[key]
+            )
+
+    usage_windows = _usage_windows_utc(window_map)
+    specs_by_name = {spec.name: spec for spec, _provider in selected}
+    usage_by_window: dict[str, UsageReport] = {}
+    for key, (since, until) in usage_windows.items():
+        active_agents = {
+            session.agent for session in sessions_by_window[key]
+        }
+        usage_by_window[key] = UsageReport(
+            since=since,
+            until=until,
+            by_model=by_model_by_window[key],
+            assistant_turns=assistant_turns_by_window[key],
+            provider_coverage={
+                name: spec.usage_coverage
+                for name, spec in specs_by_name.items()
+                if name in active_agents
+            },
+        )
+
+    return ProviderSnapshot(
+        windows=window_map,
+        records=tuple(records),
+        sessions_by_window=sessions_by_window,
+        usage_by_window=usage_by_window,
+    )
 
 
 def get_provider(agent_name: str) -> BaseAgentProvider:
