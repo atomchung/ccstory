@@ -1630,3 +1630,100 @@ class TestImportFromClaudeRecap:
         # Idempotent: a second run inserts nothing new
         second = import_from_claude_recap()
         assert second == 0
+
+    def test_record_import_precedence_and_accurate_rowcount(
+        self, tmp_home: Path,
+    ):
+        for source in ("auto", "fallback", "skipped"):
+            upsert(
+                f"replace-{source}",
+                f"local {source}",
+                source,
+                project="local",
+                prompt_version=ss.PROMPT_VERSION,
+                narrator_provider="claude",
+                narrator_model="sonnet",
+                narrator_fingerprint="local-narrator",
+                evidence_fingerprint=(
+                    "local-basis" if source == "auto" else ""
+                ),
+                observed_evidence_fingerprint=(
+                    "local-observed" if source == "auto" else ""
+                ),
+            )
+        upsert("keep-record-from-record", "local human", "record")
+        upsert("keep-record-from-auto", "local human", "record")
+        upsert(
+            "keep-auto-from-auto", "local generated", "auto",
+            evidence_fingerprint="local-basis",
+            observed_evidence_fingerprint="local-basis",
+        )
+
+        recap_path = tmp_home / ".claude" / "session_summaries.db"
+        recap_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(recap_path))
+        try:
+            conn.execute(
+                """CREATE TABLE session_summaries (
+                    session_id TEXT PRIMARY KEY,
+                    summary TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    project TEXT,
+                    created_at REAL NOT NULL,
+                    task_slug TEXT
+                )"""
+            )
+            rows = [
+                (f"replace-{source}", f"imported human over {source}",
+                 "record", "imported", 10.0, "slug")
+                for source in ("auto", "fallback", "skipped")
+            ]
+            rows.extend([
+                ("keep-record-from-record", "different imported human",
+                 "record", "imported", 11.0, "slug"),
+                ("keep-record-from-auto", "imported generated",
+                 "auto", "imported", 12.0, "slug"),
+                ("keep-auto-from-auto", "different imported generated",
+                 "auto", "imported", 13.0, "slug"),
+                ("insert-record", "new imported human",
+                 "record", "imported", 14.0, "slug"),
+                ("insert-auto", "new imported generated",
+                 "auto", "imported", 15.0, "slug"),
+            ])
+            conn.executemany(
+                "INSERT INTO session_summaries VALUES (?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Three record promotions plus two missing-row inserts. Blocked
+        # conflicts must not inflate the count.
+        assert import_from_claude_recap() == 5
+        for source in ("auto", "fallback", "skipped"):
+            promoted = get(f"replace-{source}")
+            assert promoted.summary == f"imported human over {source}"
+            assert promoted.source == "record"
+            assert promoted.project == "imported"
+            assert promoted.created_at == 10.0
+            assert promoted.prompt_version == 0
+            assert promoted.narrator_provider is None
+            assert promoted.narrator_model is None
+            assert promoted.narrator_fingerprint == ""
+            assert promoted.evidence_fingerprint == ""
+            assert promoted.observed_evidence_fingerprint == ""
+
+        assert get("keep-record-from-record").summary == "local human"
+        assert get("keep-record-from-auto").summary == "local human"
+        assert get("keep-auto-from-auto").summary == "local generated"
+        assert get("insert-record").source == "record"
+        inserted_auto = get("insert-auto")
+        assert inserted_auto.source == "auto"
+        assert inserted_auto.evidence_fingerprint == ss.LEGACY_UNKNOWN_EVIDENCE
+        assert (
+            inserted_auto.observed_evidence_fingerprint
+            == ss.LEGACY_UNKNOWN_EVIDENCE
+        )
+
+        assert import_from_claude_recap() == 0

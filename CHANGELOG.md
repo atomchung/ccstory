@@ -103,6 +103,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capped date ranges, preventing repositories with more than 200 lifetime PRs
   from emitting false warnings or undercounting current-window shipped work.
 
+### Fixed
+
+- Deep category initialization no longer sends stale, legacy, fallback, or
+  skipped cached prose into a fresh classification; it uses current session
+  text unless the cache row is a current auto summary or authoritative human
+  record.
+- Importing the shared Claude recap cache now promotes local generated or
+  fallback rows when an incoming human `record` exists, clears obsolete
+  narrator/evidence metadata, and preserves an existing local record over
+  every imported row. Imported automatic summaries still never overwrite any
+  local row.
+
 ## [0.7.2] - 2026-07-26
 
 ### Added

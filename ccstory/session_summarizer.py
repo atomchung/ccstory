@@ -1001,10 +1001,11 @@ def import_from_claude_recap() -> int:
     """Pull cached summaries from ~/.claude/session_summaries.db (written by
     the personal_os /recap skill) into ccstory's cache.
 
-    Idempotent — uses INSERT OR IGNORE so existing ccstory entries are
-    preserved. Drops the recap-only `task_slug` column since ccstory's
-    schema doesn't carry it. Silently returns 0 if the recap DB is absent
-    (fresh users won't have it).
+    Idempotent and source-aware: an incoming human ``record`` promotes a local
+    auto/fallback/skipped row, while an existing local record is authoritative
+    and every incoming non-record loses to any local row. Drops the recap-only
+    `task_slug` column since ccstory's schema doesn't carry it. Silently returns
+    0 if the recap DB is absent (fresh users won't have it).
     """
     if not RECAP_DB_PATH.exists():
         return 0
@@ -1020,23 +1021,43 @@ def import_from_claude_recap() -> int:
             LOG.warning("attach recap DB failed: %s", e)
             return 0
         try:
-            cur = conn.execute(
-                """INSERT OR IGNORE INTO session_summaries
+            before_changes = conn.total_changes
+            conn.execute(
+                """INSERT INTO session_summaries
                    (session_id, summary, source, project, created_at,
-                    prompt_version, evidence_fingerprint,
+                    prompt_version, narrator_provider, narrator_model,
+                    narrator_fingerprint, evidence_fingerprint,
                     observed_evidence_fingerprint)
-                   SELECT session_id, summary, source, project, created_at, ?,
+                   SELECT session_id, summary, source, project, created_at,
+                          CASE WHEN source = 'auto' THEN ? ELSE 0 END,
+                          NULL, NULL, '',
                           CASE WHEN source = 'auto' THEN ? ELSE '' END,
                           CASE WHEN source = 'auto' THEN ? ELSE '' END
                    FROM recap.session_summaries
-                   WHERE summary IS NOT NULL AND summary <> ''""",
+                   WHERE summary IS NOT NULL AND summary <> ''
+                   ON CONFLICT(session_id) DO UPDATE SET
+                       summary = excluded.summary,
+                       source = excluded.source,
+                       project = excluded.project,
+                       created_at = excluded.created_at,
+                       prompt_version = 0,
+                       narrator_provider = NULL,
+                       narrator_model = NULL,
+                       narrator_fingerprint = '',
+                       evidence_fingerprint = '',
+                       observed_evidence_fingerprint = ''
+                   WHERE excluded.source = 'record'
+                     AND session_summaries.source <> 'record'""",
                 (
                     PROMPT_VERSION,
                     LEGACY_UNKNOWN_EVIDENCE,
                     LEGACY_UNKNOWN_EVIDENCE,
                 ),
             )
-            n = cur.rowcount or 0
+            # Cursor.rowcount for INSERT...SELECT has varied across sqlite3
+            # versions. Connection total_changes gives the exact inserted +
+            # promoted-row count while blocked precedence conflicts add zero.
+            n = conn.total_changes - before_changes
             conn.commit()
             return n
         finally:
