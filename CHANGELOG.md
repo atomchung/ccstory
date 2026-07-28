@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Antigravity narrator retries now preserve the caller's exact hard timeout
+  even when absolute-deadline subtraction rounds fractionally upward.
 - Top-level `ccstory --help` and `ccstory --version` now use a lightweight
   stdlib-only bootstrap, avoiding imports of transcript providers, the recap
   pipeline, and Rich rendering until a real command runs.
