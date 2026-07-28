@@ -38,7 +38,11 @@ from .categorizer import (
     normalize_project_name,
     resolve_session_bucket,
 )
-from .providers import agent_label, provider_data_roots
+from .providers import (
+    agent_label,
+    collect_provider_snapshot,
+    provider_data_roots,
+)
 from .report import build_report_json, render_report
 from .session_summarizer import (
     CCSTORY_LANG_ENV,
@@ -60,16 +64,10 @@ from .session_summarizer import (
     synthesize_comparison,
     synthesize_overall_for_period,
 )
-from .time_tracking import (
-    CLAUDE_PROJECTS,
-    collect_sessions,
-    collect_sessions_for_windows,
-    rollup_by_category,
-)
+from .time_tracking import CLAUDE_PROJECTS as CLAUDE_PROJECTS
+from .time_tracking import rollup_by_category
 from .token_usage import (
     apply_prices,
-    collect_usage,
-    collect_usage_for_windows,
     load_prices_config,
 )
 from .trends import PeriodComparison, compare_to_previous, previous_window
@@ -618,42 +616,25 @@ def build_recap(
     with console.status("[dim]Parsing sessions and token usage…[/dim]"):
         if compare and window != "all":
             prev_since, prev_until = previous_window(since, until)
-            session_windows = collect_sessions_for_windows(
-                {
+            snapshot = collect_provider_snapshot(
+                windows={
                     "current": (since, until),
                     "previous": (prev_since, prev_until),
                 },
                 agent=agent,
             )
-            sessions = session_windows["current"]
-            previous_sessions = session_windows["previous"]
         else:
-            sessions = collect_sessions(since, until, agent=agent)
+            snapshot = collect_provider_snapshot(
+                windows={"current": (since, until)},
+                agent=agent,
+            )
+        sessions = snapshot.sessions_by_window["current"]
         if not sessions:
             raise RecapUnavailable("No engaged sessions in this window.")
-        # Read current/previous exact usage in one provider scan whenever the
-        # comparison needs both windows. Token usage normalizes local bounds.
-        if previous_sessions is not None:
-            usage_windows = collect_usage_for_windows(
-                {
-                    "current": (since, until),
-                    "previous": (prev_since, prev_until),
-                },
-                agent=agent,
-                active_agents_by_window={
-                    "current": {session.agent for session in sessions},
-                    "previous": {session.agent for session in previous_sessions},
-                },
-            )
-            usage = usage_windows["current"]
-            previous_usage = usage_windows["previous"]
-        else:
-            usage = collect_usage(
-                since,
-                until,
-                agent=agent,
-                active_agents={session.agent for session in sessions},
-            )
+        usage = snapshot.usage_by_window["current"]
+        if "previous" in snapshot.sessions_by_window:
+            previous_sessions = snapshot.sessions_by_window["previous"]
+            previous_usage = snapshot.usage_by_window["previous"]
 
     console.print(
         f"[green]✓[/green] {len(sessions)} sessions · "
