@@ -1175,7 +1175,10 @@ def run_claude_p(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise subprocess.TimeoutExpired(str(CLAUDE_BIN), timeout)
-        return remaining
+        # Absolute-deadline subtraction can round fractionally above the
+        # caller's reservation.  The per-call budget remains a hard ceiling
+        # for both the flagged attempt and its compatibility retry.
+        return min(float(timeout), remaining)
 
     if not _flag_confirmed_broken:
         r = subprocess.run(
@@ -1237,7 +1240,13 @@ def _run_antigravity_p(
     for attempt in range(3):
         attempt_timeout = max(timeout, 180)
         if deadline is not None:
-            attempt_timeout = min(attempt_timeout, deadline - time.monotonic())
+            # The absolute-deadline subtraction may round fractionally above
+            # the caller's reservation on platforms with a large monotonic
+            # clock value.  Keep both bounds: the shared budget is hard, even
+            # when floating-point cancellation adds a few femtoseconds.
+            attempt_timeout = min(
+                attempt_timeout, float(timeout), deadline - time.monotonic(),
+            )
             if attempt_timeout <= 0:
                 raise subprocess.TimeoutExpired(str(ANTIGRAVITY_BIN), timeout)
         result = subprocess.run(

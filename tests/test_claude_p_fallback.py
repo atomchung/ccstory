@@ -95,6 +95,27 @@ class TestRunClaudeP:
         assert len(flaky.calls) == 1
         assert "--no-session-persistence" in flaky.calls[0]
 
+    def test_deadline_rounding_cannot_exceed_reservation_on_either_attempt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        timeouts = []
+        responses = iter([(0, ""), (0, "a real answer")])
+
+        def fake_run(argv, **kwargs):
+            timeouts.append(kwargs["timeout"])
+            returncode, stdout = next(responses)
+            return subprocess.CompletedProcess(argv, returncode, stdout, "")
+
+        monkeypatch.setattr(ss.time, "monotonic", lambda: 100.0)
+        monkeypatch.setattr(ss.subprocess, "run", fake_run)
+
+        result = run_claude_p(
+            "prompt", timeout=45, deadline=145.00000000000006,
+        )
+
+        assert result.stdout == "a real answer"
+        assert timeouts == [45.0, 45.0]
+
     def test_does_not_retry_on_real_failure(self, monkeypatch: pytest.MonkeyPatch):
         fail = _FakeRun(stdout="", returncode=1)
         monkeypatch.setattr(ss.subprocess, "run", fail)
