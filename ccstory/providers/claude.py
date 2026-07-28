@@ -20,6 +20,10 @@ from ..time_tracking import (
     _extract_first_user_text,
     _is_subagent_path,
     _parse_ts,
+    WindowEvidence,
+    active_intervals_for_timestamps,
+    clip_active_intervals,
+    make_window_evidence,
 )
 from ..token_usage import ModelUsage
 from .base import (
@@ -28,7 +32,12 @@ from .base import (
     SnapshotMetrics,
     _usage_windows_utc,
 )
-from .excerpts import build_excerpt, include_message
+from .excerpts import (
+    ASSISTANT_EVIDENCE_CHARS,
+    build_excerpt,
+    compact_evidence_text,
+    include_message,
+)
 
 
 def _conversation_text(content) -> str:
@@ -277,6 +286,128 @@ class ClaudeCodeProvider(BaseAgentProvider):
             return project, ""
 
         return project, build_excerpt(user_msgs, assistant_msgs)
+
+    def extract_window_evidence(
+        self,
+        session: SessionStat,
+        since: datetime,
+        until: datetime,
+    ) -> WindowEvidence | None:
+        """Return Claude transcript facts authored inside ``[since, until)``.
+
+        This deliberately reuses the parser's top-level ``user``/``assistant``
+        activity filter and its real-user predicate.  A missing or unreadable
+        transcript has no safe bounded substitute, so callers receive ``None``
+        rather than this provider's full-session excerpt.
+
+        ``session`` must be the **physical** ``SessionStat``: the clipped
+        active intervals are derived from its complete timestamp list, which a
+        window slice no longer carries.  Passing a slice would silently
+        under-report activity, so ``session_slice_for_window`` re-validates the
+        returned intervals against the physical session it was given.
+
+        A record whose timestamp does not parse is skipped rather than counted.
+        The physical parser still counts it (and marks its record inventory
+        incomplete), but an event that cannot be placed in time cannot be
+        proven to belong to this window.
+        """
+
+        path = self.transcript_path(session)
+        if path is None:
+            return None
+
+        window_since, window_until = _usage_windows_utc(
+            {"window": (since, until)}
+        )["window"]
+        timestamps: list[float] = []
+        user_msgs: list[str] = []
+        assistant_msgs: list[str] = []
+        msg_count = 0
+        user_msg_count = 0
+        first_user_text = ""
+        latest_user_text = ""
+
+        try:
+            with path.open("r", encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+
+                    role = record.get("type")
+                    if role not in ("user", "assistant"):
+                        continue
+                    raw_timestamp = record.get("timestamp")
+                    timestamp = _parse_ts(
+                        raw_timestamp if isinstance(raw_timestamp, str) else None
+                    )
+                    if timestamp is None:
+                        continue
+                    if timestamp.tzinfo is None:
+                        timestamp = timestamp.replace(tzinfo=timezone.utc)
+                    else:
+                        timestamp = timestamp.astimezone(timezone.utc)
+                    if not window_since <= timestamp < window_until:
+                        continue
+
+                    # `_SessionAccumulator.add` counts every top-level
+                    # user/assistant record, even if its message is malformed.
+                    timestamps.append(timestamp.timestamp())
+                    msg_count += 1
+                    message = record.get("message")
+                    content = (
+                        message.get("content", "")
+                        if isinstance(message, dict)
+                        else ""
+                    )
+                    excerpt_text = _conversation_text(content).strip()
+
+                    if role == "user":
+                        first_text = _extract_first_user_text(content).strip()
+                        is_real_user = (
+                            first_text
+                            and not first_text.startswith("<")
+                            and "tool_use_id" not in first_text
+                        )
+                        if is_real_user:
+                            user_msg_count += 1
+                            if not first_user_text:
+                                first_user_text = first_text[:200]
+                            latest_user_text = first_text[:200]
+                        if include_message(excerpt_text):
+                            # build_excerpt owns bounded head+tail compaction.
+                            # Pre-truncating here can discard a late request.
+                            user_msgs.append(excerpt_text)
+                    elif include_message(excerpt_text):
+                        # Keep the full final turn until build_excerpt retains
+                        # its bounded head and tail outcome evidence.
+                        assistant_msgs.append(excerpt_text)
+        except (OSError, UnicodeError):
+            return None
+
+        intervals = clip_active_intervals(
+            active_intervals_for_timestamps(session.timestamps),
+            window_since,
+            window_until,
+        )
+        final_assistant_text = (
+            compact_evidence_text(assistant_msgs[-1], ASSISTANT_EVIDENCE_CHARS)
+            if assistant_msgs
+            else ""
+        )
+        return make_window_evidence(
+            timestamps=timestamps,
+            active_intervals=intervals,
+            msg_count=msg_count,
+            user_msg_count=user_msg_count,
+            first_user_text=first_user_text,
+            latest_user_text=latest_user_text,
+            final_assistant_text=final_assistant_text,
+            excerpt=build_excerpt(user_msgs, assistant_msgs),
+        )
 
     def parse_session(self, jsonl_path: Path) -> SessionStat | None:
         """Compute active time + metadata for one session file."""

@@ -18,7 +18,7 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 
-from ..time_tracking import SessionSlice, SessionStat
+from ..time_tracking import SessionSlice, SessionStat, WindowEvidence
 from ..token_usage import ModelUsage
 
 
@@ -112,6 +112,21 @@ class BaseAgentProvider(ABC):
     @abstractmethod
     def parse_session(self, path: Path) -> SessionStat | None:
         """Parse a single session transcript file into a SessionStat."""
+
+    def extract_window_evidence(
+        self,
+        session: SessionStat,
+        since: datetime,
+        until: datetime,
+    ) -> WindowEvidence | None:
+        """Return authoritative transcript evidence bounded to ``[since, until)``.
+
+        The compatibility default fails closed.  An adapter which has not
+        implemented role/timestamp extraction must not supply its full-session
+        excerpt for a clipped slice.
+        """
+
+        return None
 
     @abstractmethod
     def collect_usage(
