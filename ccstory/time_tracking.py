@@ -11,6 +11,8 @@ buckets + config.toml override) instead of hardcoded personal rules.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from collections import defaultdict
 from collections.abc import Mapping
@@ -29,6 +31,92 @@ LOG = logging.getLogger("ccstory.time_tracking")
 
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 GAP_CAP_SEC = 5 * 60  # gap longer than this → treat as idle
+
+# This version names the facts that participate in a window slice.  It is
+# deliberately separate from narrator prompt/cache policy versions: a moving
+# ``until=now`` must not invalidate a slice whose bounded facts did not change.
+WINDOW_EVIDENCE_POLICY_VERSION = 1
+SESSION_SLICE_ID_VERSION = 1
+
+
+@dataclass(frozen=True)
+class ActiveInterval:
+    """One inferred, half-open interval of activity in epoch seconds."""
+
+    start: float
+    end: float
+
+    def __post_init__(self) -> None:
+        if self.end <= self.start:
+            raise ValueError("active interval end must be after start")
+
+
+@dataclass(frozen=True)
+class WindowEvidence:
+    """Authoritative evidence and active-time facts bounded to one window.
+
+    Providers populate the text/message fields in 0.8-D.  The generic builder
+    below is intentionally useful before then: it records only the bounded
+    timestamp/interval facts already available from ``SessionStat`` and never
+    substitutes an unbounded transcript excerpt.
+    """
+
+    timestamps: tuple[float, ...]
+    active_intervals: tuple[ActiveInterval, ...]
+    msg_count: int
+    user_msg_count: int
+    first_user_text: str
+    latest_user_text: str
+    final_assistant_text: str
+    excerpt: str
+    evidence_fingerprint: str
+
+
+@dataclass
+class SessionSlice:
+    """A window-pure view of one physical provider session.
+
+    ``physical_session_id`` remains the public/correction identity.  The
+    internal ``session_id`` differs only for a boundary-clipped slice, so an
+    auto summary cannot be reused across different bounded evidence.
+    """
+
+    physical_session_id: str
+    session_id: str
+    agent: str
+    project: str
+    category: str
+    start: datetime
+    end: datetime
+    active_sec: int
+    msg_count: int
+    user_msg_count: int
+    timestamps: list[float]
+    active_intervals: tuple[ActiveInterval, ...]
+    window_since: datetime
+    window_until: datetime
+    boundary_clipped: bool
+    evidence_excerpt: str
+    evidence_fingerprint: str
+    evidence: WindowEvidence
+    # Keep SessionStat provenance available for the later recap integration
+    # without making callers recover provider-specific paths from an id.
+    is_scheduled: bool = False
+    cwd: str = ""
+    path: Path | None = None
+    native_title: str = ""
+    category_source: str = ""
+    physical_engaged: bool = False
+
+    @property
+    def active_min(self) -> float:
+        return round(self.active_sec / 60, 1)
+
+    @property
+    def engaged(self) -> bool:
+        """Preserve the collection-time engagement decision for this slice."""
+
+        return self.physical_engaged
 
 
 @dataclass
@@ -87,6 +175,263 @@ def _parse_ts(raw: str | None) -> datetime | None:
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
     return ts
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Normalize a public window bound without using the host timezone."""
+
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _validate_window(since: datetime, until: datetime) -> tuple[datetime, datetime]:
+    since_utc = _as_utc(since)
+    until_utc = _as_utc(until)
+    if until_utc <= since_utc:
+        raise ValueError("window until must be after since")
+    return since_utc, until_utc
+
+
+def active_intervals_for_timestamps(
+    timestamps: list[float] | tuple[float, ...],
+) -> tuple[ActiveInterval, ...]:
+    """Infer normal activity intervals from one physical session's events."""
+
+    ordered = sorted(set(timestamps))
+    intervals: list[ActiveInterval] = []
+    for previous, current in zip(ordered, ordered[1:]):
+        if current <= previous:
+            continue
+        intervals.append(ActiveInterval(previous, min(current, previous + GAP_CAP_SEC)))
+    return tuple(intervals)
+
+
+def clip_active_intervals(
+    intervals: tuple[ActiveInterval, ...],
+    since: datetime,
+    until: datetime,
+) -> tuple[ActiveInterval, ...]:
+    """Intersect inferred intervals with the half-open ``[since, until)`` window."""
+
+    since_utc, until_utc = _validate_window(since, until)
+    window_start = since_utc.timestamp()
+    window_end = until_utc.timestamp()
+    clipped: list[ActiveInterval] = []
+    for interval in intervals:
+        start = max(interval.start, window_start)
+        end = min(interval.end, window_end)
+        if end > start:
+            clipped.append(ActiveInterval(start, end))
+    return tuple(clipped)
+
+
+def _window_evidence_fingerprint(
+    *,
+    timestamps: tuple[float, ...],
+    active_intervals: tuple[ActiveInterval, ...],
+    msg_count: int,
+    user_msg_count: int,
+    first_user_text: str,
+    latest_user_text: str,
+    final_assistant_text: str,
+    excerpt: str,
+) -> str:
+    """Hash exactly the bounded facts, never a moving window endpoint."""
+
+    payload = {
+        "policy_version": WINDOW_EVIDENCE_POLICY_VERSION,
+        "timestamps": timestamps,
+        "active_intervals": [(item.start, item.end) for item in active_intervals],
+        "msg_count": msg_count,
+        "user_msg_count": user_msg_count,
+        "first_user_text": first_user_text,
+        "latest_user_text": latest_user_text,
+        "final_assistant_text": final_assistant_text,
+        "excerpt": excerpt,
+    }
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def make_window_evidence(
+    *,
+    timestamps: list[float] | tuple[float, ...],
+    active_intervals: tuple[ActiveInterval, ...],
+    msg_count: int,
+    user_msg_count: int,
+    first_user_text: str = "",
+    latest_user_text: str = "",
+    final_assistant_text: str = "",
+    excerpt: str = "",
+) -> WindowEvidence:
+    """Create a self-identifying bounded evidence value.
+
+    This helper is the provider-neutral cache boundary: it does not inspect a
+    transcript, and callers in 0.8-D must pass only authoritative events from
+    the requested half-open window.
+    """
+
+    normalized_timestamps = tuple(sorted(float(item) for item in timestamps))
+    if msg_count < 0 or user_msg_count < 0 or user_msg_count > msg_count:
+        raise ValueError("invalid bounded message counts")
+    return WindowEvidence(
+        timestamps=normalized_timestamps,
+        active_intervals=active_intervals,
+        msg_count=msg_count,
+        user_msg_count=user_msg_count,
+        first_user_text=first_user_text,
+        latest_user_text=latest_user_text,
+        final_assistant_text=final_assistant_text,
+        excerpt=excerpt,
+        evidence_fingerprint=_window_evidence_fingerprint(
+            timestamps=normalized_timestamps,
+            active_intervals=active_intervals,
+            msg_count=msg_count,
+            user_msg_count=user_msg_count,
+            first_user_text=first_user_text,
+            latest_user_text=latest_user_text,
+            final_assistant_text=final_assistant_text,
+            excerpt=excerpt,
+        ),
+    )
+
+
+def _validate_bounded_evidence(
+    evidence: WindowEvidence,
+    since: datetime,
+    until: datetime,
+    expected_intervals: tuple[ActiveInterval, ...],
+) -> None:
+    """Reject an adapter evidence object that would leak a window boundary."""
+
+    since_utc, until_utc = _validate_window(since, until)
+    lower = since_utc.timestamp()
+    upper = until_utc.timestamp()
+    if any(
+        timestamp < lower or timestamp >= upper for timestamp in evidence.timestamps
+    ):
+        raise ValueError("window evidence contains an out-of-window timestamp")
+    if any(
+        interval.start < lower or interval.end > upper
+        for interval in evidence.active_intervals
+    ):
+        raise ValueError("window evidence contains an out-of-window interval")
+    if evidence.active_intervals != expected_intervals:
+        raise ValueError(
+            "window evidence intervals do not match clipped physical intervals"
+        )
+    expected_fingerprint = _window_evidence_fingerprint(
+        timestamps=evidence.timestamps,
+        active_intervals=evidence.active_intervals,
+        msg_count=evidence.msg_count,
+        user_msg_count=evidence.user_msg_count,
+        first_user_text=evidence.first_user_text,
+        latest_user_text=evidence.latest_user_text,
+        final_assistant_text=evidence.final_assistant_text,
+        excerpt=evidence.excerpt,
+    )
+    if evidence.evidence_fingerprint != expected_fingerprint:
+        raise ValueError("window evidence fingerprint does not match its facts")
+
+
+def session_slice_for_window(
+    session: SessionStat,
+    since: datetime,
+    until: datetime,
+    *,
+    evidence: WindowEvidence | None = None,
+) -> SessionSlice | None:
+    """Build one window-pure slice without reopening a provider transcript.
+
+    The optional ``evidence`` parameter is the explicit hand-off for 0.8-D.
+    Before provider-specific bounded extraction lands, the default contains
+    only clipped timestamp and active-interval facts; notably, it never copies
+    full-session user or assistant prose into a clipped slice.
+    """
+
+    since_utc, until_utc = _validate_window(since, until)
+    physical_timestamps = tuple(float(item) for item in session.timestamps)
+    bounded_timestamps = tuple(
+        item
+        for item in physical_timestamps
+        if since_utc.timestamp() <= item < until_utc.timestamp()
+    )
+    intervals = clip_active_intervals(
+        active_intervals_for_timestamps(physical_timestamps), since_utc, until_utc
+    )
+    if evidence is None:
+        evidence = make_window_evidence(
+            timestamps=bounded_timestamps,
+            active_intervals=intervals,
+            # Timestamp activity is not a provider-neutral message inventory.
+            # 0.8-D supplies authoritative role/message counts; zero here is
+            # explicitly unknown rather than a fabricated count.
+            msg_count=0,
+            user_msg_count=0,
+        )
+    _validate_bounded_evidence(evidence, since_utc, until_utc, intervals)
+
+    # A physical gap may cross the whole window without a direct event inside
+    # it.  Its clipped interval is still real window activity and must survive.
+    if not evidence.timestamps and not evidence.active_intervals:
+        return None
+
+    physical_start = _as_utc(session.start)
+    physical_end = _as_utc(session.end)
+    boundary_clipped = physical_start < since_utc or physical_end >= until_utc
+    if boundary_clipped:
+        identity_material = "\x00".join(
+            (
+                str(SESSION_SLICE_ID_VERSION),
+                session.agent,
+                session.session_id,
+                evidence.evidence_fingerprint,
+            )
+        ).encode("utf-8")
+        internal_id = "slice-" + hashlib.sha256(identity_material).hexdigest()[:24]
+    else:
+        internal_id = session.session_id
+
+    fact_times = list(evidence.timestamps)
+    time_bounds = fact_times + [
+        value
+        for interval in evidence.active_intervals
+        for value in (interval.start, interval.end)
+    ]
+    start = datetime.fromtimestamp(min(time_bounds), tz=timezone.utc)
+    end = datetime.fromtimestamp(max(time_bounds), tz=timezone.utc)
+
+    return SessionSlice(
+        physical_session_id=session.session_id,
+        session_id=internal_id,
+        agent=session.agent,
+        project=session.project,
+        category=session.category,
+        start=start,
+        end=end,
+        active_sec=int(
+            sum(item.end - item.start for item in evidence.active_intervals)
+        ),
+        msg_count=evidence.msg_count,
+        user_msg_count=evidence.user_msg_count,
+        timestamps=fact_times,
+        active_intervals=evidence.active_intervals,
+        window_since=since_utc,
+        window_until=until_utc,
+        boundary_clipped=boundary_clipped,
+        evidence_excerpt=evidence.excerpt,
+        evidence_fingerprint=evidence.evidence_fingerprint,
+        evidence=evidence,
+        is_scheduled=session.is_scheduled,
+        cwd=session.cwd,
+        path=session.path,
+        native_title=session.native_title,
+        category_source=session.category_source,
+        physical_engaged=session.engaged,
+    )
 
 
 def _extract_first_user_text(content) -> str:
@@ -181,7 +526,7 @@ def _is_subagent_path(path: PurePath) -> bool:
     return "subagents" in path.parts
 
 
-def wall_clock_active_sec(stats: list[SessionStat]) -> int:
+def wall_clock_active_sec(stats: list[SessionStat | SessionSlice]) -> int:
     """Return the union of every session's inferred active intervals.
 
     Each adjacent timestamp pair contributes at most ``GAP_CAP_SEC`` starting
@@ -192,11 +537,19 @@ def wall_clock_active_sec(stats: list[SessionStat]) -> int:
     """
     intervals: list[tuple[float, float]] = []
     for session in stats:
-        timestamps = sorted(set(session.timestamps))
-        for prev, curr in zip(timestamps, timestamps[1:]):
-            if curr <= prev:
-                continue
-            intervals.append((prev, min(curr, prev + GAP_CAP_SEC)))
+        # A SessionSlice has already intersected its physical intervals with a
+        # report window.  Re-deriving them from timestamps would reintroduce
+        # out-of-window time at either boundary.  Legacy SessionStat objects
+        # deliberately retain their historical timestamp-derived semantics.
+        if isinstance(session, SessionSlice):
+            intervals.extend(
+                (item.start, item.end) for item in session.active_intervals
+            )
+            continue
+        intervals.extend(
+            (item.start, item.end)
+            for item in active_intervals_for_timestamps(session.timestamps)
+        )
 
     if not intervals:
         return 0
