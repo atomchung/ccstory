@@ -3,8 +3,8 @@
 Focuses on what can be tested without invoking `claude -p`:
   - sqlite roundtrip (upsert/get/get_many/missing_ids)
   - first-user-message excerpt extraction + filtering
-  - fallback narrative path (use_llm=False)
-  - recap-DB import idempotency
+  - extractive narrative path (use_llm=False)
+  - cache schema migrations, including the #206 source-vocabulary rewrite
 """
 
 from __future__ import annotations
@@ -25,7 +25,6 @@ from ccstory.session_summarizer import (
     get,
     get_many,
     get_overall_narrative,
-    import_from_claude_recap,
     language_directive,
     missing_ids,
     summarize_session,
@@ -39,34 +38,34 @@ from tests.conftest import _ts, make_assistant_msg, make_user_msg, write_jsonl
 
 class TestSqliteRoundtrip:
     def test_upsert_then_get(self, tmp_home: Path):
-        upsert("sess1", "did a thing", "auto", project="myproj")
+        upsert("sess1", "did a thing", "generated", project="myproj")
         s = get("sess1")
         assert s is not None
         assert s.session_id == "sess1"
         assert s.summary == "did a thing"
-        assert s.source == "auto"
+        assert s.source == "generated"
         assert s.project == "myproj"
 
     def test_upsert_replaces_existing(self, tmp_home: Path):
-        upsert("sess1", "first", "fallback")
-        upsert("sess1", "second", "auto")
+        upsert("sess1", "first", "extracted")
+        upsert("sess1", "second", "generated")
         s = get("sess1")
         assert s.summary == "second"
-        assert s.source == "auto"
+        assert s.source == "generated"
 
     def test_upsert_empty_summary_is_noop(self, tmp_home: Path):
-        upsert("sess1", "", "auto")
+        upsert("sess1", "", "generated")
         assert get("sess1") is None
 
     def test_upsert_empty_id_is_noop(self, tmp_home: Path):
-        upsert("", "x", "auto")
+        upsert("", "x", "generated")
 
     def test_get_missing_returns_none(self, tmp_home: Path):
         assert get("nonexistent") is None
 
     def test_get_many(self, tmp_home: Path):
-        upsert("a", "a-summary", "auto")
-        upsert("b", "b-summary", "fallback")
+        upsert("a", "a-summary", "generated")
+        upsert("b", "b-summary", "extracted")
         result = get_many(["a", "b", "missing"])
         assert set(result.keys()) == {"a", "b"}
         assert result["a"].summary == "a-summary"
@@ -75,7 +74,7 @@ class TestSqliteRoundtrip:
         assert get_many([]) == {}
 
     def test_missing_ids(self, tmp_home: Path):
-        upsert("present", "x", "auto")
+        upsert("present", "x", "generated")
         miss = missing_ids(["present", "absent1", "absent2"])
         assert set(miss) == {"absent1", "absent2"}
 
@@ -185,7 +184,7 @@ class TestSummarizeSession:
         path = jsonl_factory("-Users-alice-code-myapp", "sess-fallback", records)
         result = summarize_session("sess-fallback", path, use_llm=False)
         assert result is not None
-        assert result.source == "fallback"
+        assert result.source == "extracted"
         assert "Build a CLI subcommand" in result.summary
 
     def test_cached_result_returned_immediately(self, tmp_home: Path, jsonl_factory):
@@ -194,11 +193,11 @@ class TestSummarizeSession:
             "sess-cached",
             [make_user_msg("X", _ts(2026, 5, 10, 10, 0, 0))],
         )
-        upsert("sess-cached", "pre-existing summary", "auto", project="myproj")
+        upsert("sess-cached", "pre-existing summary", "generated", project="myproj")
         result = summarize_session("sess-cached", path, use_llm=False)
         assert result is not None
         assert result.summary == "pre-existing summary"
-        assert result.source == "auto"  # cached entry untouched
+        assert result.source == "generated"  # cached entry untouched
 
     def test_empty_session_marks_skipped(self, tmp_home: Path, jsonl_factory):
         # File with no meaningful user content
@@ -206,15 +205,16 @@ class TestSummarizeSession:
         path.write_text("", encoding="utf-8")
         result = summarize_session("sess-empty", path, use_llm=False)
         assert result is not None
-        assert result.source == "skipped"
+        assert result.source == "no_evidence"
 
 
 class TestRetroactiveRefresh:
     """Retroactive upgrade/refresh of cached narratives (the freeze fix).
 
-    `--llm-narrative` must be able to upgrade a cached `fallback` to `auto`
-    and refresh a stale `auto`, while never re-burning an up-to-date one and
-    never downgrading a good summary on a transient `claude -p` failure.
+    `--llm-narrative` must be able to upgrade a cached `extracted` row to
+    `generated` and refresh a stale `generated` row, while never re-burning
+    an up-to-date one and never downgrading a good summary on a transient
+    `claude -p` failure.
     """
 
     def _jsonl(self, jsonl_factory):
@@ -227,11 +227,11 @@ class TestRetroactiveRefresh:
         self, tmp_home: Path, jsonl_factory, monkeypatch
     ):
         path = self._jsonl(jsonl_factory)
-        upsert("sess-r", "stale fallback line", "fallback", project="myapp")
+        upsert("sess-r", "stale fallback line", "extracted", project="myapp")
         monkeypatch.setattr(ss, "summarize_via_claude_p",
                             lambda *a, **k: "polished outcome")
         result = summarize_session("sess-r", path, use_llm=True)
-        assert result.source == "auto"
+        assert result.source == "generated"
         assert result.summary == "polished outcome"
         assert result.prompt_version == ss.PROMPT_VERSION
 
@@ -243,7 +243,7 @@ class TestRetroactiveRefresh:
         evidence = ss._prepare_summary_evidence(
             "sess-r", project, excerpt, lane=ss._SUMMARY_EVIDENCE_SINGLE_LANE,
         )
-        upsert("sess-r", "good summary", "auto", project="myapp",
+        upsert("sess-r", "good summary", "generated", project="myapp",
                prompt_version=ss.PROMPT_VERSION,
                narrator_provider="claude", narrator_model="sonnet",
                narrator_fingerprint=ss.narrative_config_fingerprint(),
@@ -251,18 +251,18 @@ class TestRetroactiveRefresh:
                observed_evidence_fingerprint=evidence.evidence_fingerprint)
 
         def _boom(*a, **k):
-            raise AssertionError("claude -p must not run for an up-to-date auto row")
+            raise AssertionError("claude -p must not run for an up-to-date generated row")
 
         monkeypatch.setattr(ss, "summarize_via_claude_p", _boom)
         result = summarize_session("sess-r", path, use_llm=True)
-        assert result.source == "auto"
+        assert result.source == "generated"
         assert result.summary == "good summary"
 
     def test_stale_auto_refreshed(
         self, tmp_home: Path, jsonl_factory, monkeypatch
     ):
         path = self._jsonl(jsonl_factory)
-        upsert("sess-r", "old-model summary", "auto", project="myapp",
+        upsert("sess-r", "old-model summary", "generated", project="myapp",
                prompt_version=ss.PROMPT_VERSION - 1)
         monkeypatch.setattr(ss, "summarize_via_claude_p",
                             lambda *a, **k: "new-model summary")
@@ -274,7 +274,7 @@ class TestRetroactiveRefresh:
         self, tmp_home: Path, jsonl_factory, monkeypatch
     ):
         path = self._jsonl(jsonl_factory)
-        upsert("sess-r", "good summary", "auto", project="myapp",
+        upsert("sess-r", "good summary", "generated", project="myapp",
                prompt_version=ss.PROMPT_VERSION)
         monkeypatch.setattr(ss, "summarize_via_claude_p",
                             lambda *a, **k: "forced refresh")
@@ -285,26 +285,26 @@ class TestRetroactiveRefresh:
         self, tmp_home: Path, jsonl_factory, monkeypatch
     ):
         # Non-destructive: a claude -p failure must not downgrade a good
-        # auto summary to a fallback.
+        # generated summary to an extraction.
         path = self._jsonl(jsonl_factory)
-        upsert("sess-r", "good summary", "auto", project="myapp",
+        upsert("sess-r", "good summary", "generated", project="myapp",
                prompt_version=ss.PROMPT_VERSION - 1)
         monkeypatch.setattr(ss, "summarize_via_claude_p", lambda *a, **k: None)
         result = summarize_session("sess-r", path, use_llm=True)
-        assert result.source == "auto"
+        assert result.source == "generated"
         assert result.summary == "good summary"
 
     def test_skipped_is_retried_when_evidence_later_becomes_valid(
         self, tmp_home: Path, jsonl_factory, monkeypatch
     ):
         path = self._jsonl(jsonl_factory)
-        upsert("sess-r", "(no meaningful conversation)", "skipped", project="myapp")
+        upsert("sess-r", "(no meaningful conversation)", "no_evidence", project="myapp")
         monkeypatch.setattr(
             ss, "summarize_via_claude_p",
             lambda *_a, **_k: "Recovered a now-valid session",
         )
         result = summarize_session("sess-r", path, use_llm=True)
-        assert result.source == "auto"
+        assert result.source == "generated"
         assert result.summary == "Recovered a now-valid session"
         assert ss.summary_evidence_status(result) == "current"
 
@@ -312,14 +312,14 @@ class TestRetroactiveRefresh:
         self, tmp_home: Path, jsonl_factory, monkeypatch
     ):
         path = self._jsonl(jsonl_factory)
-        upsert("sess-r", "fallback line", "fallback", project="myapp")
+        upsert("sess-r", "fallback line", "extracted", project="myapp")
 
         def _boom(*a, **k):
             raise AssertionError("claude -p must not run without use_llm")
 
         monkeypatch.setattr(ss, "summarize_via_claude_p", _boom)
         result = summarize_session("sess-r", path, use_llm=False)
-        assert result.source == "fallback"
+        assert result.source == "extracted"
 
 
 class TestBatchedNarrativeBackfill:
@@ -444,7 +444,7 @@ class TestBatchedNarrativeBackfill:
         for session in sessions:
             stored = get(session.session_id)
             assert stored is not None
-            assert stored.source == "auto"
+            assert stored.source == "generated"
             assert stored.narrator_provider == "antigravity"
             assert stored.narrator_model == "gemini-3.6-flash-low"
 
@@ -496,7 +496,7 @@ class TestBatchedNarrativeBackfill:
         sessions = self._sessions(jsonl_factory, 3)
         kept = sessions[1]
         upsert(
-            kept.session_id, "keep this proven summary", "auto",
+            kept.session_id, "keep this proven summary", "generated",
             project=kept.project, prompt_version=ss.PROMPT_VERSION - 1,
         )
 
@@ -521,8 +521,8 @@ class TestBatchedNarrativeBackfill:
 
         assert result["summarized"] == 1
         assert get(kept.session_id).summary == "keep this proven summary"
-        assert get(kept.session_id).source == "auto"
-        assert get(sessions[2].session_id).source == "fallback"
+        assert get(kept.session_id).source == "generated"
+        assert get(sessions[2].session_id).source == "extracted"
         assert get("invented-id") is None
 
     def test_batch_omission_retry_fully_recovers_and_parses_once(
@@ -562,7 +562,7 @@ class TestBatchedNarrativeBackfill:
         assert calls == 2
         assert parse_calls == 2  # primary once, retry once
         assert result["summarized"] == 3
-        assert all(get(session.session_id).source == "auto" for session in sessions)
+        assert all(get(session.session_id).source == "generated" for session in sessions)
         retry = next(
             event for event in budget.trace
             if event.get("lane") == "session_summaries_retry"
@@ -895,19 +895,19 @@ class TestNeedsLlm:
     def test_matrix(self):
         SS = ss.SessionSummary
         assert ss._needs_llm(None) is True
-        assert ss._needs_llm(SS("i", "s", "skipped")) is False
-        assert ss._needs_llm(SS("i", "s", "fallback")) is True
+        assert ss._needs_llm(SS("i", "s", "no_evidence")) is False
+        assert ss._needs_llm(SS("i", "s", "extracted")) is True
         cur = SS(
-            "i", "s", "auto", prompt_version=ss.PROMPT_VERSION,
+            "i", "s", "generated", prompt_version=ss.PROMPT_VERSION,
             narrator_provider="claude", narrator_model="sonnet",
             narrator_fingerprint=ss.narrative_config_fingerprint(),
         )
         assert ss._needs_llm(cur) is False
         assert ss._needs_llm(cur, force=True) is True
-        stale = SS("i", "s", "auto", prompt_version=ss.PROMPT_VERSION - 1)
+        stale = SS("i", "s", "generated", prompt_version=ss.PROMPT_VERSION - 1)
         assert ss._needs_llm(stale) is True
         # legacy NULL prompt_version coerces to 0 → stale
-        assert ss._needs_llm(SS("i", "s", "auto", prompt_version=None)) is True
+        assert ss._needs_llm(SS("i", "s", "generated", prompt_version=None)) is True
 
 
 class TestCacheSchemaMigrations:
@@ -940,6 +940,9 @@ class TestCacheSchemaMigrations:
         )
         raw.execute(
             "INSERT INTO session_summaries VALUES (?, ?, ?, ?, ?)",
+            # 'auto' is a fixed historical literal here, not SOURCE_GENERATED:
+            # this row simulates a pre-migration-5 database, and migration 5's
+            # evidence-identity backfill matches on the literal pre-#206 value.
             ("legacy", "old summary", "auto", "proj", 1.0),
         )
         raw.commit()
@@ -1092,7 +1095,7 @@ class TestCacheSchemaMigrations:
     def test_already_current_db_skips_migrations(
         self, tmp_home: Path, monkeypatch: pytest.MonkeyPatch,
     ):
-        upsert("kept", "preserved summary", "auto")
+        upsert("kept", "preserved summary", "generated")
 
         def _boom(_conn):
             raise AssertionError("current schema must not rerun migrations")
@@ -1172,6 +1175,52 @@ class TestCacheSchemaMigrations:
             )
         finally:
             check.close()
+
+    def test_v6_migration_rewrites_known_source_values_and_preserves_caller_defined(
+        self, tmp_home: Path,
+    ):
+        """#206: record/auto/fallback/skipped rename; other values survive."""
+        raw = sqlite3.connect(str(ss.DB_PATH))
+        raw.execute("BEGIN")
+        ss._migration_5_summary_evidence_identity(raw)
+        raw.execute("PRAGMA user_version = 5")
+        raw.executemany(
+            "INSERT INTO session_summaries "
+            "(session_id, summary, source, project, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [
+                ("r1", "human text", "record", "proj", 1.0),
+                ("a1", "auto text", "auto", "proj", 2.0),
+                ("f1", "fallback text", "fallback", "proj", 3.0),
+                ("s1", "skipped text", "skipped", "proj", 4.0),
+                ("c1", "cloud text", "cloud:mybranch", "proj", 5.0),
+            ],
+        )
+        raw.commit()
+        raw.close()
+
+        migrated = ss._connect()
+        try:
+            assert migrated.execute("PRAGMA user_version").fetchone()[0] == (
+                ss.CACHE_SCHEMA_VERSION
+            )
+            rows = dict(
+                migrated.execute(
+                    "SELECT session_id, source FROM session_summaries"
+                ).fetchall()
+            )
+        finally:
+            migrated.close()
+
+        assert rows == {
+            "r1": "provided",
+            "a1": "generated",
+            "f1": "extracted",
+            "s1": "no_evidence",
+            # Caller-defined values never matched the legacy vocabulary and
+            # must survive byte-for-byte.
+            "c1": "cloud:mybranch",
+        }
 
 
 class TestLanguageDirective:
@@ -1592,138 +1641,3 @@ class TestSynthesizeOverallForPeriod:
         finally:
             conn.close()
         assert get_overall_narrative("2026-05") == "overall text"
-
-
-class TestImportFromClaudeRecap:
-    def test_missing_recap_db_returns_zero(self, tmp_home: Path):
-        # RECAP_DB_PATH points to a non-existent file under tmp_home
-        assert import_from_claude_recap() == 0
-
-    def test_imports_rows_idempotently(self, tmp_home: Path):
-        # Build a minimal recap DB at the expected path
-        recap_path = tmp_home / ".claude" / "session_summaries.db"
-        recap_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(recap_path))
-        try:
-            conn.execute(
-                """CREATE TABLE session_summaries (
-                    session_id TEXT PRIMARY KEY,
-                    summary TEXT NOT NULL,
-                    source TEXT NOT NULL,
-                    project TEXT,
-                    created_at REAL NOT NULL,
-                    task_slug TEXT
-                )"""
-            )
-            conn.execute(
-                "INSERT INTO session_summaries VALUES (?, ?, ?, ?, ?, ?)",
-                ("imported-1", "hello world", "auto", "proj", 1.0, "slug"),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-        first = import_from_claude_recap()
-        assert first == 1
-        assert get("imported-1").summary == "hello world"
-
-        # Idempotent: a second run inserts nothing new
-        second = import_from_claude_recap()
-        assert second == 0
-
-    def test_record_import_precedence_and_accurate_rowcount(
-        self, tmp_home: Path,
-    ):
-        for source in ("auto", "fallback", "skipped"):
-            upsert(
-                f"replace-{source}",
-                f"local {source}",
-                source,
-                project="local",
-                prompt_version=ss.PROMPT_VERSION,
-                narrator_provider="claude",
-                narrator_model="sonnet",
-                narrator_fingerprint="local-narrator",
-                evidence_fingerprint=(
-                    "local-basis" if source == "auto" else ""
-                ),
-                observed_evidence_fingerprint=(
-                    "local-observed" if source == "auto" else ""
-                ),
-            )
-        upsert("keep-record-from-record", "local human", "record")
-        upsert("keep-record-from-auto", "local human", "record")
-        upsert(
-            "keep-auto-from-auto", "local generated", "auto",
-            evidence_fingerprint="local-basis",
-            observed_evidence_fingerprint="local-basis",
-        )
-
-        recap_path = tmp_home / ".claude" / "session_summaries.db"
-        recap_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(recap_path))
-        try:
-            conn.execute(
-                """CREATE TABLE session_summaries (
-                    session_id TEXT PRIMARY KEY,
-                    summary TEXT NOT NULL,
-                    source TEXT NOT NULL,
-                    project TEXT,
-                    created_at REAL NOT NULL,
-                    task_slug TEXT
-                )"""
-            )
-            rows = [
-                (f"replace-{source}", f"imported human over {source}",
-                 "record", "imported", 10.0, "slug")
-                for source in ("auto", "fallback", "skipped")
-            ]
-            rows.extend([
-                ("keep-record-from-record", "different imported human",
-                 "record", "imported", 11.0, "slug"),
-                ("keep-record-from-auto", "imported generated",
-                 "auto", "imported", 12.0, "slug"),
-                ("keep-auto-from-auto", "different imported generated",
-                 "auto", "imported", 13.0, "slug"),
-                ("insert-record", "new imported human",
-                 "record", "imported", 14.0, "slug"),
-                ("insert-auto", "new imported generated",
-                 "auto", "imported", 15.0, "slug"),
-            ])
-            conn.executemany(
-                "INSERT INTO session_summaries VALUES (?, ?, ?, ?, ?, ?)",
-                rows,
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-        # Three record promotions plus two missing-row inserts. Blocked
-        # conflicts must not inflate the count.
-        assert import_from_claude_recap() == 5
-        for source in ("auto", "fallback", "skipped"):
-            promoted = get(f"replace-{source}")
-            assert promoted.summary == f"imported human over {source}"
-            assert promoted.source == "record"
-            assert promoted.project == "imported"
-            assert promoted.created_at == 10.0
-            assert promoted.prompt_version == 0
-            assert promoted.narrator_provider is None
-            assert promoted.narrator_model is None
-            assert promoted.narrator_fingerprint == ""
-            assert promoted.evidence_fingerprint == ""
-            assert promoted.observed_evidence_fingerprint == ""
-
-        assert get("keep-record-from-record").summary == "local human"
-        assert get("keep-record-from-auto").summary == "local human"
-        assert get("keep-auto-from-auto").summary == "local generated"
-        assert get("insert-record").source == "record"
-        inserted_auto = get("insert-auto")
-        assert inserted_auto.source == "auto"
-        assert inserted_auto.evidence_fingerprint == ss.LEGACY_UNKNOWN_EVIDENCE
-        assert (
-            inserted_auto.observed_evidence_fingerprint
-            == ss.LEGACY_UNKNOWN_EVIDENCE
-        )
-
-        assert import_from_claude_recap() == 0

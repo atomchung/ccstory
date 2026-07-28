@@ -461,8 +461,9 @@ in its identity. If evidence changes and regeneration fails or the budget ends,
 the old summary remains in the detailed session history with a compact
 `summary evidence: stale` marker; it is excluded from fresh Top focus,
 classification, category/overall synthesis, and comparison prose. Legacy rows
-are marked `legacy` until lazily refreshed. Human `record` rows remain
-authoritative even under `--refresh`.
+are marked `legacy` until lazily refreshed. `provided` rows (see
+[Library usage](#library-usage-integration-api)) remain authoritative even
+under `--refresh`.
 
 If no configured local narrator is available, LLM classification and synthesis degrade
 gracefully: classification uses folder/fallback rules, per-session prose uses
@@ -689,6 +690,25 @@ Semi-stable means: signatures may still change with minor versions, but
 renames and behavior changes are called out in the changelog instead of
 happening silently. Everything else in the package is internal. The JSON
 envelope (`--json`, `schema_version: 1`) is the other supported contract.
+
+### Supplying an authoritative summary
+
+An external tool that already knows what a session was about — another
+program, a human-reviewed note — can write that summary once and have
+ccstory treat it as final:
+
+```python
+from ccstory.session_summarizer import upsert
+
+upsert(session_id, "Fixed the auth regression from the 0.7 release.",
+       source="provided")
+```
+
+A `provided` row is authoritative: ccstory never overwrites or regenerates
+it, even under `--refresh` or `--llm-narrative --force`. Callers may also
+write their own prefixed `source` values (e.g. `"cloud:main"`) for their own
+bookkeeping; ccstory stores those verbatim and treats them as any other
+non-authoritative row.
 
 ## MCP server
 

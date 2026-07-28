@@ -6,7 +6,7 @@ start producing them.
 
 Two invariants are load-bearing:
 
-* a human ``record`` written against the physical session stays authoritative
+* a ``provided`` row written against the physical session stays authoritative
   for every window slice of that session;
 * an internal slice id never reaches a public surface.
 """
@@ -97,9 +97,9 @@ def _summary(session_id: str, source: str, text: str) -> ss.SessionSummary:
         session_id=session_id,
         summary=text,
         source=source,
-        prompt_version=ss.PROMPT_VERSION if source == "auto" else 0,
-        evidence_fingerprint="fp" if source == "auto" else "",
-        observed_evidence_fingerprint="fp" if source == "auto" else "",
+        prompt_version=ss.PROMPT_VERSION if source == "generated" else 0,
+        evidence_fingerprint="fp" if source == "generated" else "",
+        observed_evidence_fingerprint="fp" if source == "generated" else "",
     )
 
 
@@ -153,19 +153,19 @@ class TestSummaryResolution:
     def test_human_record_on_the_physical_session_covers_every_slice(self):
         slice_ = _clipped_slice()
         calls: list[list[str]] = []
-        rows = {PHYSICAL_ID: _summary(PHYSICAL_ID, "record", "human wrote this")}
+        rows = {PHYSICAL_ID: _summary(PHYSICAL_ID, "provided", "human wrote this")}
 
         resolved = resolve_session_summaries(
             [slice_], fetch=_fake_fetch(rows, calls),
         )
 
-        assert resolved[slice_.session_id].source == "record"
+        assert resolved[slice_.session_id].source == "provided"
         assert resolved[slice_.session_id].summary == "human wrote this"
 
     def test_generated_full_session_prose_never_leaks_into_a_clipped_slice(self):
         slice_ = _clipped_slice()
         calls: list[list[str]] = []
-        rows = {PHYSICAL_ID: _summary(PHYSICAL_ID, "auto", "whole-session prose")}
+        rows = {PHYSICAL_ID: _summary(PHYSICAL_ID, "generated", "whole-session prose")}
 
         resolved = resolve_session_summaries(
             [slice_], fetch=_fake_fetch(rows, calls),
@@ -174,7 +174,7 @@ class TestSummaryResolution:
         # No entry at all: the caller falls back to this slice's own evidence.
         assert resolved == {}
 
-    @pytest.mark.parametrize("source", ["auto", "fallback", "skipped"])
+    @pytest.mark.parametrize("source", ["generated", "extracted", "no_evidence"])
     def test_no_non_record_physical_source_crosses_a_window_boundary(self, source):
         slice_ = _clipped_slice()
         rows = {PHYSICAL_ID: _summary(PHYSICAL_ID, source, "whole-session text")}
@@ -188,8 +188,8 @@ class TestSummaryResolution:
     def test_slice_uses_its_own_generated_summary(self):
         slice_ = _clipped_slice()
         rows = {
-            PHYSICAL_ID: _summary(PHYSICAL_ID, "auto", "whole-session prose"),
-            slice_.session_id: _summary(slice_.session_id, "auto", "window prose"),
+            PHYSICAL_ID: _summary(PHYSICAL_ID, "generated", "whole-session prose"),
+            slice_.session_id: _summary(slice_.session_id, "generated", "window prose"),
         }
 
         resolved = resolve_session_summaries(
@@ -201,8 +201,8 @@ class TestSummaryResolution:
     def test_human_record_outranks_the_slice_own_generated_summary(self):
         slice_ = _clipped_slice()
         rows = {
-            PHYSICAL_ID: _summary(PHYSICAL_ID, "record", "human wrote this"),
-            slice_.session_id: _summary(slice_.session_id, "auto", "window prose"),
+            PHYSICAL_ID: _summary(PHYSICAL_ID, "provided", "human wrote this"),
+            slice_.session_id: _summary(slice_.session_id, "generated", "window prose"),
         }
 
         resolved = resolve_session_summaries(
@@ -213,7 +213,7 @@ class TestSummaryResolution:
 
     def test_plain_session_resolution_is_unchanged(self):
         stat = _stat(0, 60)
-        for source in ("auto", "fallback", "skipped", "record"):
+        for source in ("generated", "extracted", "no_evidence", "provided"):
             rows = {PHYSICAL_ID: _summary(PHYSICAL_ID, source, "text")}
 
             resolved = resolve_session_summaries(
@@ -248,7 +248,7 @@ class TestSummaryResolution:
         assert current is not None and previous is not None
         assert current.session_id != previous.session_id
         rows = {
-            current.session_id: _summary(current.session_id, "auto", "current work"),
+            current.session_id: _summary(current.session_id, "generated", "current work"),
         }
 
         resolved = resolve_session_summaries(
@@ -262,27 +262,27 @@ class TestSummaryResolution:
 class TestHumanRecordAuthorityInBackfill:
     @pytest.mark.parametrize("use_llm", [False, True])
     def test_a_human_recorded_slice_is_never_queued_for_regeneration(self, use_llm):
-        """A record about the physical session settles every slice of it.
+        """A provided row about the physical session settles every slice of it.
 
         Without the seam the default (non-LLM) path has no second lookup to
         recover from a miss, so it would queue narrator work — and re-open the
         transcript — for a session the user has already described.
         """
         slice_ = _clipped_slice()
-        ss.upsert(PHYSICAL_ID, "human wrote this", "record")
+        ss.upsert(PHYSICAL_ID, "human wrote this", "provided")
 
         plan = ss.prepare_backfill_plan([slice_], use_llm=use_llm)
 
         assert plan.ids == [slice_.session_id]
         assert plan.todo == []
         assert plan.prepared == {}
-        assert plan.existing[slice_.session_id].source == "record"
+        assert plan.existing[slice_.session_id].source == "provided"
 
     def test_backfill_writes_a_slice_summary_without_touching_the_physical_row(
         self, monkeypatch,
     ):
         slice_ = _clipped_slice()
-        ss.upsert(PHYSICAL_ID, "whole-session prose", "auto")
+        ss.upsert(PHYSICAL_ID, "whole-session prose", "generated")
         monkeypatch.setattr(
             ss, "_extract_excerpt", lambda path, provider=None: ("proj", "window text"),
         )
@@ -295,17 +295,17 @@ class TestHumanRecordAuthorityInBackfill:
             "ccstory.providers.TranscriptResolver.provider_for",
             lambda self, sess: None,
         )
-        slice_.path = None  # no transcript → deterministic "skipped" write
+        slice_.path = None  # no transcript → deterministic "no_evidence" write
 
         ss.backfill_for_sessions([slice_], use_llm=False)
 
         assert ss.get(PHYSICAL_ID).summary == "whole-session prose"
-        assert ss.get(PHYSICAL_ID).source == "auto"
-        assert ss.get(slice_.session_id).source == "skipped"
+        assert ss.get(PHYSICAL_ID).source == "generated"
+        assert ss.get(slice_.session_id).source == "no_evidence"
 
     def test_plain_session_backfill_behavior_is_unchanged(self):
         stat = _stat(0, 60)
-        ss.upsert(PHYSICAL_ID, "human wrote this", "record")
+        ss.upsert(PHYSICAL_ID, "human wrote this", "provided")
 
         plan = ss.prepare_backfill_plan([stat], use_llm=True)
 
@@ -446,7 +446,7 @@ class TestPublicSurfacesNeverLeakSliceIdentity:
     def test_json_session_id_is_the_physical_id(self):
         slice_ = _clipped_slice()
         summaries = {
-            slice_.session_id: _summary(slice_.session_id, "auto", "window prose"),
+            slice_.session_id: _summary(slice_.session_id, "generated", "window prose"),
         }
         rollup, usage = self._envelope(slice_, summaries)
 
@@ -466,13 +466,13 @@ class TestPublicSurfacesNeverLeakSliceIdentity:
         entry = payload["sessions"][0]
         assert entry["id"] == PHYSICAL_ID
         assert entry["summary"] == "window prose"
-        assert entry["summary_source"] == "auto"
+        assert entry["summary_source"] == "generated"
         assert "slice-" not in json_dumps(payload)
 
     def test_markdown_report_contains_no_internal_slice_id(self):
         slice_ = _clipped_slice()
         summaries = {
-            slice_.session_id: _summary(slice_.session_id, "auto", "window prose"),
+            slice_.session_id: _summary(slice_.session_id, "generated", "window prose"),
         }
         rollup, usage = self._envelope(slice_, summaries)
 
@@ -499,7 +499,7 @@ class TestPublicSurfacesNeverLeakSliceIdentity:
 
         slice_ = _clipped_slice()
         summaries = {
-            slice_.session_id: _summary(slice_.session_id, "auto", "window prose"),
+            slice_.session_id: _summary(slice_.session_id, "generated", "window prose"),
         }
         rollup, usage = self._envelope(slice_, summaries)
         result = SimpleNamespace(
@@ -529,7 +529,7 @@ class TestPublicSurfacesNeverLeakSliceIdentity:
     def test_top_focus_ordering_uses_public_identity(self):
         slice_ = _clipped_slice()
         summaries = {
-            slice_.session_id: _summary(slice_.session_id, "auto", "window prose"),
+            slice_.session_id: _summary(slice_.session_id, "generated", "window prose"),
         }
         rollup, _usage = self._envelope(slice_, summaries)
 

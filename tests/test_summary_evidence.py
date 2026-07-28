@@ -207,7 +207,7 @@ def test_failed_growth_refresh_preserves_history_and_marks_stale(
     ss.upsert(
         stat.session_id,
         "Previously proven outcome",
-        "auto",
+        "generated",
         project=basis.project,
         prompt_version=ss.PROMPT_VERSION,
         narrator_provider="claude",
@@ -259,24 +259,24 @@ def test_record_is_authoritative_even_force_and_generated_upsert(
     tmp_home, jsonl_factory, monkeypatch,
 ):
     stat, _path = _session(jsonl_factory, "human-record")
-    ss.upsert(stat.session_id, "Human accepted outcome", "record")
+    ss.upsert(stat.session_id, "Human accepted outcome", "provided")
     before = ss.get(stat.session_id)
     monkeypatch.setattr(
         ss,
         "_extract_excerpt",
         lambda *_a, **_k: (_ for _ in ()).throw(
-            AssertionError("record rows must not be extracted")
+            AssertionError("provided rows must not be extracted")
         ),
     )
     counts = ss.backfill_for_sessions(
         [stat], use_llm=True, force=True,
     )
-    ss.upsert(stat.session_id, "Generated overwrite", "auto")
+    ss.upsert(stat.session_id, "Generated overwrite", "generated")
 
     after = ss.get(stat.session_id)
     assert counts["already"] == 1
     assert after.summary == before.summary
-    assert after.source == "record"
+    assert after.source == "provided"
     assert after.created_at == before.created_at
     assert ss.summary_evidence_status(after) == "not_applicable"
 
@@ -319,12 +319,12 @@ def test_public_status_is_hash_free_and_stale_is_not_synthesized(monkeypatch):
     secret_observed = "SECRET_OBSERVED_HASH"
     summaries = {
         "stale": ss.SessionSummary(
-            "stale", "Old generated claim", "auto",
+            "stale", "Old generated claim", "generated",
             evidence_fingerprint=secret_basis,
             observed_evidence_fingerprint=secret_observed,
         ),
         "current": ss.SessionSummary(
-            "current", "Fresh generated claim", "auto",
+            "current", "Fresh generated claim", "generated",
             evidence_fingerprint="same",
             observed_evidence_fingerprint="same",
         ),
@@ -388,14 +388,14 @@ def test_public_status_is_hash_free_and_stale_is_not_synthesized(monkeypatch):
 def test_status_helper_covers_native_fallback_skipped_and_legacy():
     assert ss.summary_evidence_status(None) == "not_applicable"  # native title
     assert ss.summary_evidence_status(
-        ss.SessionSummary("f", "fallback", "fallback")
+        ss.SessionSummary("f", "fallback", "extracted")
     ) == "not_applicable"
     assert ss.summary_evidence_status(
-        ss.SessionSummary("s", "skipped", "skipped")
+        ss.SessionSummary("s", "skipped", "no_evidence")
     ) == "unavailable"
     assert ss.summary_evidence_status(
         ss.SessionSummary(
-            "l", "legacy", "auto",
+            "l", "legacy", "generated",
             evidence_fingerprint=ss.LEGACY_UNKNOWN_EVIDENCE,
             observed_evidence_fingerprint=ss.LEGACY_UNKNOWN_EVIDENCE,
         )

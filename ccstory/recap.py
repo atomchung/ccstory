@@ -59,7 +59,6 @@ from .session_summarizer import (
     get_many,
     get_comparison_narrative_provenance,
     get_period_narrative_provenance,
-    import_from_claude_recap,
     invalidate_comparison_narratives,
     invalidate_content_buckets,
     invalidate_period_aggregates,
@@ -694,13 +693,6 @@ def build_recap(
     narrative_budget = NarrativeBudget() if not minimal else None
     overall_narrative: str | None = None
     if not minimal:
-        imported = import_from_claude_recap()
-        if imported:
-            console.print(
-                f"[green]✓[/green] [dim]imported {imported} cached "
-                f"summarie(s) from ~/.claude/session_summaries.db "
-                f"(/recap)[/dim]\n"
-            )
         if llm_narrative and not llm_available():
             console.print(
                 "[yellow]![/yellow] [dim]no configured narrative CLI is available — "

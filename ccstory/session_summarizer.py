@@ -6,7 +6,7 @@ local coding-agent CLI; no API key or ccstory-operated service is involved.
 
 Extracted from ting/personal_os/core/session_summarizer.py. Simplified for v1:
   - DB lives at ~/.ccstory/cache.db (not polluting Claude Code's own dir)
-  - Human-authored ``record`` rows, when imported, remain authoritative
+  - Externally ``provided`` rows (see ``upsert()``) remain authoritative
 """
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ from .providers.excerpts import compact_evidence_text, parse_excerpt_blocks
 
 LOG = logging.getLogger("ccstory.summarizer")
 DB_PATH = Path.home() / ".ccstory" / "cache.db"
-RECAP_DB_PATH = Path.home() / ".claude" / "session_summaries.db"
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 CLAUDE_MD_PATH = Path.home() / ".claude" / "CLAUDE.md"
 CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
@@ -61,11 +60,11 @@ _LANGUAGE_ALIASES = {
 
 # Bump whenever the per-session narrative prompt (_PROMPT_TEMPLATE) is changed
 # materially, or when retuning it for a newer/better default `claude` model.
-# Cached "auto" summaries carrying a lower prompt_version are treated as stale
-# and regenerated on the next `--llm-narrative` run. Keep this an int so the
-# comparison `stored < PROMPT_VERSION` is monotonic.
+# Cached "generated" summaries carrying a lower prompt_version are treated as
+# stale and regenerated on the next `--llm-narrative` run. Keep this an int so
+# the comparison `stored < PROMPT_VERSION` is monotonic.
 PROMPT_VERSION = 3
-CACHE_SCHEMA_VERSION = 5
+CACHE_SCHEMA_VERSION = 6
 
 # Evidence identity is intentionally separate from ``PROMPT_VERSION``.  The
 # latter describes how prose is requested; this version describes which
@@ -79,6 +78,43 @@ _SUMMARY_EVIDENCE_SINGLE_LANE = "single-8000-v1"
 
 
 _CLAUDE_MD_MAX_CHARS = 500
+
+
+# session_summaries.source vocabulary (#206): every value answers the same
+# question — how did this summary text come to be — rather than mixing in
+# who wrote it or why. Renamed from the personal-tool vocabulary this module
+# was extracted from: record -> provided, auto -> generated,
+# fallback -> extracted, skipped -> no_evidence.
+#
+# Issue #206 proposed "unavailable" for the no-evidence case, but
+# summary_evidence_status() already returns "unavailable" with a different
+# meaning (an existing generated row whose current evidence could not be
+# observed). Reusing the word here would make `summary_source: "unavailable"`
+# and `summary_evidence.status: "unavailable"` look like the same fact when
+# they are not, so this module uses "no_evidence" instead.
+SOURCE_PROVIDED = "provided"        # supplied by an external caller via
+                                     # upsert(); never overwritten/regenerated
+SOURCE_GENERATED = "generated"      # written by the configured narrator
+SOURCE_EXTRACTED = "extracted"      # derived deterministically from the
+                                     # transcript, no model involved
+SOURCE_NO_EVIDENCE = "no_evidence"  # no usable evidence existed to summarize
+
+# The known, conventional values. Not a closed enum: callers may also write
+# their own prefixed values (e.g. "cloud:<branch>"), which are stored and
+# returned verbatim and treated as non-authoritative.
+KNOWN_SOURCES = frozenset(
+    {SOURCE_PROVIDED, SOURCE_GENERATED, SOURCE_EXTRACTED, SOURCE_NO_EVIDENCE}
+)
+
+# Legacy (pre-#206) value -> current value. Used by the cache migration that
+# rewrites stored rows and by upsert()'s backward-compatible normalization of
+# values passed by callers that have not picked up the rename yet.
+_LEGACY_SOURCE_ALIASES = {
+    "record": SOURCE_PROVIDED,
+    "auto": SOURCE_GENERATED,
+    "fallback": SOURCE_EXTRACTED,
+    "skipped": SOURCE_NO_EVIDENCE,
+}
 
 
 def _build_language_line(language: str) -> str:
@@ -336,17 +372,19 @@ def _detect_system_locale() -> str | None:
 class SessionSummary:
     session_id: str
     summary: str
-    source: str  # "record" | "auto" | "skipped" | "fallback"
+    source: str  # SOURCE_PROVIDED | SOURCE_GENERATED | SOURCE_EXTRACTED |
+                 # SOURCE_NO_EVIDENCE | a caller-defined value (e.g. "cloud:<branch>")
     project: str | None = None
     created_at: float = 0.0
     # Version of the per-session prompt (_PROMPT_TEMPLATE / PROMPT_VERSION)
-    # that produced an "auto" summary. Used to detect staleness so a later
-    # release can refresh summaries when the prompt — or the model it's
-    # tuned for — improves. 0 / None for fallback/skipped/legacy rows.
+    # that produced a "generated" summary. Used to detect staleness so a
+    # later release can refresh summaries when the prompt — or the model
+    # it's tuned for — improves. 0 / None for extracted/no_evidence/legacy rows.
     prompt_version: int = 0
-    # The backend that actually wrote an ``auto`` summary.  ``None`` is kept
-    # for extractive fallback, skipped, imported, and pre-provenance cache
-    # rows; callers must never infer a model for those records.
+    # The backend that actually wrote a ``generated`` summary.  ``None`` is
+    # kept for extracted, no-evidence, externally provided, and
+    # pre-provenance cache rows; callers must never infer a model for those
+    # records.
     narrator_provider: str | None = None
     narrator_model: str | None = None
     narrator_fingerprint: str = ""
@@ -361,15 +399,15 @@ def summary_evidence_status(summary: SessionSummary | None) -> str:
     """Return public-safe evidence provenance for one detailed summary.
 
     The helper is pure: it never opens a transcript or cache and never exposes
-    a fingerprint.  ``record`` and extractive ``fallback`` rows are not
-    narrator-evidence products, while a missing cache row (including a native
-    provider title) is likewise ``not_applicable``.
+    a fingerprint.  ``SOURCE_PROVIDED`` and extractive ``SOURCE_EXTRACTED``
+    rows are not narrator-evidence products, while a missing cache row
+    (including a native provider title) is likewise ``not_applicable``.
     """
-    if summary is None or summary.source in ("record", "fallback"):
+    if summary is None or summary.source in (SOURCE_PROVIDED, SOURCE_EXTRACTED):
         return "not_applicable"
-    if summary.source == "skipped":
+    if summary.source == SOURCE_NO_EVIDENCE:
         return "unavailable"
-    if summary.source != "auto":
+    if summary.source != SOURCE_GENERATED:
         return "not_applicable"
     basis = summary.evidence_fingerprint
     observed = summary.observed_evidence_fingerprint
@@ -384,9 +422,12 @@ def summary_is_synthesis_eligible(summary: SessionSummary | None) -> bool:
     """Whether detailed prose may be amplified into a fresh derived claim."""
     if summary is None:
         return False
-    if summary.source == "record":
+    if summary.source == SOURCE_PROVIDED:
         return True
-    return summary.source == "auto" and summary_evidence_status(summary) == "current"
+    return (
+        summary.source == SOURCE_GENERATED
+        and summary_evidence_status(summary) == "current"
+    )
 
 
 @dataclass(frozen=True)
@@ -761,6 +802,10 @@ def _migration_5_summary_evidence_identity(conn: sqlite3.Connection) -> None:
         conn, "session_summaries", "observed_evidence_fingerprint",
         "TEXT NOT NULL DEFAULT ''",
     )
+    # NOTE: 'auto' is a fixed historical literal, not SOURCE_GENERATED. This
+    # migration runs before migration 6 renames the vocabulary, so rows here
+    # still carry the pre-#206 value no matter what the constant is named
+    # today.
     conn.execute(
         """UPDATE session_summaries
            SET evidence_fingerprint = ?,
@@ -770,12 +815,31 @@ def _migration_5_summary_evidence_identity(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_6_source_vocabulary(conn: sqlite3.Connection) -> None:
+    """Rewrite ``session_summaries.source`` onto the #206 one-axis vocabulary.
+
+    Rewrites only the four known legacy values (``_LEGACY_SOURCE_ALIASES``):
+    ``record``/``auto``/``fallback``/``skipped`` become ``provided``/
+    ``generated``/``extracted``/``no_evidence``. Every other stored value —
+    including caller-defined ``prefix:...`` values such as ``cloud:<branch>``
+    written by external integrations — never matched this vocabulary and is
+    left byte-for-byte untouched.
+    """
+    _migration_5_summary_evidence_identity(conn)
+    for legacy, current in _LEGACY_SOURCE_ALIASES.items():
+        conn.execute(
+            "UPDATE session_summaries SET source = ? WHERE source = ?",
+            (current, legacy),
+        )
+
+
 _MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_1_baseline,
     _migration_2_cache_fingerprints,
     _migration_3_adopt_legacy_classifications,
     _migration_4_narrator_provenance,
     _migration_5_summary_evidence_identity,
+    _migration_6_source_vocabulary,
 )
 assert len(_MIGRATIONS) == CACHE_SCHEMA_VERSION
 
@@ -903,13 +967,26 @@ def upsert(
     evidence_fingerprint: str = "",
     observed_evidence_fingerprint: str = "",
 ) -> None:
+    """Write or replace one session's cached summary.
+
+    ``source`` accepts a legacy pre-#206 value (``record``/``auto``/
+    ``fallback``/``skipped``) and silently normalizes it to its current name
+    (see ``_LEGACY_SOURCE_ALIASES``) before storing. External callers write
+    through this function directly, and a caller that has not picked up the
+    rename must not silently lose the authority its ``record`` rows had —
+    an un-normalized legacy value would no longer match ``SOURCE_PROVIDED``
+    and would stop being treated as authoritative. Caller-defined values
+    (e.g. ``"cloud:<branch>"``) are not in ``_LEGACY_SOURCE_ALIASES`` and are
+    stored verbatim, unchanged.
+    """
     if not session_id or not summary:
         return
-    if source == "auto" and not evidence_fingerprint:
+    source = _LEGACY_SOURCE_ALIASES.get(source, source)
+    if source == SOURCE_GENERATED and not evidence_fingerprint:
         # Direct/library writes without a prepared evidence basis remain
         # visible history, but must never masquerade as current evidence.
         evidence_fingerprint = LEGACY_UNKNOWN_EVIDENCE
-    if source == "auto" and not observed_evidence_fingerprint:
+    if source == SOURCE_GENERATED and not observed_evidence_fingerprint:
         observed_evidence_fingerprint = evidence_fingerprint
     conn = _connect()
     try:
@@ -931,12 +1008,12 @@ def upsert(
                    evidence_fingerprint = excluded.evidence_fingerprint,
                    observed_evidence_fingerprint =
                        excluded.observed_evidence_fingerprint
-               WHERE session_summaries.source <> 'record'
-                  OR excluded.source = 'record'""",
+               WHERE session_summaries.source <> ?
+                  OR excluded.source = ?""",
             (session_id, summary.strip(), source, project, time.time(),
              prompt_version, narrator_provider, narrator_model,
              narrator_fingerprint, evidence_fingerprint,
-             observed_evidence_fingerprint),
+             observed_evidence_fingerprint, SOURCE_PROVIDED, SOURCE_PROVIDED),
         )
         conn.commit()
     finally:
@@ -979,7 +1056,7 @@ def get_many(session_ids: list[str]) -> dict[str, SessionSummary]:
 
 
 def recent_auto_timestamps(limit: int = 60) -> list[float]:
-    """`created_at` of the most recent `auto` summaries, oldest first.
+    """`created_at` of the most recent `generated` summaries, oldest first.
 
     Retained as a cache-inspection helper for callers; batch writes mean these
     row timestamps are not a reliable measure of narrator-call latency.
@@ -988,85 +1065,13 @@ def recent_auto_timestamps(limit: int = 60) -> list[float]:
     try:
         rows = conn.execute(
             """SELECT created_at FROM session_summaries
-               WHERE source = 'auto'
+               WHERE source = ?
                ORDER BY created_at DESC LIMIT ?""",
-            (limit,),
+            (SOURCE_GENERATED, limit),
         ).fetchall()
     finally:
         conn.close()
     return sorted(r[0] for r in rows)
-
-
-def import_from_claude_recap() -> int:
-    """Pull cached summaries from ~/.claude/session_summaries.db (written by
-    the personal_os /recap skill) into ccstory's cache.
-
-    Idempotent and source-aware: an incoming human ``record`` promotes a local
-    auto/fallback/skipped row, while an existing local record is authoritative
-    and every incoming non-record loses to any local row. Drops the recap-only
-    `task_slug` column since ccstory's schema doesn't carry it. Silently returns
-    0 if the recap DB is absent (fresh users won't have it).
-    """
-    if not RECAP_DB_PATH.exists():
-        return 0
-    conn = _connect()
-    try:
-        try:
-            # ATTACH doesn't support parameter binding for filenames, so
-            # double single quotes per SQLite's literal-escape rule. Without
-            # this, $HOME containing a "'" throws OperationalError.
-            attach_path = str(RECAP_DB_PATH).replace("'", "''")
-            conn.execute(f"ATTACH DATABASE '{attach_path}' AS recap")
-        except sqlite3.OperationalError as e:
-            LOG.warning("attach recap DB failed: %s", e)
-            return 0
-        try:
-            before_changes = conn.total_changes
-            conn.execute(
-                """INSERT INTO session_summaries
-                   (session_id, summary, source, project, created_at,
-                    prompt_version, narrator_provider, narrator_model,
-                    narrator_fingerprint, evidence_fingerprint,
-                    observed_evidence_fingerprint)
-                   SELECT session_id, summary, source, project, created_at,
-                          CASE WHEN source = 'auto' THEN ? ELSE 0 END,
-                          NULL, NULL, '',
-                          CASE WHEN source = 'auto' THEN ? ELSE '' END,
-                          CASE WHEN source = 'auto' THEN ? ELSE '' END
-                   FROM recap.session_summaries
-                   WHERE summary IS NOT NULL AND summary <> ''
-                   ON CONFLICT(session_id) DO UPDATE SET
-                       summary = excluded.summary,
-                       source = excluded.source,
-                       project = excluded.project,
-                       created_at = excluded.created_at,
-                       prompt_version = 0,
-                       narrator_provider = NULL,
-                       narrator_model = NULL,
-                       narrator_fingerprint = '',
-                       evidence_fingerprint = '',
-                       observed_evidence_fingerprint = ''
-                   WHERE excluded.source = 'record'
-                     AND session_summaries.source <> 'record'""",
-                (
-                    PROMPT_VERSION,
-                    LEGACY_UNKNOWN_EVIDENCE,
-                    LEGACY_UNKNOWN_EVIDENCE,
-                ),
-            )
-            # Cursor.rowcount for INSERT...SELECT has varied across sqlite3
-            # versions. Connection total_changes gives the exact inserted +
-            # promoted-row count while blocked precedence conflicts add zero.
-            n = conn.total_changes - before_changes
-            conn.commit()
-            return n
-        finally:
-            conn.execute("DETACH DATABASE recap")
-    except sqlite3.Error as e:
-        LOG.warning("recap import failed: %s", e)
-        return 0
-    finally:
-        conn.close()
 
 
 def missing_ids(session_ids: list[str]) -> list[str]:
@@ -1091,8 +1096,11 @@ def _record_observed_evidence(observations: dict[str, str]) -> None:
         conn.executemany(
             """UPDATE session_summaries
                SET observed_evidence_fingerprint = ?
-               WHERE session_id = ? AND source <> 'record'""",
-            [(fingerprint, session_id) for session_id, fingerprint in observations.items()],
+               WHERE session_id = ? AND source <> ?""",
+            [
+                (fingerprint, session_id, SOURCE_PROVIDED)
+                for session_id, fingerprint in observations.items()
+            ],
         )
         conn.commit()
     finally:
@@ -1852,27 +1860,30 @@ def _needs_llm(
 ) -> bool:
     """Whether a session should be (re)sent to the configured narrator.
 
-    - missing            → yes (never summarized)
-    - source == record   → no  (human-authored and authoritative, even force)
-    - source == skipped  → only when usable evidence is now observed
-    - source == fallback → yes (Layer 0: upgrade the instant fallback to auto)
-    - source == auto     → only if `force`, or its prompt_version is behind
-                           PROMPT_VERSION (Layer 1: refresh when the prompt —
-                           or the model it's tuned for — has improved), or the
-                           exact bounded evidence changed / is legacy-unknown
+    - missing               → yes (never summarized)
+    - source == provided    → no  (externally supplied and authoritative,
+                              even under force)
+    - source == no_evidence → only when usable evidence is now observed
+    - source == extracted   → yes (Layer 0: upgrade the instant extraction
+                              to a generated summary)
+    - source == generated   → only if `force`, or its prompt_version is
+                              behind PROMPT_VERSION (Layer 1: refresh when
+                              the prompt — or the model it's tuned for — has
+                              improved), or the exact bounded evidence
+                              changed / is legacy-unknown
     """
     if existing is None:
         return True
-    if existing.source == "record":
+    if existing.source == SOURCE_PROVIDED:
         return False
-    if existing.source == "skipped":
+    if existing.source == SOURCE_NO_EVIDENCE:
         return bool(
             observed_evidence_fingerprint
             and observed_evidence_fingerprint != EVIDENCE_UNAVAILABLE
         )
-    if existing.source == "fallback":
+    if existing.source == SOURCE_EXTRACTED:
         return observed_evidence_fingerprint != EVIDENCE_UNAVAILABLE
-    if existing.source != "auto":
+    if existing.source != SOURCE_GENERATED:
         return False
     if observed_evidence_fingerprint == EVIDENCE_UNAVAILABLE:
         return False
@@ -1897,19 +1908,19 @@ def prepare_backfill_plan(
 ) -> SummaryBackfillPlan:
     """Extract selected evidence once, observe it, then decide narrator work.
 
-    LLM runs inspect every non-record session in the selected window so a
-    growing transcript can invalidate an otherwise-good auto row.  Normal
-    non-LLM runs preserve their cheap cache behavior and inspect only missing
-    rows.  Observation is committed before ``todo`` is computed, so a later
-    failure or budget stop still leaves honest stale provenance.
+    LLM runs inspect every non-provided session in the selected window so a
+    growing transcript can invalidate an otherwise-good generated row.
+    Normal non-LLM runs preserve their cheap cache behavior and inspect only
+    missing rows.  Observation is committed before ``todo`` is computed, so a
+    later failure or budget stop still leaves honest stale provenance.
 
     Existing rows are resolved through the identity seam rather than a raw
     ``get_many`` on session ids.  A boundary-clipped window slice caches under
     its own evidence identity, so a plain lookup would not see the
-    authoritative human ``record`` stored against the physical session — and
+    authoritative ``provided`` row stored against the physical session — and
     the narrator would then regenerate over work the user has already
-    described.  Writes still target the evidence identity, so a record is
-    never overwritten.
+    described.  Writes still target the evidence identity, so a provided row
+    is never overwritten.
     """
     from .session_identity import evidence_session_id, resolve_session_summaries
 
@@ -1923,7 +1934,7 @@ def prepare_backfill_plan(
     if use_llm:
         candidates = [
             sid for sid in ids
-            if existing.get(sid) is None or existing[sid].source != "record"
+            if existing.get(sid) is None or existing[sid].source != SOURCE_PROVIDED
         ]
     else:
         candidates = [sid for sid in ids if existing.get(sid) is None]
@@ -2020,21 +2031,21 @@ def summarize_session(
     """Idempotent: returns the cached entry unless it needs (re)generation.
 
     Default (`use_llm=False`) never calls the LLM — it returns any cached
-    entry untouched, else writes an instant first/last-user-message fallback
-    (`source=fallback`).
+    entry untouched, else writes an instant first/last-user-message
+    extraction (`source=SOURCE_EXTRACTED`).
 
-    With `use_llm=True` the cache becomes *upgradable*: a `fallback` row is
-    promoted to `auto`, and a stale `auto` row (older `prompt_version`, or
-    any when `force=True`) is regenerated. An up-to-date `auto` row is
-    returned as-is so we never re-burn `claude -p`. Regeneration is
-    non-destructive — if `claude -p` fails, the existing summary is kept
-    rather than downgraded to a fallback.
+    With `use_llm=True` the cache becomes *upgradable*: an `extracted` row is
+    promoted to `generated`, and a stale `generated` row (older
+    `prompt_version`, or any when `force=True`) is regenerated. An
+    up-to-date `generated` row is returned as-is so we never re-burn
+    `claude -p`. Regeneration is non-destructive — if `claude -p` fails, the
+    existing summary is kept rather than downgraded to an extraction.
     """
     existing = get(session_id)
     if not use_llm:
         if existing:
             return existing
-    elif existing and existing.source == "record":
+    elif existing and existing.source == SOURCE_PROVIDED:
         return existing
 
     project, excerpt = _extract_excerpt(jsonl_path, provider=provider)
@@ -2046,7 +2057,10 @@ def summarize_session(
             return get(session_id)
         if existing:
             return existing
-        upsert(session_id, "(no meaningful conversation)", "skipped", project=project)
+        upsert(
+            session_id, "(no meaningful conversation)", SOURCE_NO_EVIDENCE,
+            project=project,
+        )
         return get(session_id)
     if use_llm:
         prepared = _prepare_summary_evidence(
@@ -2068,7 +2082,7 @@ def summarize_session(
             call = NarrativeCall(call, "claude", "sonnet")
         if call:
             upsert(
-                session_id, call.stdout, "auto", project=project,
+                session_id, call.stdout, SOURCE_GENERATED, project=project,
                 prompt_version=PROMPT_VERSION,
                 narrator_provider=call.provider,
                 narrator_model=call.model,
@@ -2078,10 +2092,13 @@ def summarize_session(
             )
             return get(session_id)
         # A narrator failure never rewrites prior history.  Its observed
-        # fingerprint already makes a changed auto row visibly stale.
+        # fingerprint already makes a changed generated row visibly stale.
         if existing:
             return existing
-    upsert(session_id, _fallback_narrative(excerpt), "fallback", project=project)
+    upsert(
+        session_id, _fallback_narrative(excerpt), SOURCE_EXTRACTED,
+        project=project,
+    )
     return get(session_id)
 
 
@@ -2946,11 +2963,12 @@ def backfill_for_sessions(
 
     `sessions` is a list of objects with `.session_id` and `.project` attrs.
     `use_llm=False` (default) only summarizes never-seen sessions with the
-    instant first/last-user-message fallback. `use_llm=True` additionally upgrades
-    `fallback` rows to `auto` and regenerates stale `auto` rows (older
-    prompt_version, or every in-window `auto` when `force=True`) in bounded
-    batch narrator calls. ``on_chunk_complete`` receives completed/total LLM
-    batches; ``on_progress`` remains a per-session completion callback.
+    instant first/last-user-message extraction. `use_llm=True` additionally
+    upgrades `extracted` rows to `generated` and regenerates stale
+    `generated` rows (older prompt_version, or every in-window `generated`
+    when `force=True`) in bounded batch narrator calls. ``on_chunk_complete``
+    receives completed/total LLM batches; ``on_progress`` remains a
+    per-session completion callback.
     Returns {"summarized": N, "fallback": F, "skipped": M, "already": K,
              "regenerated": R}.
     """
@@ -2974,7 +2992,7 @@ def backfill_for_sessions(
             # A path miss and an empty transcript share public unavailable
             # provenance; neither is evidence suitable for a narrator call.
             upsert(
-                sid, plan.unavailable_summaries[sid], "skipped",
+                sid, plan.unavailable_summaries[sid], SOURCE_NO_EVIDENCE,
                 project=plan.projects.get(sid),
             )
         skipped += 1
@@ -2984,7 +3002,7 @@ def backfill_for_sessions(
             upsert(
                 item.session_id,
                 _fallback_narrative(item.excerpt),
-                "fallback",
+                SOURCE_EXTRACTED,
                 project=item.project,
             )
             fallback += 1
@@ -3006,7 +3024,7 @@ def backfill_for_sessions(
         call = generated.get(sid)
         if call is not None:
             upsert(
-                sid, call.stdout, "auto", project=item.project,
+                sid, call.stdout, SOURCE_GENERATED, project=item.project,
                 prompt_version=PROMPT_VERSION,
                 narrator_provider=call.provider,
                 narrator_model=call.model,
@@ -3023,13 +3041,13 @@ def backfill_for_sessions(
         # a local fallback.
         old = existing.get(sid)
         if old is not None:
-            if old.source == "fallback":
+            if old.source == SOURCE_EXTRACTED:
                 fallback += 1
-            elif old.source == "skipped":
+            elif old.source == SOURCE_NO_EVIDENCE:
                 skipped += 1
             continue
         upsert(
-            sid, _fallback_narrative(item.excerpt), "fallback",
+            sid, _fallback_narrative(item.excerpt), SOURCE_EXTRACTED,
             project=item.project,
         )
         fallback += 1

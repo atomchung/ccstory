@@ -444,8 +444,8 @@ def run_deep_mode(
         f"across {days} day(s) (cap: {max_n}).\n"
     )
 
-    # Only current generated prose or an authoritative human record may feed a
-    # fresh classification. Detailed-history fallback/stale/legacy rows remain
+    # Only current generated prose or an authoritative provided row may feed a
+    # fresh classification. Detailed-history extracted/stale/legacy rows remain
     # visible elsewhere, but deep init must classify from current session text
     # rather than amplify them into a new durable bucket.
     summaries = get_many([s.session_id for s in sampled])

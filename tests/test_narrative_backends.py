@@ -196,7 +196,7 @@ def test_budgeted_antigravity_call_is_capped_at_deadline(monkeypatch):
 def test_session_provenance_and_backend_config_change_invalidate_auto_cache():
     fingerprint = ss.narrative_config_fingerprint()
     ss.upsert(
-        "s1", "generated", "auto", prompt_version=ss.PROMPT_VERSION,
+        "s1", "generated", "generated", prompt_version=ss.PROMPT_VERSION,
         narrator_provider="codex", narrator_model="gpt-5.6-terra",
         narrator_fingerprint=fingerprint,
         evidence_fingerprint="current-evidence",
