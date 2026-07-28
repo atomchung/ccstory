@@ -78,9 +78,21 @@ def _no_llm(monkeypatch):
 
 
 class TestBuildRecap:
-    def test_agent_field_does_not_shift_existing_positional_fields(self):
+    def test_new_fields_are_appended_never_inserted(self):
+        """Positional ``RecapResult(...)`` construction is part of the
+        semi-stable library surface (#110), so a field inserted mid-list
+        silently rebinds every argument after it — ``report_path`` would
+        start arriving as ``agent``. New fields may only be appended.
+
+        Anchored on ``report_path`` rather than pinned to the tail so that
+        appending a later field (``sampling``, #188 0.8-F) is allowed, while
+        inserting one anywhere inside this run still fails.
+        """
         fields = list(recap.RecapResult.__dataclass_fields__)
-        assert fields[-4:] == ["report_path", "counts", "agent", "narrative_provenance"]
+        anchor = fields.index("report_path")
+        assert fields[anchor:anchor + 4] == [
+            "report_path", "counts", "agent", "narrative_provenance",
+        ]
 
     def test_end_to_end_result_shape(self, tmp_home, jsonl_factory):
         _seed_session(jsonl_factory)
