@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-07-28
+
 ### Added
 
 - Full recap JSON and MCP top-session entries now expose a public-safe
@@ -22,8 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Local narrator compatibility retries now preserve the caller's exact hard
-  timeout even when absolute-deadline subtraction rounds fractionally upward.
+- Claude and Antigravity narrator retries now stay within the caller's exact
+  per-call deadline, including compatibility and transient-error retries.
 - Per-session automatic-summary cache identity now includes the exact bounded
   evidence sent to the narrator, its project, and a versioned per-lane evidence
   policy. Selected `--llm-narrative` sessions are extracted once and observed
@@ -78,10 +80,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inherited-prefix handling remain unchanged.
 - `--llm-narrative` now sends up to 40 bounded session excerpts in one
   narrator request rather than spawning one local CLI process per session.
-  Each returned JSONL row is accepted only for a requested session ID; omitted
-  rows fall back individually and a failed refresh never overwrites a cached
-  automatic summary. Recap now delegates to the shared backfill implementation
-  instead of retaining a second, divergent per-session loop.
+  Long sessions preserve their first intent, latest request, and final
+  assistant outcome within the fixed excerpt budget. Each returned JSONL row
+  is accepted only for a requested session ID; when an otherwise valid response
+  omits up to five IDs, ccstory retries that strictly smaller set once before
+  unresolved rows fall back individually. A failed refresh never overwrites a
+  cached automatic summary. Recap now delegates to the shared backfill
+  implementation instead of retaining a second, divergent per-session loop.
 - Restored the category-centered recap structure: `Top focus` shows the
   largest Category, its time share, and a representative session; `What you
   did` remains the separate cross-Category integration of 2-4 goal threads.
@@ -513,7 +518,9 @@ Initial tagged release.
 - Category surfaced in the CLI, with louder warnings on silent
   classification failures.
 
-[Unreleased]: https://github.com/atomchung/ccstory/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/atomchung/ccstory/compare/v0.7.3...HEAD
+[0.7.3]: https://github.com/atomchung/ccstory/compare/v0.7.2...v0.7.3
+[0.7.2]: https://github.com/atomchung/ccstory/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/atomchung/ccstory/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/atomchung/ccstory/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/atomchung/ccstory/compare/v0.6.0...v0.6.1

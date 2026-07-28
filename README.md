@@ -749,6 +749,17 @@ never include raw transcript text, only summaries.
 - [x] Git commit / PR correlation — period-level **Repo activity** section
       (per-session attribution still open, #11)
 
+The version directions below are plans, not completed product capabilities;
+their scope may change as the evidence and privacy contracts are validated.
+
+- **0.8 — Trustworthy evidence pipeline:** freshness and window-purity
+  guarantees, provider snapshots, metadata-only provenance traces, and
+  deterministic sampling.
+- **0.9 — Correctable, corroborated local memory:** preserve explicit
+  corrections and corroborate local evidence before reuse.
+- **1.0 — Longitudinal, shareable work memory:** connect work over time and
+  support intentional, privacy-aware sharing.
+
 See the [issue tracker](https://github.com/atomchung/ccstory/issues) for the
 full backlog.
 
