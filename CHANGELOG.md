@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-28
+
 ### Changed
 
 - Recap and previous-window comparison are now window-pure. A session that
@@ -627,7 +629,8 @@ Initial tagged release.
 - Category surfaced in the CLI, with louder warnings on silent
   classification failures.
 
-[Unreleased]: https://github.com/atomchung/ccstory/compare/v0.7.3...HEAD
+[Unreleased]: https://github.com/atomchung/ccstory/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/atomchung/ccstory/compare/v0.7.3...v0.8.0
 [0.7.3]: https://github.com/atomchung/ccstory/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/atomchung/ccstory/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/atomchung/ccstory/compare/v0.7.0...v0.7.1
