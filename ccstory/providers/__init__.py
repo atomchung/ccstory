@@ -13,7 +13,7 @@ from ..provider_metadata import (
     BUNDLED_PROVIDER_DEFINITIONS,
     UsageCoverage,
 )
-from ..time_tracking import SessionStat
+from ..time_tracking import SessionSlice, SessionStat
 from ..token_usage import ModelUsage, UsageReport
 from .base import (
     BaseAgentProvider,
@@ -69,7 +69,7 @@ class ProviderSnapshot:
 
     windows: dict[str, tuple[datetime, datetime]]
     records: tuple[ProviderRecord, ...]
-    sessions_by_window: dict[str, list[SessionStat]]
+    sessions_by_window: dict[str, list[SessionStat | SessionSlice]]
     usage_by_window: dict[str, UsageReport]
 
 
@@ -234,7 +234,7 @@ def collect_provider_snapshot(
                 )
         records.append(record)
 
-    sessions_by_window: dict[str, list[SessionStat]] = {
+    sessions_by_window: dict[str, list[SessionStat | SessionSlice]] = {
         key: [] for key in window_map
     }
     by_model_by_window: dict[str, dict[str, ModelUsage]] = {

@@ -18,7 +18,7 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 
-from ..time_tracking import SessionStat
+from ..time_tracking import SessionSlice, SessionStat
 from ..token_usage import ModelUsage
 
 
@@ -48,7 +48,7 @@ class ProviderRecord:
     """One selected provider's contribution to an invocation snapshot."""
 
     agent: str
-    sessions_by_window: dict[str, list[SessionStat]]
+    sessions_by_window: dict[str, list[SessionStat | SessionSlice]]
     by_model_by_window: dict[str, dict[str, ModelUsage]]
     assistant_turns_by_window: dict[str, int]
     metrics: SnapshotMetrics = field(default_factory=SnapshotMetrics)

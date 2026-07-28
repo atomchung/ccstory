@@ -20,12 +20,18 @@ from rich.text import Text
 from .artifacts import ArtifactsReport, MARKDOWN_REPO_LIMIT
 from .categorizer import colors_for, load_settings, normalize_project_name
 from .providers import agent_label, list_providers
+from .session_identity import evidence_session_id, public_session_id
 from .session_summarizer import (
     SessionSummary,
     summary_evidence_status,
     summary_is_synthesis_eligible,
 )
-from .time_tracking import CategoryRollup, SessionStat, wall_clock_active_sec
+from .time_tracking import (
+    CategoryRollup,
+    SessionSlice,
+    SessionStat,
+    wall_clock_active_sec,
+)
 from .token_usage import (
     UsageReport,
     fmt_tokens,
@@ -211,25 +217,38 @@ def _format_date_range(since: datetime, until: datetime) -> str:
     return f"{_full(since)} – {_full(until)}"
 
 
-def _session_summary_text(s: SessionStat, summaries: dict | None = None) -> str:
+def _session_summary_text(
+    s: SessionStat | SessionSlice, summaries: dict | None = None,
+) -> str:
     """Same one-liner precedence across report formats (terminal, markdown, json, mcp).
 
     Precedence: LLM/cached summary > native_title > first_user_text > empty string.
+
+    Summaries are keyed by evidence identity, so a boundary-clipped slice only
+    reads prose that describes its own window (or an authoritative human record
+    for the physical session).
     """
-    if summaries and s.session_id in summaries:
-        summ = summaries[s.session_id]
+    evidence_id = evidence_session_id(s)
+    if summaries and evidence_id in summaries:
+        summ = summaries[evidence_id]
         if summ and getattr(summ, "summary", None):
             return summ.summary
     if getattr(s, "native_title", ""):
         return s.native_title
-    return s.first_user_text or ""
+    # A clipped slice has no full-session ``first_user_text``. Falling back to
+    # its own bounded evidence is the 0.8 rule: it must never borrow an opening
+    # turn that happened outside the requested window.
+    evidence = getattr(s, "evidence", None)
+    if evidence is not None:
+        return getattr(evidence, "first_user_text", "") or ""
+    return getattr(s, "first_user_text", "") or ""
 
 
 def _session_evidence_status(
-    s: SessionStat, summaries: dict | None = None,
+    s: SessionStat | SessionSlice, summaries: dict | None = None,
 ) -> str:
     """Public-safe status for cached, native-title, and raw-fallback display."""
-    summary = summaries.get(s.session_id) if summaries else None
+    summary = summaries.get(evidence_session_id(s)) if summaries else None
     return summary_evidence_status(summary)
 
 
@@ -294,7 +313,9 @@ def _top_rollup(rollups: list[CategoryRollup]) -> CategoryRollup | None:
     return max(rollups, key=lambda r: (r.active_min, r.category))
 
 
-def _safe_top_focus_summary(s: SessionStat, summaries: dict | None) -> str | None:
+def _safe_top_focus_summary(
+    s: SessionStat | SessionSlice, summaries: dict | None,
+) -> str | None:
     """Return a generated session summary that is safe for the recap headline.
 
     ``fallback`` summaries are extracted directly from user messages.  Showing
@@ -303,7 +324,7 @@ def _safe_top_focus_summary(s: SessionStat, summaries: dict | None) -> str | Non
     is eligible here; all other sources leave the deterministic
     category/project facts intact without inventing prose.
     """
-    summary = summaries.get(s.session_id) if summaries else None
+    summary = summaries.get(evidence_session_id(s)) if summaries else None
     if not summary_is_synthesis_eligible(summary):
         return None
     text = _terminal_plain_text(getattr(summary, "summary", ""))
@@ -324,8 +345,11 @@ def top_focus_narrative(
 
     The primary project comes from the category's project rollup; the first
     two unique eligible summaries come from its strongest sessions, ordered by
-    active time and then stable session identity.  The result never depends on
-    raw prompt text or on a narrator's cross-category interpretation.
+    active time and then stable *public* session identity.  Ordering a public
+    surface by an internal slice id would make the rendered result depend on
+    evidence hashes rather than on the sessions the user recognizes.  The
+    result never depends on raw prompt text or on a narrator's cross-category
+    interpretation.
     """
     top = _top_rollup(rollups)
     if top is None:
@@ -338,7 +362,7 @@ def top_focus_narrative(
     )
     strongest = sorted(
         top.top_sessions,
-        key=lambda s: (-s.active_sec, s.start, s.session_id),
+        key=lambda s: (-s.active_sec, s.start, public_session_id(s)),
     )
     highlights: list[str] = []
     for session in strongest:
@@ -911,6 +935,55 @@ def _usage_coverage_payload(provider_coverage: dict[str, str]) -> dict:
     }
 
 
+def _session_json(
+    s: SessionStat | SessionSlice, summaries: dict | None,
+) -> dict:
+    """One session's public JSON entry.
+
+    ``id`` is the physical session identity a user can recognize and correct
+    against; an internal window-slice id is a private cache key and must never
+    appear here. The summary lanes read the evidence identity so a clipped
+    slice reports only prose describing its own window.
+    """
+    summary = summaries.get(evidence_session_id(s)) if summaries else None
+    return {
+        "id": public_session_id(s),
+        "project": normalize_project_name(s.project) or s.project,
+        "bucket": s.category,
+        # Additive (#133): which coding agent produced this session.
+        # "claude" for every pre-multi-agent consumer's data.
+        "agent": getattr(s, "agent", "claude") or "claude",
+        "start": s.start.isoformat(),
+        "end": s.end.isoformat(),
+        "active_min": s.active_min,
+        "messages": s.msg_count,
+        "summary": _session_summary_text(s, summaries),
+        # Provenance so consumers can filter real LLM summaries
+        # ("auto") from first-message fallbacks — seeding a downstream
+        # cache with fallback text would poison it.
+        "summary_source": (
+            summary.source
+            if summary is not None
+            else ("native_title" if getattr(s, "native_title", "") else "first_message")
+        ),
+        "summary_narrator": (
+            {
+                "provider": summary.narrator_provider,
+                "model": summary.narrator_model,
+            }
+            if summary is not None
+            and summary.narrator_provider
+            and summary.narrator_model
+            else None
+        ),
+        # Additive evidence provenance only.  Fingerprints, transcript
+        # paths, and selected evidence remain private cache metadata.
+        "summary_evidence": {
+            "status": summary_evidence_status(summary),
+        },
+    }
+
+
 def build_report_json(
     label: str,
     since: datetime,
@@ -996,43 +1069,7 @@ def build_report_json(
             for r in rollups
         ],
         "sessions": [
-            {
-                "id": s.session_id,
-                "project": normalize_project_name(s.project) or s.project,
-                "bucket": s.category,
-                # Additive (#133): which coding agent produced this session.
-                # "claude" for every pre-multi-agent consumer's data.
-                "agent": getattr(s, "agent", "claude") or "claude",
-                "start": s.start.isoformat(),
-                "end": s.end.isoformat(),
-                "active_min": s.active_min,
-                "messages": s.msg_count,
-                "summary": _session_summary_text(s, summaries),
-                # Provenance so consumers can filter real LLM summaries
-                # ("auto") from first-message fallbacks — seeding a downstream
-                # cache with fallback text would poison it.
-                "summary_source": (
-                    summaries[s.session_id].source
-                    if summaries and s.session_id in summaries
-                    else ("native_title" if getattr(s, "native_title", "") else "first_message")
-                ),
-                "summary_narrator": (
-                    {
-                        "provider": summaries[s.session_id].narrator_provider,
-                        "model": summaries[s.session_id].narrator_model,
-                    }
-                    if summaries
-                    and s.session_id in summaries
-                    and summaries[s.session_id].narrator_provider
-                    and summaries[s.session_id].narrator_model
-                    else None
-                ),
-                # Additive evidence provenance only.  Fingerprints, transcript
-                # paths, and selected evidence remain private cache metadata.
-                "summary_evidence": {
-                    "status": _session_evidence_status(s, summaries),
-                },
-            }
+            _session_json(s, summaries)
             for s in sorted(sessions, key=lambda x: x.start)
         ],
         # Additive (#133). `time_share` is a relative weight of raw

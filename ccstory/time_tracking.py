@@ -15,7 +15,7 @@ import hashlib
 import json
 import logging
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePath
@@ -526,7 +526,9 @@ def _is_subagent_path(path: PurePath) -> bool:
     return "subagents" in path.parts
 
 
-def wall_clock_active_sec(stats: list[SessionStat | SessionSlice]) -> int:
+def wall_clock_active_sec(
+    stats: Sequence[SessionStat | SessionSlice],
+) -> int:
     """Return the union of every session's inferred active intervals.
 
     Each adjacent timestamp pair contributes at most ``GAP_CAP_SEC`` starting
@@ -567,7 +569,9 @@ def wall_clock_active_sec(stats: list[SessionStat | SessionSlice]) -> int:
     return int(active)
 
 
-def wall_clock_active_min(stats: list[SessionStat]) -> float:
+def wall_clock_active_min(
+    stats: Sequence[SessionStat | SessionSlice],
+) -> float:
     return round(wall_clock_active_sec(stats) / 60, 1)
 
 
@@ -592,14 +596,14 @@ class CategoryRollup:
     active_min: float
     sessions: int
     messages: int
-    top_sessions: list[SessionStat] = field(default_factory=list)
+    top_sessions: list[SessionStat | SessionSlice] = field(default_factory=list)
     # Layer-2 rollup, biggest project first. Additive (#69): layer-1 fields
     # above are untouched, so every existing consumer keeps its numbers.
     projects: list[ProjectRollup] = field(default_factory=list)
 
 
 def _rollup_projects(
-    items: list[SessionStat],
+    items: Sequence[SessionStat | SessionSlice],
     scale: float,
     aliases: dict[str, str] | None,
 ) -> list[ProjectRollup]:
@@ -608,7 +612,7 @@ def _rollup_projects(
     Uses the same wall-clock ``scale`` as the parent area so project hours sum
     back to the area total. Groups by the alias-folded project leaf.
     """
-    groups: dict[str, list[SessionStat]] = defaultdict(list)
+    groups: dict[str, list[SessionStat | SessionSlice]] = defaultdict(list)
     for s in items:
         leaf = alias_fold(normalize_project_name(s.project) or s.project, aliases)
         groups[leaf].append(s)
@@ -628,7 +632,7 @@ def _rollup_projects(
 
 
 def rollup_by_category(
-    stats: list[SessionStat],
+    stats: Sequence[SessionStat | SessionSlice],
     dedup_to_wall_clock: bool = True,
     aliases: dict[str, str] | None = None,
 ) -> list[CategoryRollup]:
@@ -643,7 +647,7 @@ def rollup_by_category(
     ``projects`` field is purely additive, so trend/compare (which omit it)
     keep byte-identical area totals.
     """
-    buckets: dict[str, list[SessionStat]] = defaultdict(list)
+    buckets: dict[str, list[SessionStat | SessionSlice]] = defaultdict(list)
     for s in stats:
         buckets[s.category].append(s)
 

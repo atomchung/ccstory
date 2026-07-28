@@ -42,6 +42,10 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 from . import recap  # noqa: E402 — module import so recap.CONFIG_PATH reads live (test monkeypatches target the attribute, not a copied value)
 from .categorizer import load_rules, load_settings, normalize_project_name  # noqa: E402
+from .session_identity import (  # noqa: E402
+    evidence_session_id,
+    public_session_id,
+)
 from .session_summarizer import (  # noqa: E402
     CacheUnavailable,
     summary_evidence_status,
@@ -183,7 +187,9 @@ def _compact_recap(result) -> dict:
         "top_focus_projection": top_focus_projection,
         "top_sessions": [
             {
-                "id": s.session_id,
+                # Public physical identity only — an internal window-slice id
+                # is a private cache key and must not reach an MCP client.
+                "id": public_session_id(s),
                 "agent": getattr(s, "agent", "claude") or "claude",
                 "project": normalize_project_name(s.project) or s.project,
                 "active_hours": round(s.active_min / 60, 2),
@@ -192,7 +198,7 @@ def _compact_recap(result) -> dict:
                 ),
                 "summary_evidence": {
                     "status": summary_evidence_status(
-                        result.summaries.get(s.session_id)
+                        result.summaries.get(evidence_session_id(s))
                         if result.summaries else None
                     ),
                 },
