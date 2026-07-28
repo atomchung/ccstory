@@ -5,9 +5,9 @@ Two regressions this file exists to prevent:
 1. Every non-Claude session summarized as "(no meaningful conversation)".
    `_extract_excerpt` only understood Claude's record shape, so Codex
    excerpts came back empty — and `summarize_session` writes that string with
-   `source="skipped"` on an empty excerpt. Because the report prefers a cached
-   summary over `first_user_text`, that placeholder then *overwrote* narrative
-   the provider had parsed correctly, and survived until `--refresh`.
+   `source="no_evidence"` on an empty excerpt. Because the report prefers a
+   cached summary over `first_user_text`, that placeholder then *overwrote*
+   narrative the provider had parsed correctly, and survived until `--refresh`.
 
 2. Per-agent hours presented as if they were durations. Agents run in
    parallel, so their raw times overlap; only the deduplicated wall clock is
@@ -121,15 +121,15 @@ class TestCodexExcerpt:
         assert normalize_project_name(project) == "demo"
 
     def test_no_placeholder_summary_is_cached_for_a_codex_session(self, tmp_home):
-        """The bug that poisoned the cache: a skipped row outranks the
+        """The bug that poisoned the cache: a no_evidence row outranks the
         provider's own first_user_text and needs --refresh to clear."""
         path = _codex_transcript(tmp_home, SID)
         result = summarize_session(SID, path, use_llm=False)
 
         assert result is not None
-        assert result.source == "fallback"
+        assert result.source == "extracted"
         assert "no meaningful conversation" not in result.summary
-        assert session_summarizer.get(SID).source != "skipped"
+        assert session_summarizer.get(SID).source != "no_evidence"
 
     def test_claude_transcript_still_parses(self, jsonl_factory):
         """The multi-format dispatch must not regress the default path."""

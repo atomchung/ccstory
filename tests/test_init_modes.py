@@ -212,33 +212,33 @@ class TestRunDeepEvidenceEligibility:
         next(s for s in sessions if s.session_id == "empty-stale").first_user_text = ""
         summaries = {
             "legacy": SessionSummary(
-                "legacy", "LEGACY CACHED PROSE", "auto",
+                "legacy", "LEGACY CACHED PROSE", "generated",
                 evidence_fingerprint=LEGACY_UNKNOWN_EVIDENCE,
                 observed_evidence_fingerprint=LEGACY_UNKNOWN_EVIDENCE,
             ),
             "stale": SessionSummary(
-                "stale", "STALE CACHED PROSE", "auto",
+                "stale", "STALE CACHED PROSE", "generated",
                 evidence_fingerprint="old",
                 observed_evidence_fingerprint="new",
             ),
             "empty-stale": SessionSummary(
-                "empty-stale", "EMPTY STALE CACHED PROSE", "auto",
+                "empty-stale", "EMPTY STALE CACHED PROSE", "generated",
                 evidence_fingerprint="old",
                 observed_evidence_fingerprint="new",
             ),
             "fallback": SessionSummary(
-                "fallback", "FALLBACK CACHED PROSE", "fallback",
+                "fallback", "FALLBACK CACHED PROSE", "extracted",
             ),
             "skipped": SessionSummary(
-                "skipped", "SKIPPED CACHED PROSE", "skipped",
+                "skipped", "SKIPPED CACHED PROSE", "no_evidence",
             ),
             "current": SessionSummary(
-                "current", "CURRENT AUTO PROSE", "auto",
+                "current", "CURRENT AUTO PROSE", "generated",
                 evidence_fingerprint="same",
                 observed_evidence_fingerprint="same",
             ),
             "record": SessionSummary(
-                "record", "HUMAN RECORD PROSE", "record",
+                "record", "HUMAN RECORD PROSE", "provided",
             ),
         }
         captured: list[tuple[str, str, str]] = []

@@ -959,7 +959,7 @@ def _session_json(
         "messages": s.msg_count,
         "summary": _session_summary_text(s, summaries),
         # Provenance so consumers can filter real LLM summaries
-        # ("auto") from first-message fallbacks — seeding a downstream
+        # ("generated") from first-message fallbacks — seeding a downstream
         # cache with fallback text would poison it.
         "summary_source": (
             summary.source

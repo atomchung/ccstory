@@ -121,7 +121,7 @@ class TestPlainFlavor:
             summaries={
                 "s1": SessionSummary(
                     session_id="s1", summary="refactored auth",
-                    source="auto", project="myapp", created_at=1.0,
+                    source="generated", project="myapp", created_at=1.0,
                 ),
             },
         )
@@ -171,12 +171,12 @@ class TestPlainFlavor:
             "raw": SessionSummary(
                 session_id="raw",
                 summary=raw_prompt.first_user_text,
-                source="fallback",
+                source="extracted",
             ),
             "safe": SessionSummary(
                 session_id="safe",
                 summary="Hardened the recap report output.",
-                source="auto",
+                source="generated",
                 evidence_fingerprint="current",
                 observed_evidence_fingerprint="current",
             ),
@@ -287,7 +287,7 @@ class TestObsidianFlavor:
             summaries={
                 "s1": SessionSummary(
                     session_id="s1", summary="refactored auth",
-                    source="auto", project="awesome-app", created_at=1.0,
+                    source="generated", project="awesome-app", created_at=1.0,
                 ),
             },
             flavor="obsidian",

@@ -1,7 +1,7 @@
 """The seam between public session identity and internal evidence identity.
 
 Before 0.8 a single ``session_id`` served four unrelated purposes at once:
-the id published in JSON/MCP, the key a human ``record`` row is stored under,
+the id published in JSON/MCP, the key a ``provided`` row is stored under,
 the key an automatic summary is cached under, and the key the content
 classifier caches under. That conflation is safe only while one physical
 session maps to exactly one set of facts.
@@ -14,7 +14,7 @@ identity while both still describe the same physical session the user knows.
 This module names the two lanes explicitly so no consumer has to guess:
 
 ``public``    the physical provider session id. Public output, authoritative
-              human ``record`` rows, and corrections live here. It is the only
+              ``provided`` rows, and corrections live here. It is the only
               identity that may reach a terminal card, Markdown report, JSON
               envelope, MCP result, or share projection.
 
@@ -33,11 +33,15 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, is_dataclass, replace
 from typing import Any
 
-# Only a human-authored row is authoritative about the physical session as a
-# whole. Everything else (``auto``, ``fallback``, ``skipped``, and rows
-# imported from ~/.claude/session_summaries.db that were not records) is a
-# statement about one specific set of bounded evidence.
-AUTHORITATIVE_SUMMARY_SOURCE = "record"
+# Only an externally ``provided`` row (session_summarizer.SOURCE_PROVIDED) is
+# authoritative about the physical session as a whole. Everything else
+# (``generated``, ``extracted``, ``no_evidence``, and any other caller-defined
+# value) is a statement about one specific set of bounded evidence.
+#
+# The value is imported locally inside resolve_session_summaries() below
+# rather than at module scope: session_summarizer indirectly imports this
+# module at load time (via ccstory.providers), so a top-level import here
+# would form an import cycle.
 
 
 @dataclass(frozen=True)
@@ -128,7 +132,7 @@ def resolve_session_summaries(
 
     Precedence, per the 0.8 contract:
 
-    1. a human ``record`` stored at the physical id wins for every slice of
+    1. a ``provided`` row stored at the physical id wins for every slice of
        that session — a correction the user wrote about their work does not
        stop being true because a report window cut the session in half;
     2. otherwise the row cached at this slice's own evidence id is used;
@@ -144,6 +148,8 @@ def resolve_session_summaries(
     keep working unchanged. Returned ``SessionSummary`` rows keep their own
     ``session_id`` field, which honestly names the row the text came from.
     """
+
+    from .session_summarizer import SOURCE_PROVIDED
 
     if fetch is None:
         from .session_summarizer import get_many as fetch
@@ -171,7 +177,7 @@ def resolve_session_summaries(
         authoritative = rows.get(identity.public_id)
         if (
             authoritative is not None
-            and getattr(authoritative, "source", "") == AUTHORITATIVE_SUMMARY_SOURCE
+            and getattr(authoritative, "source", "") == SOURCE_PROVIDED
         ):
             resolved[identity.evidence_id] = authoritative
             continue

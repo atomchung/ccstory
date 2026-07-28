@@ -179,7 +179,7 @@ def test_provider_owned_excerpt_reaches_summary_cache(
     )
 
     assert result is not None
-    assert result.source == "fallback"
+    assert result.source == "extracted"
     assert "ship the provider adapter" in result.summary
 
 

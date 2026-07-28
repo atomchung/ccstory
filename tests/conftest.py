@@ -56,11 +56,6 @@ def tmp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(session_summarizer, "DB_PATH", ccstory_dir / "cache.db")
     monkeypatch.setattr(
         session_summarizer,
-        "RECAP_DB_PATH",
-        home / ".claude" / "session_summaries.db",
-    )
-    monkeypatch.setattr(
-        session_summarizer,
         "CLAUDE_MD_PATH",
         home / ".claude" / "CLAUDE.md",
     )

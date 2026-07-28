@@ -29,7 +29,6 @@ def test_autouse_fake_home_redirects_all_home_bound_paths():
     assert token_usage.PROJECTS_DIR == projects
     assert session_summarizer.PROJECTS_DIR == projects
     assert session_summarizer.DB_PATH == cache
-    assert session_summarizer.RECAP_DB_PATH == claude_dir / "session_summaries.db"
     assert session_summarizer.CLAUDE_MD_PATH == claude_dir / "CLAUDE.md"
     assert session_summarizer.CLAUDE_SETTINGS_PATH == claude_dir / "settings.json"
     assert session_summarizer.CCSTORY_CONFIG_PATH == config

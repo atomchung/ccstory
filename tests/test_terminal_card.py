@@ -327,7 +327,7 @@ class TestCardWrapping:
         )
         summary = SessionSummary(
             session_id="wrapped-focus",
-            source="auto",
+            source="generated",
             summary="解決跨 session 測試環境不一致，建立可重現的 QA 驗證。",
             evidence_fingerprint="current",
             observed_evidence_fingerprint="current",

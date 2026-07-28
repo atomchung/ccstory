@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Renamed the `session_summaries.source` vocabulary onto one axis — how the
+  summary text came to be — rather than mixing in who wrote it or why:
+  `record` → `provided`, `auto` → `generated`, `fallback` → `extracted`,
+  `skipped` → `no_evidence`. This is an observable change to the
+  `summary_source` field in the full recap JSON envelope (`--json`,
+  `RecapResult.to_json()`) and to any consumer reading `session_summarizer`
+  cache rows directly. An existing `~/.ccstory/cache.db` is migrated
+  automatically the next time it is opened: only these four exact legacy
+  values are rewritten, and caller-defined values (e.g. `cloud:<branch>`)
+  are left untouched. `session_summarizer.upsert()` still accepts the
+  legacy values and silently maps them onto the new names, so external
+  callers that have not updated yet keep working unchanged.
+- The cache schema version moves to 6. As with every previous schema bump the
+  migration is one-way: once a cache has been opened by this version, an
+  older ccstory will refuse to read it rather than misinterpret it. Delete
+  `~/.ccstory/cache.db` to downgrade — summaries regenerate, but any
+  `provided` row supplied by an external tool would be lost with it.
+
+### Removed
+
+- Removed the automatic import that ran on every recap and pulled cached
+  summaries from `~/.claude/session_summaries.db`, a file written by one
+  specific personal tool; every other install unconditionally probed for it
+  and found nothing. Use `ccstory.session_summarizer.upsert(session_id,
+  summary, source="provided")` instead to feed ccstory an authoritative
+  externally supplied summary — see the README's "Library usage" section.
+  Rows already imported into `~/.ccstory/cache.db` are unaffected.
+
 ## [0.7.3] - 2026-07-28
 
 ### Added

@@ -86,11 +86,11 @@ class TestReportJson:
         cached = _build(summaries={
             "s1": SessionSummary(
                 session_id="s1", summary="Fixed the login flow end to end.",
-                source="auto",
+                source="generated",
             ),
         })
         assert cached["sessions"][0]["summary"] == "Fixed the login flow end to end."
-        assert cached["sessions"][0]["summary_source"] == "auto"
+        assert cached["sessions"][0]["summary_source"] == "generated"
 
         # Native title wins over first_user_text when no cached/LLM summary
         s_native = SessionStat(
