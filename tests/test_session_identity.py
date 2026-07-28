@@ -373,6 +373,31 @@ class TestHumanRecordAuthorityInBackfill:
         assert item.excerpt == "in-window opener\nin-window answer"
         assert "FULL" not in item.bounded_evidence
 
+    def test_transcript_lookup_resolves_a_slice_by_its_physical_id(
+        self, tmp_home,
+    ):
+        """The file on disk belongs to the session, not to one window of it.
+
+        Adapters resolve a missing ``path`` from ``sess.session_id``. Handing
+        them a clipped slice unchanged would look up ``slice-<hash>``, miss,
+        and report the transcript as gone.
+        """
+        from ccstory.providers import TranscriptResolver
+
+        projects = tmp_home / ".claude" / "projects" / "-Users-t-myapp"
+        projects.mkdir(parents=True, exist_ok=True)
+        transcript = projects / f"{PHYSICAL_ID}.jsonl"
+        transcript.write_text("{}\n", encoding="utf-8")
+
+        slice_ = _clipped_slice()
+        slice_.path = None  # force the id-based fallback
+
+        resolved = TranscriptResolver().path_for(slice_)
+
+        assert resolved == transcript
+        # The lookup view must not escape and become a cache key.
+        assert evidence_session_id(slice_).startswith("slice-")
+
     def test_a_contained_slice_still_reads_its_transcript(
         self, tmp_path, monkeypatch,
     ):

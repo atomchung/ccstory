@@ -30,7 +30,7 @@ threading these helpers through existing call sites is behavior-preserving.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, is_dataclass, replace
 from typing import Any
 
 # Only a human-authored row is authoritative about the physical session as a
@@ -82,6 +82,29 @@ def session_identity(session: Any) -> SessionIdentity:
         evidence_id=evidence_session_id(session),
         boundary_clipped=bool(getattr(session, "boundary_clipped", False)),
     )
+
+
+def physical_session_view(session: Any) -> Any:
+    """Present ``session`` under its physical identity for provider lookups.
+
+    Where a transcript lives on disk is a fact about the whole physical
+    session, not about one window of it. Provider adapters resolve a missing
+    ``path`` by reading ``sess.session_id``, so a clipped slice handed over
+    unchanged would look up an internal slice id, miss, and report "transcript
+    gone" instead of "transcript found".
+
+    Anything that is not a clipped slice is returned unchanged, so this costs
+    nothing on the ordinary path. The returned copy is for provider lookup
+    only and must not be cached or published: its ``session_id`` deliberately
+    no longer names its own evidence.
+    """
+
+    physical = public_session_id(session)
+    if not physical or physical == evidence_session_id(session):
+        return session
+    if is_dataclass(session) and not isinstance(session, type):
+        return replace(session, session_id=physical)
+    return session
 
 
 def public_session_ids(sessions: Iterable[Any]) -> list[str]:

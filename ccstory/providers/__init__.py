@@ -13,6 +13,7 @@ from ..provider_metadata import (
     BUNDLED_PROVIDER_DEFINITIONS,
     UsageCoverage,
 )
+from ..session_identity import physical_session_view
 from ..time_tracking import SessionSlice, SessionStat
 from ..token_usage import ModelUsage, UsageReport
 from .base import (
@@ -340,19 +341,26 @@ class TranscriptResolver:
             self._providers[name] = provider
         return provider
 
-    def path_for(self, sess: SessionStat) -> Path | None:
-        """Transcript backing ``sess``, or None when it is gone."""
+    def path_for(self, sess: SessionStat | SessionSlice) -> Path | None:
+        """Transcript backing ``sess``, or None when it is gone.
+
+        A window slice is resolved under its physical identity: the file on
+        disk belongs to the whole session, so an adapter must never be asked
+        to find an internal slice id.
+        """
         provider = self.provider_for(sess)
         if provider is None:
             return None
-        return provider.transcript_path(sess)
+        return provider.transcript_path(physical_session_view(sess))
 
-    def excerpt_for(self, sess: SessionStat) -> tuple[str, str] | None:
+    def excerpt_for(
+        self, sess: SessionStat | SessionSlice,
+    ) -> tuple[str, str] | None:
         """Provider-owned narrative excerpt for ``sess``, or None if missing."""
         provider = self.provider_for(sess)
         if provider is None:
             return None
-        path = provider.transcript_path(sess)
+        path = provider.transcript_path(physical_session_view(sess))
         if path is None:
             return None
         return provider.extract_excerpt(path)
