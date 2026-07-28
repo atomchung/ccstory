@@ -33,7 +33,11 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
-from .bootstrap import VALID_OUTPUT_FORMATS, build_top_level_parser
+from .bootstrap import (
+    VALID_OUTPUT_FORMATS,
+    build_top_level_parser,
+    parser_version_for_argv,
+)
 from .providers import agent_label, list_providers
 from .categorizer import (
     add_category_keywords,
@@ -473,6 +477,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
         return _run_mcp(raw[1:])
 
     parser = build_top_level_parser(
+        version=parser_version_for_argv(raw),
         provider_names=list_providers(),
         reports_dir=REPORTS_DIR,
         report_flavors=VALID_FLAVORS,

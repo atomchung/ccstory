@@ -17,40 +17,48 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from .version import resolve_version
+from .provider_metadata import bundled_provider_names
 
 
-BUNDLED_PROVIDER_NAMES = ("claude", "codex", "antigravity")
 VALID_OUTPUT_FORMATS = ("auto", "markdown", "card", "json")
 VALID_REPORT_FLAVORS = ("plain", "obsidian")
 
 _SUBCOMMANDS = frozenset(("trend", "init", "category", "mcp"))
-_INFORMATION_FLAGS = frozenset(("-h", "--help", "--version"))
+_VERSION_PLACEHOLDER = "<version is not needed for this argv>"
+
+
+def _resolve_version() -> str:
+    """Resolve package metadata only when argparse actually prints version."""
+    from .version import resolve_version
+
+    return resolve_version()
 
 
 def build_top_level_parser(
     *,
-    provider_names: Sequence[str] = BUNDLED_PROVIDER_NAMES,
+    version: str,
+    provider_names: Sequence[str] | None = None,
     reports_dir: Path | None = None,
     report_flavors: Sequence[str] = VALID_REPORT_FLAVORS,
-    version: str | None = None,
 ) -> argparse.ArgumentParser:
     """Return the canonical parser for the default recap command.
 
     ``provider_names`` stays injectable so in-process callers that extend the
     provider registry keep seeing their registered choices through
-    ``ccstory.cli.main``.  A fresh process uses the bundled provider names
-    without importing their implementations merely to format help.
+    ``ccstory.cli.main``.  A fresh process derives names from the canonical
+    lightweight metadata without importing provider implementations.
     """
-    provider_choices = tuple(provider_names)
+    provider_choices = (
+        bundled_provider_names()
+        if provider_names is None
+        else tuple(provider_names)
+    )
     flavor_choices = tuple(report_flavors)
     default_reports_dir = (
         reports_dir
         if reports_dir is not None
         else Path.home() / ".ccstory" / "reports"
     )
-    resolved_version = resolve_version() if version is None else version
-
     parser = argparse.ArgumentParser(
         prog="ccstory",
         description="AI coding-agent usage recap with narrative. "
@@ -177,15 +185,15 @@ def build_top_level_parser(
                              f"`all` (default), or one of "
                              f"{', '.join(provider_choices)}.")
     parser.add_argument("--version", action="version",
-                        version=f"ccstory {resolved_version}")
+                        version=f"ccstory {version}")
     parser.add_argument("-v", "--verbose", action="store_true")
     return parser
 
 
-def _is_top_level_information_request(argv: Sequence[str]) -> bool:
-    """Whether argv can be answered by the lightweight top-level parser."""
+def _top_level_information_action(argv: Sequence[str]) -> str | None:
+    """Return the first top-level help/version action argparse will see."""
     if not argv or argv[0] in _SUBCOMMANDS:
-        return False
+        return None
 
     # Once argparse sees ``--``, later values are positional even when they
     # look like flags.  Respect that delimiter before deciding to intercept.
@@ -193,7 +201,30 @@ def _is_top_level_information_request(argv: Sequence[str]) -> bool:
         option_end = argv.index("--")
     except ValueError:
         option_end = len(argv)
-    return any(arg in _INFORMATION_FLAGS for arg in argv[:option_end])
+    for arg in argv[:option_end]:
+        if arg in ("-h", "--help"):
+            return "help"
+        if arg == "--version":
+            return "version"
+        # Preserve argparse's default long-option abbreviation for the only
+        # prefixes that uniquely identify these two information actions.
+        if len(arg) >= 4 and "--help".startswith(arg):
+            return "help"
+        if len(arg) >= 6 and "--version".startswith(arg):
+            return "version"
+    return None
+
+
+def _is_top_level_information_request(argv: Sequence[str]) -> bool:
+    """Whether argv can be answered by the lightweight top-level parser."""
+    return _top_level_information_action(argv) is not None
+
+
+def parser_version_for_argv(argv: Sequence[str]) -> str:
+    """Resolve version metadata only when version is the first exit action."""
+    if _top_level_information_action(argv) == "version":
+        return _resolve_version()
+    return _VERSION_PLACEHOLDER
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -202,7 +233,9 @@ def main(argv: list[str] | None = None) -> int:
     if _is_top_level_information_request(raw):
         # argparse's help/version actions raise SystemExit with their canonical
         # output and exit code, exactly as the former eager CLI path did.
-        build_top_level_parser().parse_args(raw)
+        build_top_level_parser(
+            version=parser_version_for_argv(raw),
+        ).parse_args(raw)
         return 0
 
     from .cli import main as cli_main

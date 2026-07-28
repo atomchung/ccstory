@@ -11,9 +11,11 @@ from pathlib import Path
 
 import pytest
 
-from ccstory.bootstrap import (
-    BUNDLED_PROVIDER_NAMES,
-    _is_top_level_information_request,
+from ccstory import bootstrap
+from ccstory.bootstrap import _is_top_level_information_request
+from ccstory.provider_metadata import (
+    BUNDLED_PROVIDER_DEFINITIONS,
+    bundled_provider_names,
 )
 
 
@@ -50,6 +52,7 @@ forbidden_exact = {
     "ccstory.providers.claude",
     "ccstory.providers.codex",
     "ccstory.providers.antigravity",
+    "ccstory.providers",
 }
 blocked = sorted(
     name
@@ -58,10 +61,126 @@ blocked = sorted(
 )
 print(
     "__CCSTORY_IMPORT_AUDIT__"
-    + json.dumps({"code": code, "blocked": blocked}),
+    + json.dumps(
+        {
+            "code": code,
+            "blocked": blocked,
+            "version_loaded": "ccstory.version" in sys.modules,
+        }
+    ),
     file=sys.stderr,
 )
 raise SystemExit(code)
+"""
+
+_LAZY_PROVIDER_AUDIT = r"""
+import json
+import sys
+
+import ccstory.providers as providers
+
+implementation_modules = {
+    "ccstory.providers.claude",
+    "ccstory.providers.codex",
+    "ccstory.providers.antigravity",
+}
+before = sorted(implementation_modules.intersection(sys.modules))
+metadata = [
+    (spec.name, spec.label, spec.usage_coverage)
+    for spec in providers.provider_specs()
+]
+after_metadata = sorted(implementation_modules.intersection(sys.modules))
+provider = providers.create_providers("claude")[0]
+after_factory = sorted(implementation_modules.intersection(sys.modules))
+print(
+    json.dumps(
+        {
+            "before": before,
+            "metadata": metadata,
+            "after_metadata": after_metadata,
+            "agent": provider.agent_name,
+            "after_factory": after_factory,
+        }
+    )
+)
+"""
+
+_LAZY_COMPAT_EXPORT_AUDIT = r"""
+import json
+import sys
+
+import ccstory.providers as providers
+
+implementation_modules = {
+    "ccstory.providers.claude",
+    "ccstory.providers.codex",
+    "ccstory.providers.antigravity",
+}
+before = sorted(implementation_modules.intersection(sys.modules))
+listed = all(
+    name in dir(providers)
+    for name in (
+        "ClaudeCodeProvider",
+        "CodexProvider",
+        "AntigravityProvider",
+    )
+)
+after_dir = sorted(implementation_modules.intersection(sys.modules))
+
+from ccstory.providers import ClaudeCodeProvider
+from ccstory.providers.claude import ClaudeCodeProvider as DirectClaudeProvider
+
+after_export = sorted(implementation_modules.intersection(sys.modules))
+print(
+    json.dumps(
+        {
+            "before": before,
+            "listed": listed,
+            "after_dir": after_dir,
+            "same_class": ClaudeCodeProvider is DirectClaudeProvider,
+            "after_export": after_export,
+        }
+    )
+)
+"""
+
+_SINGLE_SOURCE_AUDIT = r"""
+import contextlib
+import io
+import json
+
+import ccstory.provider_metadata as metadata
+
+future = metadata.BundledProviderDefinition(
+    name="future-agent",
+    label="Future Agent",
+    usage_coverage="partial",
+    module=".provider_metadata",
+    class_name="BundledProviderDefinition",
+)
+metadata.BUNDLED_PROVIDER_DEFINITIONS += (future,)
+
+from ccstory.bootstrap import build_top_level_parser
+import ccstory.providers as providers
+
+stream = io.StringIO()
+with contextlib.redirect_stdout(stream):
+    try:
+        build_top_level_parser(version="test").parse_args(["--help"])
+    except SystemExit as exc:
+        code = exc.code
+
+print(
+    json.dumps(
+        {
+            "code": code,
+            "names": providers.list_providers(),
+            "label": providers.agent_label("future-agent"),
+            "coverage": providers.provider_specs("future-agent")[0].usage_coverage,
+            "help_has_choice": "future-agent" in stream.getvalue(),
+        }
+    )
+)
 """
 
 
@@ -107,8 +226,17 @@ def test_module_and_console_version_match_canonical_full_parser():
     assert module.stdout.startswith("ccstory ")
 
 
-@pytest.mark.parametrize("argv", [["--help"], ["week", "--help"], ["--version"]])
-def test_top_level_information_does_not_import_runtime_pipeline(argv):
+@pytest.mark.parametrize(
+    ("argv", "version_loaded"),
+    [
+        (["--help"], False),
+        (["week", "--help"], False),
+        (["--version"], True),
+    ],
+)
+def test_top_level_information_does_not_import_runtime_pipeline(
+    argv, version_loaded,
+):
     result = _run(["-c", _IMPORT_AUDIT, json.dumps(argv)])
 
     assert result.returncode == 0
@@ -117,7 +245,40 @@ def test_top_level_information_does_not_import_runtime_pipeline(argv):
         line for line in result.stderr.splitlines() if line.startswith(marker)
     )
     audit = json.loads(audit_line.removeprefix(marker))
-    assert audit == {"code": 0, "blocked": []}
+    assert audit == {
+        "code": 0,
+        "blocked": [],
+        "version_loaded": version_loaded,
+    }
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected_calls", "expected_prefix"),
+    [
+        (["--help"], 0, "usage: ccstory"),
+        (["week", "--help"], 0, "usage: ccstory"),
+        (["--help", "--version"], 0, "usage: ccstory"),
+        (["--version"], 1, "ccstory 9.9-test"),
+        (["--version", "--help"], 1, "ccstory 9.9-test"),
+    ],
+)
+def test_version_metadata_resolves_only_when_version_is_first_action(
+    argv, expected_calls, expected_prefix, monkeypatch, capsys,
+):
+    calls = 0
+
+    def resolve() -> str:
+        nonlocal calls
+        calls += 1
+        return "9.9-test"
+
+    monkeypatch.setattr(bootstrap, "_resolve_version", resolve)
+    with pytest.raises(SystemExit) as exc:
+        bootstrap.main(argv)
+
+    assert exc.value.code == 0
+    assert calls == expected_calls
+    assert capsys.readouterr().out.startswith(expected_prefix)
 
 
 def test_help_is_identical_in_claudecode_non_tty_environment():
@@ -168,10 +329,69 @@ def test_packaged_console_script_targets_bootstrap():
     assert project["scripts"]["ccstory"] == "ccstory.bootstrap:main"
 
 
-def test_lightweight_provider_names_match_canonical_bundled_registry():
-    # The bootstrap deliberately avoids importing the eager provider registry
-    # in a fresh process.  Keep its display-only names locked to that canonical
-    # registry so a new bundled source cannot silently disappear from --help.
-    from ccstory.providers import list_providers
+def test_bundled_metadata_matches_full_registry_order_labels_and_coverage():
+    from ccstory.provider_metadata import UsageCoverage as MetadataUsageCoverage
+    from ccstory.providers import UsageCoverage, agent_label, provider_specs
+    from ccstory.providers.base import BaseAgentProvider
 
-    assert BUNDLED_PROVIDER_NAMES == tuple(list_providers())
+    assert UsageCoverage is MetadataUsageCoverage
+    definitions = BUNDLED_PROVIDER_DEFINITIONS
+    specs = provider_specs()
+    assert bundled_provider_names() == tuple(spec.name for spec in specs)
+    assert [
+        (definition.name, definition.label, definition.usage_coverage)
+        for definition in definitions
+    ] == [
+        (spec.name, spec.label, spec.usage_coverage)
+        for spec in specs
+    ]
+    assert [agent_label(spec.name) for spec in specs] == [
+        definition.label for definition in definitions
+    ]
+    for definition, spec in zip(definitions, specs, strict=True):
+        provider = spec.factory()
+        assert isinstance(provider, BaseAgentProvider)
+        assert type(provider).__module__ == f"ccstory{definition.module}"
+        assert type(provider).__name__ == definition.class_name
+
+
+def test_provider_implementations_load_only_when_factory_is_called():
+    result = _run(["-c", _LAZY_PROVIDER_AUDIT])
+
+    assert result.returncode == 0, result.stderr
+    audit = json.loads(result.stdout)
+    assert audit["before"] == []
+    assert audit["after_metadata"] == []
+    assert audit["agent"] == "claude"
+    assert audit["after_factory"] == ["ccstory.providers.claude"]
+    assert audit["metadata"] == [
+        ["claude", "Claude Code", "complete"],
+        ["codex", "Codex", "complete"],
+        ["antigravity", "Antigravity", "complete"],
+    ]
+
+
+def test_legacy_provider_class_exports_are_lazy_and_identity_compatible():
+    result = _run(["-c", _LAZY_COMPAT_EXPORT_AUDIT])
+
+    assert result.returncode == 0, result.stderr
+    audit = json.loads(result.stdout)
+    assert audit == {
+        "before": [],
+        "listed": True,
+        "after_dir": [],
+        "same_class": True,
+        "after_export": ["ccstory.providers.claude"],
+    }
+
+
+def test_one_metadata_definition_drives_bootstrap_and_full_registry():
+    result = _run(["-c", _SINGLE_SOURCE_AUDIT])
+
+    assert result.returncode == 0, result.stderr
+    audit = json.loads(result.stdout)
+    assert audit["code"] == 0
+    assert audit["names"][-1] == "future-agent"
+    assert audit["label"] == "Future Agent"
+    assert audit["coverage"] == "partial"
+    assert audit["help_has_choice"] is True

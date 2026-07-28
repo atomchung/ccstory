@@ -7,22 +7,20 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Callable
 
+from ..provider_metadata import (
+    BUNDLED_PROVIDER_DEFINITIONS,
+    UsageCoverage,
+)
 from ..time_tracking import SessionStat
 from ..token_usage import ModelUsage, UsageReport
-from .antigravity import AntigravityProvider
 from .base import (
     BaseAgentProvider,
     ProviderRecord,
     SnapshotMetrics as SnapshotMetrics,
     _usage_windows_utc,
 )
-from .claude import ClaudeCodeProvider
-from .codex import CodexProvider
-
-
-UsageCoverage = Literal["complete", "partial", "unavailable"]
 
 
 @dataclass(frozen=True)
@@ -55,6 +53,25 @@ class ProviderSnapshot:
 
 _PROVIDER_SPECS: dict[str, AgentProviderSpec] = {}
 _PROVIDER_NAME_RE = re.compile(r"[a-z0-9]+(?:[-_][a-z0-9]+)*")
+_BUNDLED_CLASS_DEFINITIONS = {
+    definition.class_name: definition
+    for definition in BUNDLED_PROVIDER_DEFINITIONS
+}
+
+
+def __getattr__(name: str):
+    """Lazily preserve the provider classes historically exposed here."""
+    definition = _BUNDLED_CLASS_DEFINITIONS.get(name)
+    if definition is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    provider_type = definition.load_type()
+    globals()[name] = provider_type
+    return provider_type
+
+
+def __dir__() -> list[str]:
+    """Include lazy compatibility exports without importing their modules."""
+    return sorted(set(globals()) | set(_BUNDLED_CLASS_DEFINITIONS))
 
 
 def register_provider(spec: AgentProviderSpec, *, replace: bool = False) -> None:
@@ -83,30 +100,15 @@ def register_provider(spec: AgentProviderSpec, *, replace: bool = False) -> None
     _PROVIDER_SPECS[name] = spec
 
 
-register_provider(
-    AgentProviderSpec(
-        "claude",
-        "Claude Code",
-        ClaudeCodeProvider,
-        usage_coverage="complete",
+for _definition in BUNDLED_PROVIDER_DEFINITIONS:
+    register_provider(
+        AgentProviderSpec(
+            name=_definition.name,
+            label=_definition.label,
+            factory=_definition.create,
+            usage_coverage=_definition.usage_coverage,
+        )
     )
-)
-register_provider(
-    AgentProviderSpec(
-        "codex",
-        "Codex",
-        CodexProvider,
-        usage_coverage="complete",
-    )
-)
-register_provider(
-    AgentProviderSpec(
-        "antigravity",
-        "Antigravity",
-        AntigravityProvider,
-        usage_coverage="complete",
-    )
-)
 
 
 def provider_specs(agent: str = "all") -> list[AgentProviderSpec]:

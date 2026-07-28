@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
+import ccstory.providers as providers
 from ccstory import cli, recap
 from ccstory.providers import (
     AgentProviderSpec,
@@ -241,6 +242,30 @@ def test_usage_coverage_defaults_fail_closed():
     )
 
     assert spec.usage_coverage == "unavailable"
+
+
+def test_register_replace_preserves_order_and_factory_contract(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(providers, "_PROVIDER_SPECS", dict(_PROVIDER_SPECS))
+    original_order = list_providers()
+    root = tmp_path / "replacement"
+    replacement = AgentProviderSpec(
+        "antigravity",
+        "Replacement Antigravity",
+        lambda: _ThirdProvider(root),
+        usage_coverage="partial",
+    )
+
+    with pytest.raises(ValueError, match="already registered"):
+        register_provider(replacement)
+    register_provider(replacement, replace=True)
+
+    assert list_providers() == original_order
+    assert agent_label("antigravity") == "Replacement Antigravity"
+    instance = create_providers("antigravity")[0]
+    assert isinstance(instance, _ThirdProvider)
+    assert instance.root == root
 
 
 def test_inactive_partial_provider_does_not_warn(third_provider):
