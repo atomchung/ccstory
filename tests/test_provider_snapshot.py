@@ -25,7 +25,9 @@ from ccstory.providers.base import (
 )
 from ccstory.providers.claude import ClaudeCodeProvider
 from ccstory.report import build_report_json, render_report
+from ccstory.session_identity import public_session_id
 from ccstory.time_tracking import (
+    SessionSlice,
     SessionStat,
     collect_sessions_for_windows,
     rollup_by_category,
@@ -375,6 +377,26 @@ def test_claude_snapshot_single_pass_matches_legacy_facts(
     jsonl_factory,
     monkeypatch,
 ):
+    """The snapshot parses every transcript once, plus one bounded reopen per
+    boundary crossed by a boundary-spanning session.
+
+    Window purity (#188/#200) requires bounded evidence for any session that
+    crosses a report-window boundary, and that evidence can only come from
+    rereading the transcript for that specific window. The #188 brief
+    sanctions this exactly: "reuse the existing provider snapshot for
+    ordinary sessions and reopen only boundary-crossing transcripts to build
+    bounded evidence." So the single-pass guarantee below is now two
+    guarantees, both load-bearing:
+
+    * a transcript that never crosses a report-window boundary (every source
+      here except ``spanning``) is still opened exactly once — the ordinary
+      case must not regress into rereading;
+    * ``spanning-session`` crosses both the "previous" and "current"
+      boundaries, so it is opened once for the initial parse plus once more
+      per window it crosses (2), for 3 total — never more than the windows it
+      actually crosses.
+    """
+
     def timestamp(value: datetime) -> str:
         return value.isoformat().replace("+00:00", "Z")
 
@@ -484,14 +506,17 @@ def test_claude_snapshot_single_pass_matches_legacy_facts(
         short_subagent,
         nested_subagent,
     ]
-    parse_attempts = sum(
-        sum(
+    def _record_count(path: Path) -> int:
+        return sum(
             1
             for line in path.read_text(encoding="utf-8").splitlines()
             if line.strip()
         )
-        for path in sources
-    )
+
+    # Both counts are taken before the counting monkeypatches below, since
+    # reading a transcript here would otherwise register as a source open.
+    parse_attempts = sum(_record_count(path) for path in sources)
+    spanning_records = _record_count(spanning)
 
     legacy_sessions = collect_sessions_for_windows(
         WINDOWS,
@@ -560,13 +585,25 @@ def test_claude_snapshot_single_pass_matches_legacy_facts(
         str(provider.projects_dir / "*" / "subagents" / "*.jsonl"),
         str(provider.projects_dir / "*" / "*" / "subagents" / "*.jsonl"),
     ]
-    assert Counter(opened) == Counter({path: 1 for path in sources})
-    assert parse_calls == parse_attempts
-    assert record.sessions_by_window == legacy_sessions
+    # "previous" and "current" both cut this session, so both ask it for
+    # bounded evidence. Every other transcript is still opened exactly once.
+    windows_crossed = 2
+    assert Counter(opened) == Counter(
+        {
+            path: (1 + windows_crossed if path == spanning else 1)
+            for path in sources
+        }
+    )
+    assert (
+        parse_calls == parse_attempts + windows_crossed * spanning_records
+    )
     assert record.by_model_by_window == legacy_models
     assert record.assistant_turns_by_window == legacy_turns
-    assert snapshot.sessions_by_window == legacy_sessions
     assert snapshot.usage_by_window == legacy_usage
+
+    # The provider record stays raw: window purity is layered on top of it by
+    # the registry, so no adapter has to know that slicing exists.
+    assert record.sessions_by_window == legacy_sessions
     assert {
         session.session_id
         for session in record.sessions_by_window["previous"]
@@ -575,6 +612,29 @@ def test_claude_snapshot_single_pass_matches_legacy_facts(
         session.session_id
         for session in record.sessions_by_window["current"]
     } == {"spanning-session"}
+
+    # The registry snapshot covers the same physical sessions, but only the
+    # crossing one is converted — a contained session is byte-identical to
+    # what the raw overlap primitive returns.
+    for key in WINDOWS:
+        snapshot_sessions = snapshot.sessions_by_window[key]
+        assert {
+            public_session_id(session) for session in snapshot_sessions
+        } == {session.session_id for session in legacy_sessions[key]}
+        assert {
+            session.physical_session_id
+            for session in snapshot_sessions
+            if isinstance(session, SessionSlice)
+        } == {"spanning-session"}
+        assert [
+            session
+            for session in snapshot_sessions
+            if not isinstance(session, SessionSlice)
+        ] == [
+            session
+            for session in legacy_sessions[key]
+            if session.session_id != "spanning-session"
+        ]
     assert record.assistant_turns_by_window == {
         "previous": 2,
         "current": 4,
@@ -858,20 +918,50 @@ def test_build_recap_consumes_one_current_previous_snapshot(
     assert list(calls[0]) == ["current", "previous"]
 
 
-def test_snapshot_is_markdown_json_and_mcp_equivalent_to_public_helpers(
-    monkeypatch,
-):
-    session = _session(
-        "legacy",
-        "equivalent",
-        BOUNDARY - timedelta(minutes=1),
-        BOUNDARY + timedelta(minutes=1),
+def _public_projections(key: str, sessions, usage) -> tuple:
+    """Render one window through every public surface at once.
+
+    Markdown, JSON, and MCP are three independent projections of the same
+    facts, and a divergence that shows up in only one of them is a bug. Any
+    equivalence or divergence claim below is therefore made about all three.
+    """
+
+    rollups = rollup_by_category(sessions)
+    markdown = render_report(
+        key, *WINDOWS[key], sessions, rollups, usage, {}, agent="legacy",
     )
+    payload = build_report_json(
+        key, *WINDOWS[key], sessions, rollups, usage, {}, agent="legacy",
+    )
+    pytest.importorskip("mcp")
+    from ccstory.mcp_server import _compact_recap
+
+    compact = _compact_recap(
+        SimpleNamespace(
+            agent="legacy",
+            label=key,
+            since=WINDOWS[key][0],
+            until=WINDOWS[key][1],
+            sessions=sessions,
+            rollups=rollups,
+            summaries={},
+            category_narratives={},
+            overall_narrative=None,
+            usage=usage,
+            report_path=None,
+            narrative_provenance={},
+        )
+    )
+    return markdown, payload, compact
+
+
+def _legacy_snapshot_and_primitive(monkeypatch, sessions: list[SessionStat]):
+    """Drive both the raw overlap primitive and the registry snapshot."""
 
     def factory() -> _LegacyProvider:
         return _LegacyProvider(
             "legacy",
-            [session],
+            sessions,
             [(BOUNDARY, "shared-model", 5, 6, 7, 8)],
         )
 
@@ -880,80 +970,120 @@ def test_snapshot_is_markdown_json_and_mcp_equivalent_to_public_helpers(
         [AgentProviderSpec("legacy", "Legacy", factory, "complete")],
     )
 
-    old_sessions = collect_sessions_for_windows(WINDOWS, agent="legacy")
-    old_usage = collect_usage_for_windows(
+    primitive_sessions = collect_sessions_for_windows(WINDOWS, agent="legacy")
+    primitive_usage = collect_usage_for_windows(
         WINDOWS,
         agent="legacy",
         active_agents_by_window={
-            key: {item.agent for item in sessions}
-            for key, sessions in old_sessions.items()
+            key: {item.agent for item in window_sessions}
+            for key, window_sessions in primitive_sessions.items()
         },
     )
     snapshot = collect_provider_snapshot(WINDOWS, agent="legacy")
+    return primitive_sessions, primitive_usage, snapshot
+
+
+def test_snapshot_matches_public_helpers_for_contained_sessions(monkeypatch):
+    """A session fully inside its window renders identically either way.
+
+    ``collect_sessions()`` / ``collect_sessions_for_windows()`` stay raw
+    overlap primitives — that is their documented, semi-stable public
+    contract (#110), and window purity (#188) is a property of the
+    snapshot/reporting layer instead. The two therefore agree everywhere
+    except on a genuinely boundary-crossing session, and the overwhelmingly
+    common contained case must stay byte-identical on every public surface.
+    """
+
+    contained = [
+        _session(
+            "legacy",
+            "contained-previous",
+            BOUNDARY - timedelta(days=1),
+            BOUNDARY - timedelta(days=1) + timedelta(minutes=1),
+        ),
+        _session(
+            "legacy",
+            "contained-current",
+            BOUNDARY + timedelta(days=1),
+            BOUNDARY + timedelta(days=1, minutes=1),
+        ),
+    ]
+    primitive_sessions, primitive_usage, snapshot = (
+        _legacy_snapshot_and_primitive(monkeypatch, contained)
+    )
 
     for key in WINDOWS:
-        new_sessions = snapshot.sessions_by_window[key]
-        new_usage = snapshot.usage_by_window[key]
-        old_rollups = rollup_by_category(old_sessions[key])
-        new_rollups = rollup_by_category(new_sessions)
-
-        assert render_report(
-            key,
-            *WINDOWS[key],
-            old_sessions[key],
-            old_rollups,
-            old_usage[key],
-            {},
-            agent="legacy",
-        ) == render_report(
-            key,
-            *WINDOWS[key],
-            new_sessions,
-            new_rollups,
-            new_usage,
-            {},
-            agent="legacy",
+        snapshot_sessions = snapshot.sessions_by_window[key]
+        # Nothing crossed, so nothing was converted — asserted directly so
+        # this cannot pass vacuously on an empty window.
+        assert len(snapshot_sessions) == 1
+        assert not any(
+            isinstance(session, SessionSlice) for session in snapshot_sessions
         )
-        assert build_report_json(
-            key,
-            *WINDOWS[key],
-            old_sessions[key],
-            old_rollups,
-            old_usage[key],
-            {},
-            agent="legacy",
-        ) == build_report_json(
-            key,
-            *WINDOWS[key],
-            new_sessions,
-            new_rollups,
-            new_usage,
-            {},
-            agent="legacy",
+        assert snapshot_sessions == primitive_sessions[key]
+
+        assert _public_projections(
+            key, primitive_sessions[key], primitive_usage[key]
+        ) == _public_projections(
+            key, snapshot_sessions, snapshot.usage_by_window[key]
         )
 
-        mcp = pytest.importorskip("mcp")
-        assert mcp is not None
-        from ccstory.mcp_server import _compact_recap
 
-        def compact(sessions, rollups, usage):
-            return _compact_recap(
-                SimpleNamespace(
-                    agent="legacy",
-                    label=key,
-                    since=WINDOWS[key][0],
-                    until=WINDOWS[key][1],
-                    sessions=sessions,
-                    rollups=rollups,
-                    summaries={},
-                    category_narratives={},
-                    overall_narrative=None,
-                    usage=usage,
-                    report_path=None,
-                    narrative_provenance={},
-                )
-            )
+def test_snapshot_diverges_from_public_helpers_for_crossing_sessions(
+    monkeypatch,
+):
+    """A crossing session is exactly where the two must stop agreeing.
 
-        assert compact(
-            old_sessions[key], old_rollups, old_usage[key]
-        ) == compact(new_sessions, new_rollups, new_usage)
+    The primitive reports the whole session in both windows; the snapshot
+    reports each window's own bounded facts. ``_LegacyProvider`` implements
+    no bounded extraction — like any third-party adapter written before 0.8 —
+    so the honest answer here is bounded time with an explicitly-unknown
+    message count, never the full-session count republished twice.
+
+    Public identity must survive the divergence: the slice carries an
+    internal evidence id, but every public surface still shows the physical
+    session id the primitive returns.
+    """
+
+    crossing = _session(
+        "legacy",
+        "crossing",
+        BOUNDARY - timedelta(minutes=1),
+        BOUNDARY + timedelta(minutes=1),
+    )
+    primitive_sessions, primitive_usage, snapshot = (
+        _legacy_snapshot_and_primitive(monkeypatch, [crossing])
+    )
+
+    for key in WINDOWS:
+        assert [
+            session.session_id for session in primitive_sessions[key]
+        ] == ["crossing"]
+
+        snapshot_sessions = snapshot.sessions_by_window[key]
+        assert len(snapshot_sessions) == 1
+        sliced = snapshot_sessions[0]
+        assert isinstance(sliced, SessionSlice)
+        assert sliced.physical_session_id == "crossing"
+        assert sliced.session_id != "crossing"
+        assert sliced.msg_count == 0
+
+        old_markdown, old_payload, old_compact = _public_projections(
+            key, primitive_sessions[key], primitive_usage[key]
+        )
+        new_markdown, new_payload, new_compact = _public_projections(
+            key, snapshot_sessions, snapshot.usage_by_window[key]
+        )
+
+        # The divergence is visible, and it is the message count — the fact
+        # the primitive double-counts and the snapshot no longer does.
+        assert old_payload["totals"]["messages"] == crossing.msg_count
+        assert new_payload["totals"]["messages"] == 0
+        assert old_markdown != new_markdown
+        assert old_compact != new_compact
+
+        # ... but identity does not diverge. No internal id is published.
+        assert [item["id"] for item in new_payload["sessions"]] == ["crossing"]
+        assert "slice-" not in json.dumps(new_payload, default=str)
+        assert "slice-" not in new_markdown
+        assert "slice-" not in json.dumps(new_compact, default=str)

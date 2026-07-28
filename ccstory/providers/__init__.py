@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -14,12 +15,13 @@ from ..provider_metadata import (
     UsageCoverage,
 )
 from ..session_identity import physical_session_view
-from ..time_tracking import SessionSlice, SessionStat
+from ..time_tracking import SessionSlice, SessionStat, session_slice_for_window
 from ..token_usage import ModelUsage, UsageReport
 from .base import (
     BaseAgentProvider,
     ProviderRecord,
     SnapshotMetrics as SnapshotMetrics,
+    _datetime_utc,
     _usage_windows_utc,
 )
 
@@ -44,6 +46,8 @@ __all__ = [
     "provider_data_roots",
     "collect_multi_agent_sessions",
 ]
+
+LOG = logging.getLogger("ccstory.providers")
 
 
 @dataclass(frozen=True)
@@ -184,6 +188,79 @@ def _merge_model_usage(
         combined.output_tokens += incoming.output_tokens
 
 
+def _window_bounded_sessions(
+    sessions: list[SessionStat],
+    provider: BaseAgentProvider,
+    since: datetime,
+    until: datetime,
+) -> list[SessionStat | SessionSlice]:
+    """Return each session's window-pure view for one report window.
+
+    A fully contained session is already window-pure, so it keeps its
+    ``SessionStat`` representation. Converting it would gain nothing and would
+    change output for the overwhelmingly common case. Only a session crossing
+    a boundary becomes a ``SessionSlice``, which is also why a transcript is
+    reopened only for the sessions that actually need bounded evidence.
+
+    When an adapter cannot prove bounded evidence — an unreadable transcript,
+    or a third-party provider that has not implemented the hook — the slice
+    still carries bounded *time*, because clipped intervals are derivable from
+    the session's own timestamps. Its message counts stay zero, which #200
+    defined as explicitly unknown rather than a fabricated count. Keeping the
+    full ``SessionStat`` instead would republish out-of-window facts, which is
+    exactly what this release removes.
+    """
+
+    since_utc = _datetime_utc(since)
+    until_utc = _datetime_utc(until)
+    bounded: list[SessionStat | SessionSlice] = []
+    for session in sessions:
+        contained = (
+            _datetime_utc(session.start) >= since_utc
+            and _datetime_utc(session.end) < until_utc
+        )
+        if contained:
+            bounded.append(session)
+            continue
+
+        evidence = None
+        try:
+            evidence = provider.extract_window_evidence(
+                session, since_utc, until_utc,
+            )
+        except Exception:
+            # A third-party adapter is arbitrary code. A recap must degrade to
+            # bounded-time-only rather than abort, but the failure is real and
+            # must not be silent.
+            LOG.warning(
+                "provider %s failed to extract window evidence; "
+                "falling back to bounded time only",
+                provider.agent_name,
+                exc_info=True,
+            )
+            evidence = None
+
+        try:
+            window_slice = session_slice_for_window(
+                session, since_utc, until_utc, evidence=evidence,
+            )
+        except ValueError:
+            # The adapter returned evidence that does not match its own
+            # window. Trusting it would publish out-of-window facts, so drop
+            # the prose and keep only what the timestamps prove.
+            LOG.warning(
+                "provider %s returned window evidence that failed validation; "
+                "falling back to bounded time only",
+                provider.agent_name,
+                exc_info=True,
+            )
+            window_slice = session_slice_for_window(session, since_utc, until_utc)
+
+        if window_slice is not None:
+            bounded.append(window_slice)
+    return bounded
+
+
 def collect_provider_snapshot(
     windows: Mapping[str, tuple[datetime, datetime]],
     *,
@@ -242,9 +319,19 @@ def collect_provider_snapshot(
         key: {} for key in window_map
     }
     assistant_turns_by_window = {key: 0 for key in window_map}
+    providers_by_agent = {spec.name: provider for spec, provider in selected}
     for record in records:
+        provider = providers_by_agent[record.agent]
+        for key, (since, until) in window_map.items():
+            # Window purity is applied here, at the one place that holds both
+            # the live adapters and the window map. Doing it in recap.py would
+            # need providers re-instantiated and would leave trend uncovered.
+            sessions_by_window[key].extend(
+                _window_bounded_sessions(
+                    record.sessions_by_window[key], provider, since, until,
+                )
+            )
         for key in window_map:
-            sessions_by_window[key].extend(record.sessions_by_window[key])
             _merge_model_usage(
                 by_model_by_window[key],
                 record.by_model_by_window[key],
