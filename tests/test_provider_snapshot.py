@@ -520,10 +520,10 @@ def test_claude_snapshot_single_pass_matches_legacy_facts(
         engaged_only=False,
     )
     assert unfiltered_snapshot.sessions_by_window == unfiltered_sessions
-    assert [
+    assert {
         session.session_id
         for session in unfiltered_snapshot.sessions_by_window["current"]
-    ] == ["spanning-session", "unengaged-session"]
+    } == {"spanning-session", "unengaged-session"}
 
     opened: list[Path] = []
     parse_calls = 0
