@@ -37,6 +37,7 @@ from .bootstrap import (
     VALID_OUTPUT_FORMATS,
     build_top_level_parser,
     parser_version_for_argv,
+    prepare_information_streams,
 )
 from .providers import agent_label, list_providers
 from .categorizer import (
@@ -476,12 +477,14 @@ def _dispatch(argv: list[str] | None = None) -> int:
         logging.basicConfig(level=logging.WARNING)
         return _run_mcp(raw[1:])
 
+    version = parser_version_for_argv(raw)
     parser = build_top_level_parser(
-        version=parser_version_for_argv(raw),
+        version=version,
         provider_names=list_providers(),
         reports_dir=REPORTS_DIR,
         report_flavors=VALID_FLAVORS,
     )
+    prepare_information_streams(raw, parser, version=version)
     args = parser.parse_args(raw)
 
     # Resolve --format before building the console: in markdown/json mode,

@@ -227,15 +227,50 @@ def parser_version_for_argv(argv: Sequence[str]) -> str:
     return _VERSION_PLACEHOLDER
 
 
+def prepare_information_streams(
+    argv: Sequence[str],
+    parser: argparse.ArgumentParser,
+    *,
+    version: str,
+) -> None:
+    """Make top-level information output encodable on narrow Windows pipes.
+
+    A redirected Windows stream can default to a legacy encoding such as
+    cp1252, while the canonical help contains Japanese and other Unicode text.
+    Reconfigure only a stream that cannot encode the exact information action
+    text; UTF-8 terminals and every non-information command remain untouched.
+    """
+    action = _top_level_information_action(argv)
+    if action is None:
+        return
+    text = (
+        parser.format_help()
+        if action == "help"
+        else f"ccstory {version}\n"
+    )
+    for stream in (sys.stdout, sys.stderr):
+        encoding = getattr(stream, "encoding", None)
+        if not encoding:
+            # In-memory text streams accept Unicode directly.
+            continue
+        try:
+            text.encode(encoding)
+        except (LookupError, UnicodeEncodeError):
+            reconfigure = getattr(stream, "reconfigure", None)
+            if callable(reconfigure):
+                reconfigure(encoding="utf-8")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Serve top-level information cheaply; delegate every real command."""
     raw = list(argv) if argv is not None else sys.argv[1:]
     if _is_top_level_information_request(raw):
         # argparse's help/version actions raise SystemExit with their canonical
         # output and exit code, exactly as the former eager CLI path did.
-        build_top_level_parser(
-            version=parser_version_for_argv(raw),
-        ).parse_args(raw)
+        version = parser_version_for_argv(raw)
+        parser = build_top_level_parser(version=version)
+        prepare_information_streams(raw, parser, version=version)
+        parser.parse_args(raw)
         return 0
 
     from .cli import main as cli_main

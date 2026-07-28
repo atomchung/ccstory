@@ -235,7 +235,7 @@ def _run(
         [sys.executable, *command],
         cwd=REPO_ROOT,
         env=env,
-        text=True,
+        encoding="utf-8",
         capture_output=True,
         check=False,
     )
@@ -330,6 +330,25 @@ def test_help_is_identical_in_claudecode_non_tty_environment():
     assert plain.returncode == claude_code.returncode == 0
     assert plain.stdout == claude_code.stdout
     assert plain.stderr == claude_code.stderr == ""
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["-m", "ccstory", "--help"],
+        ["-c", _DIRECT_BOOTSTRAP, "--help"],
+        ["-c", _DIRECT_FULL_CLI, "--help"],
+    ],
+)
+def test_help_reconfigures_narrow_windows_pipe_to_utf8(command):
+    result = _run(
+        command,
+        extra_env={"PYTHONIOENCODING": "cp1252"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert '"Traditional Chinese", "日本語"' in result.stdout
+    assert result.stderr == ""
 
 
 def test_unknown_option_keeps_full_cli_argparse_contract():
