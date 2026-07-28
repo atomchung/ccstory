@@ -10,16 +10,18 @@ The only thing that benefits from caching is per-session LLM narratives
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from .categorizer import resolve_session_bucket
-from .time_tracking import CategoryRollup, SessionStat, rollup_by_category
+from .session_identity import evidence_session_id, public_session_id
+from .time_tracking import CategoryRollup, SessionSlice, SessionStat, rollup_by_category
 from .token_usage import UsageReport, collect_usage
 
 
 def _resolve_sessions_from_cache(
-    sessions: list[SessionStat],
+    sessions: Sequence[SessionStat | SessionSlice],
     mode: str,
     fallback: str,
 ) -> None:
@@ -29,15 +31,23 @@ def _resolve_sessions_from_cache(
     fire fresh LLM calls (would surprise the user with cost). Cache miss →
     treat as fallback so the resolver result is still complete.
 
-    Reads cache once for all sessions to avoid N SQLite queries.
+    Reads cache once for all sessions to avoid N SQLite queries. Content
+    classification is an automatic derivation, so it is keyed by evidence
+    identity: two slices of one physical session describe different work and
+    may legitimately land in different buckets.
     """
     from .session_summarizer import _classify_cache_get_many
     if not sessions:
         return
-    cache_map = _classify_cache_get_many([s.session_id for s in sessions])
+    cache_map = _classify_cache_get_many(
+        [evidence_session_id(s) for s in sessions]
+    )
     for s in sessions:
         bucket, source = resolve_session_bucket(
-            s.project, cache_map.get(s.session_id), mode=mode, fallback=fallback,
+            s.project,
+            cache_map.get(evidence_session_id(s)),
+            mode=mode,
+            fallback=fallback,
         )
         if bucket is None:
             # needs_llm path collapsed to fallback in cache-only mode
@@ -99,8 +109,9 @@ class PeriodComparison:
     previous_output_tokens: int
     current_cost_usd: float
     previous_cost_usd: float
-    # Session ids in the previous window — needed for synthesize_comparison
-    # to fetch the prior-period summaries from cache.db.
+    # Public physical session ids in the previous window. Kept as the stable,
+    # publishable identity; ``previous_summary_keys()`` is what cache.db
+    # lookups must use.
     previous_session_ids: list[str] = field(default_factory=list)
     # 1-2 sentence cross-period narrative synthesized via claude -p (#26).
     # Optional — None when synthesis is disabled or unavailable.
@@ -111,6 +122,23 @@ class PeriodComparison:
     previous_provider_coverage: dict[str, str] = field(default_factory=dict)
     current_unpriced_models: list[str] = field(default_factory=list)
     previous_unpriced_models: list[str] = field(default_factory=list)
+    # The previous window's session objects. Additive and appended last so
+    # positional construction of this semi-stable dataclass stays compatible.
+    # A bare id list cannot recover the physical identity of a window slice,
+    # so the comparison lane needs the objects to resolve summaries correctly.
+    previous_sessions: list = field(default_factory=list)
+
+    def previous_summary_keys(self) -> list[str]:
+        """cache.db keys for the previous window's summaries, in order.
+
+        Prefers the carried session objects (which know both identity lanes)
+        and falls back to ``previous_session_ids`` for callers that built this
+        comparison without them — for those, public and evidence identity are
+        the same string anyway.
+        """
+        if self.previous_sessions:
+            return [evidence_session_id(s) for s in self.previous_sessions]
+        return list(self.previous_session_ids)
 
 
 def previous_window(since: datetime, until: datetime) -> tuple[datetime, datetime]:
@@ -120,7 +148,7 @@ def previous_window(since: datetime, until: datetime) -> tuple[datetime, datetim
 
 
 def compare_to_previous(
-    current_sessions: list[SessionStat],
+    current_sessions: Sequence[SessionStat | SessionSlice],
     current_rollups: list[CategoryRollup],
     current_usage: UsageReport,
     current_label: str,
@@ -129,7 +157,7 @@ def compare_to_previous(
     mode: str = "hybrid",
     fallback: str = "coding",
     agent: str = "all",
-    previous_sessions: list[SessionStat] | None = None,
+    previous_sessions: Sequence[SessionStat | SessionSlice] | None = None,
     previous_usage: UsageReport | None = None,
 ) -> PeriodComparison | None:
     """Build a comparison record against the previous same-length window.
@@ -191,7 +219,8 @@ def compare_to_previous(
         previous_provider_coverage=prev_usage.provider_coverage,
         current_unpriced_models=current_usage.unpriced_models,
         previous_unpriced_models=prev_usage.unpriced_models,
-        previous_session_ids=[s.session_id for s in prev_sessions],
+        previous_session_ids=[public_session_id(s) for s in prev_sessions],
+        previous_sessions=list(prev_sessions),
     )
 
 

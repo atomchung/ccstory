@@ -1902,10 +1902,24 @@ def prepare_backfill_plan(
     non-LLM runs preserve their cheap cache behavior and inspect only missing
     rows.  Observation is committed before ``todo`` is computed, so a later
     failure or budget stop still leaves honest stale provenance.
+
+    Existing rows are resolved through the identity seam rather than a raw
+    ``get_many`` on session ids.  A boundary-clipped window slice caches under
+    its own evidence identity, so a plain lookup would not see the
+    authoritative human ``record`` stored against the physical session — and
+    the narrator would then regenerate over work the user has already
+    described.  Writes still target the evidence identity, so a record is
+    never overwritten.
     """
-    by_id = {s.session_id: s for s in sessions if getattr(s, "session_id", None)}
+    from .session_identity import evidence_session_id, resolve_session_summaries
+
+    by_id = {}
+    for session in sessions:
+        sid = evidence_session_id(session)
+        if sid:
+            by_id[sid] = session
     ids = list(by_id)
-    existing = get_many(ids)
+    existing = resolve_session_summaries(sessions)
     if use_llm:
         candidates = [
             sid for sid in ids
@@ -1926,15 +1940,33 @@ def prepare_backfill_plan(
     for sid in candidates:
         sess = by_id[sid]
         projects[sid] = str(getattr(sess, "project", "") or "")
-        jsonl_path = resolver.path_for(sess)
-        if jsonl_path is None:
-            unavailable.add(sid)
-            unavailable_summaries[sid] = "(jsonl not found)"
-            if sid in existing:
-                observations[sid] = EVIDENCE_UNAVAILABLE
-            continue
-        provider = resolver.provider_for(sess)
-        project, excerpt = _extract_excerpt(jsonl_path, provider=provider)
+        if getattr(sess, "boundary_clipped", False):
+            # Fail closed for a window slice: its physical transcript also
+            # contains turns from outside the window, so reading it here would
+            # produce a summary describing work the report is not reporting.
+            # Only bounded evidence a provider proved for this window is
+            # eligible, and until the 0.8-D adapters supply it, "none" is the
+            # honest answer rather than an unbounded excerpt.
+            project = projects[sid]
+            excerpt = str(
+                getattr(getattr(sess, "evidence", None), "excerpt", "") or ""
+            )
+            if not excerpt:
+                unavailable.add(sid)
+                unavailable_summaries[sid] = "(no bounded window evidence)"
+                if sid in existing:
+                    observations[sid] = EVIDENCE_UNAVAILABLE
+                continue
+        else:
+            jsonl_path = resolver.path_for(sess)
+            if jsonl_path is None:
+                unavailable.add(sid)
+                unavailable_summaries[sid] = "(jsonl not found)"
+                if sid in existing:
+                    observations[sid] = EVIDENCE_UNAVAILABLE
+                continue
+            provider = resolver.provider_for(sess)
+            project, excerpt = _extract_excerpt(jsonl_path, provider=provider)
         projects[sid] = project
         if not excerpt:
             unavailable.add(sid)
@@ -1951,7 +1983,7 @@ def prepare_backfill_plan(
 
     if use_llm:
         _record_observed_evidence(observations)
-        existing = get_many(ids)
+        existing = resolve_session_summaries(sessions)
         todo = []
         for sid in candidates:
             current = existing.get(sid)

@@ -44,6 +44,11 @@ from .providers import (
     provider_data_roots,
 )
 from .report import build_report_json, render_report
+from .session_identity import (
+    evidence_session_id,
+    evidence_session_ids,
+    resolve_session_summaries,
+)
 from .session_summarizer import (
     CCSTORY_LANG_ENV,
     NarrativeBudget,
@@ -227,11 +232,12 @@ def _synthesize_overall(
     """
     sessions_by_cat: dict[str, list[tuple[str, str]]] = {}
     for s in sessions:
-        summ = summaries.get(s.session_id)
+        evidence_id = evidence_session_id(s)
+        summ = summaries.get(evidence_id)
         if not summary_is_synthesis_eligible(summ):
             continue
         sessions_by_cat.setdefault(s.category, []).append(
-            (s.session_id, summ.summary)
+            (evidence_id, summ.summary)
         )
     if not sessions_by_cat:
         return None
@@ -265,11 +271,12 @@ def _synthesize_categories(
     """
     sessions_by_cat: dict[str, list[tuple[str, str]]] = {}
     for s in sessions:
-        summ = summaries.get(s.session_id)
+        evidence_id = evidence_session_id(s)
+        summ = summaries.get(evidence_id)
         if not summary_is_synthesis_eligible(summ):
             continue
         sessions_by_cat.setdefault(s.category, []).append(
-            (s.session_id, summ.summary)
+            (evidence_id, summ.summary)
         )
     cats = [r.category for r in rollups if r.category in sessions_by_cat]
     out: dict[str, str] = {}
@@ -320,7 +327,7 @@ def _local_category_fallback(
 
     details: list[str] = []
     for session in rollup.top_sessions:
-        summary = summaries.get(session.session_id)
+        summary = summaries.get(evidence_session_id(session))
         # Local fallback rows are derived from the raw first/last user turns.
         # They remain useful in the detailed session list, but must not be
         # promoted to a category-level recap where they could expose commands,
@@ -391,11 +398,14 @@ def _resolve_all_sessions(
         return
 
     # Pass 1: bulk fetch cache, then resolver per session.
-    cache_map = _classify_cache_get_many([s.session_id for s in sessions])
+    cache_map = _classify_cache_get_many(evidence_session_ids(sessions))
     needs_llm: list = []
     for s in sessions:
         bucket, source = resolve_session_bucket(
-            s.project, cache_map.get(s.session_id), mode=mode, fallback=fallback,
+            s.project,
+            cache_map.get(evidence_session_id(s)),
+            mode=mode,
+            fallback=fallback,
         )
         if source == "needs_llm":
             needs_llm.append(s)
@@ -407,11 +417,12 @@ def _resolve_all_sessions(
     if needs_llm and mode != "folder":
         items: list[tuple[str, str, str]] = []
         for s in needs_llm:
-            summ = summaries.get(s.session_id)
+            evidence_id = evidence_session_id(s)
+            summ = summaries.get(evidence_id)
             if not summary_is_synthesis_eligible(summ) or not summ.summary:
                 continue
             leaf = normalize_project_name(s.project) or s.project
-            items.append((s.session_id, leaf, summ.summary))
+            items.append((evidence_id, leaf, summ.summary))
 
         mapping: dict[str, str] = {}
         if items:
@@ -435,7 +446,7 @@ def _resolve_all_sessions(
                 )
 
         for s in needs_llm:
-            new_bucket = mapping.get(s.session_id)
+            new_bucket = mapping.get(evidence_session_id(s))
             if new_bucket:
                 s.category = new_bucket
                 s.category_source = "llm_fresh"
@@ -668,7 +679,7 @@ def build_recap(
             f"global wipe[/dim]\n"
         )
     elif refresh:
-        sids = [s.session_id for s in sessions]
+        sids = evidence_session_ids(sessions)
         c_n = invalidate_content_buckets(sids)
         a_n = invalidate_period_aggregates(label)
         m_n = invalidate_comparison_narratives()
@@ -714,7 +725,7 @@ def build_recap(
         if regen and not (refresh or refresh_all):
             invalidate_period_aggregates(label)
             invalidate_comparison_narratives()
-        summaries = get_many([s.session_id for s in sessions])
+        summaries = resolve_session_summaries(sessions)
 
     # Resolver pass — single point where every session's bucket gets assigned.
     # Reads LLM cache once, batches uncached sessions into one claude -p call
@@ -787,7 +798,14 @@ def build_recap(
                 previous_usage=previous_usage,
             )
         if comparison and compare_narrative and summaries:
-            prev_summaries = get_many(comparison.previous_session_ids)
+            # Resolve through the identity seam so the previous window keeps
+            # any authoritative human record while never inheriting an
+            # automatic summary written from different bounded evidence.
+            prev_summaries = (
+                resolve_session_summaries(comparison.previous_sessions)
+                if comparison.previous_sessions
+                else get_many(comparison.previous_session_ids)
+            )
             with console.status(
                 "[dim]Synthesizing week-over-week narrative (configured narrator)…[/dim]"
             ):
@@ -795,10 +813,10 @@ def build_recap(
                     current_key=label,
                     previous_key=comparison.previous_label,
                     current_summaries=_eligible_summary_items(
-                        [s.session_id for s in sessions], summaries,
+                        evidence_session_ids(sessions), summaries,
                     ),
                     previous_summaries=_eligible_summary_items(
-                        comparison.previous_session_ids, prev_summaries,
+                        comparison.previous_summary_keys(), prev_summaries,
                     ),
                     deltas=[
                         (d.category, d.current_min, d.previous_min)
