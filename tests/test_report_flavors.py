@@ -177,6 +177,8 @@ class TestPlainFlavor:
                 session_id="safe",
                 summary="Hardened the recap report output.",
                 source="auto",
+                evidence_fingerprint="current",
+                observed_evidence_fingerprint="current",
             ),
         }
         kwargs = dict(

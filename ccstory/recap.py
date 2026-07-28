@@ -48,7 +48,6 @@ from .session_summarizer import (
     CCSTORY_LANG_ENV,
     NarrativeBudget,
     _classify_cache_get_many,
-    _needs_llm,
     backfill_for_sessions,
     llm_available,
     classify_sessions_by_content,
@@ -60,6 +59,8 @@ from .session_summarizer import (
     invalidate_content_buckets,
     invalidate_period_aggregates,
     language_directive,
+    prepare_backfill_plan,
+    summary_is_synthesis_eligible,
     synthesize_category_for_period,
     synthesize_comparison,
     synthesize_overall_for_period,
@@ -83,6 +84,17 @@ class RecapUnavailable(RuntimeError):
     a refresh script running on a quiet Monday morning), so it must be
     catchable rather than process-fatal.
     """
+
+
+def _eligible_summary_items(
+    session_ids: list[str], summaries: dict,
+) -> list[tuple[str, str]]:
+    """Return only prose safe to feed another synthesis lane."""
+    return [
+        (session_id, summaries[session_id].summary)
+        for session_id in session_ids
+        if summary_is_synthesis_eligible(summaries.get(session_id))
+    ]
 
 
 def apply_lang_override(lang: str | None) -> None:
@@ -216,7 +228,7 @@ def _synthesize_overall(
     sessions_by_cat: dict[str, list[tuple[str, str]]] = {}
     for s in sessions:
         summ = summaries.get(s.session_id)
-        if not summ or summ.source not in ("auto", "record"):
+        if not summary_is_synthesis_eligible(summ):
             continue
         sessions_by_cat.setdefault(s.category, []).append(
             (s.session_id, summ.summary)
@@ -254,7 +266,7 @@ def _synthesize_categories(
     sessions_by_cat: dict[str, list[tuple[str, str]]] = {}
     for s in sessions:
         summ = summaries.get(s.session_id)
-        if not summ or summ.source not in ("auto", "record"):
+        if not summary_is_synthesis_eligible(summ):
             continue
         sessions_by_cat.setdefault(s.category, []).append(
             (s.session_id, summ.summary)
@@ -312,11 +324,12 @@ def _local_category_fallback(
         # Local fallback rows are derived from the raw first/last user turns.
         # They remain useful in the detailed session list, but must not be
         # promoted to a category-level recap where they could expose commands,
-        # paths, or an unbounded prompt.  Only generated summaries are prose
-        # suitable for this higher-level surface.
+        # paths, or an unbounded prompt.  Only current generated summaries or
+        # authoritative human records are suitable for this higher-level
+        # surface.
         text = (
             summary.summary.strip()
-            if summary and summary.source == "auto" and summary.summary
+            if summary_is_synthesis_eligible(summary) and summary.summary
             else ""
         )
         if text:
@@ -395,7 +408,7 @@ def _resolve_all_sessions(
         items: list[tuple[str, str, str]] = []
         for s in needs_llm:
             summ = summaries.get(s.session_id)
-            if not summ or not summ.summary:
+            if not summary_is_synthesis_eligible(summ) or not summ.summary:
                 continue
             leaf = normalize_project_name(s.project) or s.project
             items.append((s.session_id, leaf, summ.summary))
@@ -458,13 +471,12 @@ def _backfill_summaries(
     user sees the shared time budget, split into new vs regenerated, before
     the adaptive batch sequence starts.
     """
-    by_id = {s.session_id: s for s in sessions if getattr(s, "session_id", None)}
-    ids = list(by_id.keys())
-    existing = get_many(ids)
-    todo = [
-        sid for sid in ids
-        if (_needs_llm(existing.get(sid), force) if use_llm else existing.get(sid) is None)
-    ]
+    plan = prepare_backfill_plan(
+        sessions, use_llm=use_llm, force=force,
+    )
+    ids = plan.ids
+    existing = plan.existing
+    todo = plan.todo
     if not todo:
         return {
             "summarized": 0, "fallback": 0, "skipped": 0,
@@ -510,6 +522,7 @@ def _backfill_summaries(
             sessions, on_progress=_progress, use_llm=use_llm, force=force,
             budget=budget,
             on_chunk_complete=_chunk_progress if use_llm else None,
+            prepared_plan=plan,
         )
 
 
@@ -781,16 +794,12 @@ def build_recap(
                 comparison.narrative = synthesize_comparison(
                     current_key=label,
                     previous_key=comparison.previous_label,
-                    current_summaries=[
-                        (s.session_id, summaries[s.session_id].summary)
-                        for s in sessions
-                        if s.session_id in summaries
-                    ],
-                    previous_summaries=[
-                        (sid, prev_summaries[sid].summary)
-                        for sid in comparison.previous_session_ids
-                        if sid in prev_summaries
-                    ],
+                    current_summaries=_eligible_summary_items(
+                        [s.session_id for s in sessions], summaries,
+                    ),
+                    previous_summaries=_eligible_summary_items(
+                        comparison.previous_session_ids, prev_summaries,
+                    ),
                     deltas=[
                         (d.category, d.current_min, d.previous_min)
                         for d in comparison.deltas

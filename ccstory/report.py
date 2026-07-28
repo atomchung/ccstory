@@ -20,7 +20,11 @@ from rich.text import Text
 from .artifacts import ArtifactsReport, MARKDOWN_REPO_LIMIT
 from .categorizer import colors_for, load_settings, normalize_project_name
 from .providers import agent_label, list_providers
-from .session_summarizer import SessionSummary
+from .session_summarizer import (
+    SessionSummary,
+    summary_evidence_status,
+    summary_is_synthesis_eligible,
+)
 from .time_tracking import CategoryRollup, SessionStat, wall_clock_active_sec
 from .token_usage import (
     UsageReport,
@@ -221,6 +225,14 @@ def _session_summary_text(s: SessionStat, summaries: dict | None = None) -> str:
     return s.first_user_text or ""
 
 
+def _session_evidence_status(
+    s: SessionStat, summaries: dict | None = None,
+) -> str:
+    """Public-safe status for cached, native-title, and raw-fallback display."""
+    summary = summaries.get(s.session_id) if summaries else None
+    return summary_evidence_status(summary)
+
+
 _TERMINAL_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
 _TERMINAL_OPEN_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*$")
 
@@ -287,11 +299,12 @@ def _safe_top_focus_summary(s: SessionStat, summaries: dict | None) -> str | Non
 
     ``fallback`` summaries are extracted directly from user messages.  Showing
     them in Top focus leaked prompts such as slash commands and absolute local
-    paths.  Only an ``auto`` summary is eligible here; all other sources leave
-    the deterministic category/project facts intact without inventing prose.
+    paths.  Only a current ``auto`` summary or authoritative human ``record``
+    is eligible here; all other sources leave the deterministic
+    category/project facts intact without inventing prose.
     """
     summary = summaries.get(s.session_id) if summaries else None
-    if not summary or getattr(summary, "source", None) != "auto":
+    if not summary_is_synthesis_eligible(summary):
         return None
     text = _terminal_plain_text(getattr(summary, "summary", ""))
     text = " ".join(text.split()).lstrip(">•- ").strip()
@@ -796,6 +809,12 @@ def render_report(
             lines.append("")
         for s in r.top_sessions:
             text = _session_summary_text(s, summaries)[:100]
+            evidence_status = _session_evidence_status(s, summaries)
+            evidence_marker = (
+                f" · _summary evidence: {evidence_status}_"
+                if evidence_status in ("stale", "legacy", "unavailable")
+                else ""
+            )
             time_str = s.start.strftime("%Y-%m-%d %H:%M")
             mins = int(s.active_sec // 60)
             if flavor == "obsidian":
@@ -803,11 +822,12 @@ def render_report(
                 leaf = _obsidian_wikilink_target(leaf)
                 lines.append(
                     f"- **{time_str}** · {mins}m · {s.msg_count} msg · "
-                    f"[[{leaf}]] — {text}"
+                    f"[[{leaf}]] — {text}{evidence_marker}"
                 )
             else:
                 lines.append(
-                    f"- **{time_str}** · {mins}m · {s.msg_count} msg — {text}"
+                    f"- **{time_str}** · {mins}m · {s.msg_count} msg — "
+                    f"{text}{evidence_marker}"
                 )
         lines.append("")
 
@@ -1007,6 +1027,11 @@ def build_report_json(
                     and summaries[s.session_id].narrator_model
                     else None
                 ),
+                # Additive evidence provenance only.  Fingerprints, transcript
+                # paths, and selected evidence remain private cache metadata.
+                "summary_evidence": {
+                    "status": _session_evidence_status(s, summaries),
+                },
             }
             for s in sorted(sessions, key=lambda x: x.start)
         ],

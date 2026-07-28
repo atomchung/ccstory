@@ -199,6 +199,8 @@ def test_session_provenance_and_backend_config_change_invalidate_auto_cache():
         "s1", "generated", "auto", prompt_version=ss.PROMPT_VERSION,
         narrator_provider="codex", narrator_model="gpt-5.6-terra",
         narrator_fingerprint=fingerprint,
+        evidence_fingerprint="current-evidence",
+        observed_evidence_fingerprint="current-evidence",
     )
     stored = ss.get("s1")
     assert stored is not None

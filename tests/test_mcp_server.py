@@ -105,8 +105,12 @@ class TestGetRecap:
         assert {"name", "active_hours", "narrative"} <= out["categories"][0].keys()
         assert len(out["top_sessions"]) == 1
         top = out["top_sessions"][0]
-        assert {"id", "agent", "project", "active_hours", "summary"} <= top.keys()
+        assert {
+            "id", "agent", "project", "active_hours", "summary",
+            "summary_evidence",
+        } <= top.keys()
         assert top["summary"]  # instant fallback summary, never empty here
+        assert top["summary_evidence"] == {"status": "not_applicable"}
         assert out["agent"] == "all"
         assert out["agents"][0]["agent"] == "claude"
         assert out["cost_usd"] >= 0

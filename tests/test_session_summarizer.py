@@ -239,10 +239,16 @@ class TestRetroactiveRefresh:
         self, tmp_home: Path, jsonl_factory, monkeypatch
     ):
         path = self._jsonl(jsonl_factory)
+        project, excerpt = _extract_excerpt(path)
+        evidence = ss._prepare_summary_evidence(
+            "sess-r", project, excerpt, lane=ss._SUMMARY_EVIDENCE_SINGLE_LANE,
+        )
         upsert("sess-r", "good summary", "auto", project="myapp",
                prompt_version=ss.PROMPT_VERSION,
                narrator_provider="claude", narrator_model="sonnet",
-               narrator_fingerprint=ss.narrative_config_fingerprint())
+               narrator_fingerprint=ss.narrative_config_fingerprint(),
+               evidence_fingerprint=evidence.evidence_fingerprint,
+               observed_evidence_fingerprint=evidence.evidence_fingerprint)
 
         def _boom(*a, **k):
             raise AssertionError("claude -p must not run for an up-to-date auto row")
@@ -288,18 +294,19 @@ class TestRetroactiveRefresh:
         assert result.source == "auto"
         assert result.summary == "good summary"
 
-    def test_skipped_not_retried(
+    def test_skipped_is_retried_when_evidence_later_becomes_valid(
         self, tmp_home: Path, jsonl_factory, monkeypatch
     ):
         path = self._jsonl(jsonl_factory)
         upsert("sess-r", "(no meaningful conversation)", "skipped", project="myapp")
-
-        def _boom(*a, **k):
-            raise AssertionError("claude -p must not run for a skipped row")
-
-        monkeypatch.setattr(ss, "summarize_via_claude_p", _boom)
+        monkeypatch.setattr(
+            ss, "summarize_via_claude_p",
+            lambda *_a, **_k: "Recovered a now-valid session",
+        )
         result = summarize_session("sess-r", path, use_llm=True)
-        assert result.source == "skipped"
+        assert result.source == "auto"
+        assert result.summary == "Recovered a now-valid session"
+        assert ss.summary_evidence_status(result) == "current"
 
     def test_use_llm_false_never_upgrades(
         self, tmp_home: Path, jsonl_factory, monkeypatch
@@ -915,10 +922,14 @@ class TestCacheSchemaMigrations:
                 "session_content_buckets",
             ):
                 assert "input_fingerprint" in ss._table_columns(conn, table)
+            assert {
+                "evidence_fingerprint",
+                "observed_evidence_fingerprint",
+            } <= ss._table_columns(conn, "session_summaries")
         finally:
             conn.close()
 
-    def test_legacy_rows_stamped_current(self, tmp_home: Path):
+    def test_legacy_rows_keep_prompt_but_get_unknown_evidence(self, tmp_home: Path):
         # Simulate a pre-feature DB: session_summaries without prompt_version.
         ss.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         raw = sqlite3.connect(str(ss.DB_PATH))
@@ -933,12 +944,15 @@ class TestCacheSchemaMigrations:
         )
         raw.commit()
         raw.close()
-        # First ccstory connect stamps the old prompt version but leaves
-        # narrator provenance blank. That makes the old row stale rather than
-        # presenting a legacy Claude result as a configured explicit model.
+        # First ccstory connect preserves the old prompt adoption and leaves
+        # narrator provenance blank, while evidence stays explicitly unknown.
+        # It remains selected for lazy refresh rather than causing a global
+        # transcript scan during migration.
         row = get("legacy")
         assert row is not None
         assert row.prompt_version == ss.PROMPT_VERSION
+        assert row.evidence_fingerprint == ss.LEGACY_UNKNOWN_EVIDENCE
+        assert ss.summary_evidence_status(row) == "legacy"
         assert ss._needs_llm(row) is True
         conn = sqlite3.connect(str(ss.DB_PATH))
         try:
