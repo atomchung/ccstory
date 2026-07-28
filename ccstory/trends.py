@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from .categorizer import resolve_session_bucket
+from .providers import collect_provider_snapshot
 from .session_identity import evidence_session_id, public_session_id
 from .time_tracking import CategoryRollup, SessionSlice, SessionStat, rollup_by_category
 from .token_usage import UsageReport, collect_usage
@@ -294,17 +295,26 @@ def collect_trend(
 ) -> list[PeriodPoint]:
     """Compute per-period rollups for trend analysis.
 
-    Efficient: scans jsonl ONCE over the full range, then buckets by period
-    in-memory rather than re-scanning per window. Resolves every session's
-    bucket through the same priority chain as ``ccstory week`` (cache-only;
-    no fresh LLM in trend mode), then groups by window.
+    Window-pure (#188): every period is handed to one
+    ``collect_provider_snapshot()`` call as a single window map, exactly like
+    a recap's current/previous pair. A session crossing a period boundary
+    therefore contributes its own bounded ``SessionSlice`` facts to each
+    period it touches, instead of being assigned wholesale to whichever
+    period holds its physical start time. A session fully inside one period
+    keeps its plain ``SessionStat`` and its output is unchanged — the
+    snapshot only converts a session that actually crosses a boundary.
+
+    Resolves every session's bucket through the same priority chain as
+    ``ccstory week`` (cache-only; no fresh LLM in trend mode), then groups by
+    window. Per-period token/cost figures come from
+    ``ProviderSnapshot.usage_by_window`` rather than a separate
+    ``collect_usage()`` call per period, so the whole range's transcripts are
+    scanned once instead of once per period.
 
     ``agent`` mirrors the recap's ``--agent`` filter so a trend and a week over
     the same range describe the same population — without it, a Claude-only
     week would sit next to an every-agent trend line.
     """
-    from .time_tracking import collect_sessions
-
     now = now or datetime.now().astimezone()  # tz-aware local
     if now.tzinfo is None:
         now = now.astimezone()  # naive caller input → local-tz aware
@@ -315,25 +325,27 @@ def collect_trend(
     else:
         raise ValueError(f"unsupported trend period: {period}")
 
-    earliest = min(s for _, s, _ in windows)
-    all_sessions = collect_sessions(earliest, now, agent=agent)
-    # Bulk-resolve every session once via cache lookup. Avoids N×M behaviour
-    # of resolving per-window — single SQL query covers all 8 windows.
+    window_map = {label: (start, end) for label, start, end in windows}
+    snapshot = collect_provider_snapshot(window_map, agent=agent)
+
+    # Bulk-resolve every period's sessions in one cache lookup. A
+    # boundary-crossing session now appears as two distinct slice objects —
+    # one per period it touches, each under its own evidence id
+    # (session_identity.py) — so flattening across periods first keeps this
+    # the single SQL query the original single-pass design relied on,
+    # rather than one per window.
+    all_sessions = [
+        session
+        for sessions in snapshot.sessions_by_window.values()
+        for session in sessions
+    ]
     _resolve_sessions_from_cache(all_sessions, mode=mode, fallback=fallback)
 
     points: list[PeriodPoint] = []
     for label, start, end in windows:
-        in_window = [
-            s for s in all_sessions
-            if s.start >= start and s.start < end
-        ]
+        in_window = snapshot.sessions_by_window[label]
         rollups = rollup_by_category(in_window)
-        usage = collect_usage(
-            start,
-            end,
-            agent=agent,
-            active_agents={session.agent for session in in_window},
-        )
+        usage = snapshot.usage_by_window[label]
         total_h = sum(r.active_min for r in rollups) / 60
         points.append(PeriodPoint(
             label=label,

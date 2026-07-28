@@ -348,10 +348,33 @@ class TestAgentFilterReachesEveryView:
         monkeypatch.setattr(tt, "collect_sessions", spy)
         return seen
 
+    def _record_snapshot_agent(self, monkeypatch) -> list[str]:
+        """Spy on the window-pure snapshot call `collect_trend` now drives.
+
+        `collect_trend` moved from a direct `time_tracking.collect_sessions`
+        call to `collect_provider_snapshot` (#188 trend window-assignment
+        slice), so the `--agent` filter now reaches every provider through
+        the snapshot's own provider selection rather than a shared kwarg on
+        a module-level function. `collect_trend` binds the name at import
+        time (`from .providers import collect_provider_snapshot`), so the
+        spy must patch it on `ccstory.trends`, not on `ccstory.providers`.
+        """
+        seen: list[str] = []
+        import ccstory.trends as trends_module
+
+        real = trends_module.collect_provider_snapshot
+
+        def spy(windows, *, engaged_only=True, agent="all"):
+            seen.append(agent)
+            return real(windows, engaged_only=engaged_only, agent=agent)
+
+        monkeypatch.setattr(trends_module, "collect_provider_snapshot", spy)
+        return seen
+
     def test_trend_forwards_the_filter(self, monkeypatch, tmp_home):
         from ccstory.trends import collect_trend
 
-        seen = self._record_agent(monkeypatch, "trends")
+        seen = self._record_snapshot_agent(monkeypatch)
         collect_trend(period="week", count=2, agent="codex")
         assert seen and set(seen) == {"codex"}
 

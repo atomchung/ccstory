@@ -38,6 +38,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   older ccstory will refuse to read it rather than misinterpret it. Delete
   `~/.ccstory/cache.db` to downgrade — summaries regenerate, but any
   `provided` row supplied by an external tool would be lost with it.
+- `ccstory trend` is now window-pure too. A session that crosses a period
+  boundary previously counted its **whole** self toward whichever period held
+  its start time and nothing toward the other: a Sunday-night session that
+  ran past midnight into Monday added all of its active time to the earlier
+  week's bar and none to the later one. Each period's sparkline/bar now shows
+  only the active time and messages that actually happened inside it, so a
+  boundary-crossing session's two halves show up in both periods instead of
+  being lumped into one. A session fully inside one period is unaffected.
+  Token and cost figures for each period are unchanged — trend now reads them
+  from one shared scan of the whole range instead of re-scanning per period,
+  but the numbers themselves come from the same exact per-record usage events
+  as before.
 
 ### Removed
 
