@@ -144,6 +144,45 @@ print(
 )
 """
 
+_STAR_IMPORT_AUDIT = r"""
+import json
+import sys
+
+import ccstory.providers as providers
+
+implementation_modules = {
+    "ccstory.providers.claude",
+    "ccstory.providers.codex",
+    "ccstory.providers.antigravity",
+}
+before = sorted(implementation_modules.intersection(sys.modules))
+
+from ccstory.providers import *
+from ccstory.providers.antigravity import (
+    AntigravityProvider as DirectAntigravityProvider,
+)
+from ccstory.providers.claude import ClaudeCodeProvider as DirectClaudeProvider
+from ccstory.providers.codex import CodexProvider as DirectCodexProvider
+
+after = sorted(implementation_modules.intersection(sys.modules))
+missing = sorted(name for name in providers.__all__ if name not in globals())
+print(
+    json.dumps(
+        {
+            "before": before,
+            "after": after,
+            "missing": missing,
+            "claude_identity": ClaudeCodeProvider is DirectClaudeProvider,
+            "codex_identity": CodexProvider is DirectCodexProvider,
+            "antigravity_identity": (
+                AntigravityProvider is DirectAntigravityProvider
+            ),
+            "all": providers.__all__,
+        }
+    )
+)
+"""
+
 _SINGLE_SOURCE_AUDIT = r"""
 import contextlib
 import io
@@ -383,6 +422,44 @@ def test_legacy_provider_class_exports_are_lazy_and_identity_compatible():
         "same_class": True,
         "after_export": ["ccstory.providers.claude"],
     }
+
+
+def test_star_import_preserves_provider_api_and_explicitly_loads_classes():
+    result = _run(["-c", _STAR_IMPORT_AUDIT])
+
+    assert result.returncode == 0, result.stderr
+    audit = json.loads(result.stdout)
+    assert audit["before"] == []
+    assert audit["after"] == [
+        "ccstory.providers.antigravity",
+        "ccstory.providers.claude",
+        "ccstory.providers.codex",
+    ]
+    assert audit["missing"] == []
+    assert audit["claude_identity"] is True
+    assert audit["codex_identity"] is True
+    assert audit["antigravity_identity"] is True
+    assert audit["all"] == [
+        "AgentProviderSpec",
+        "ProviderSnapshot",
+        "BaseAgentProvider",
+        "ProviderRecord",
+        "SnapshotMetrics",
+        "UsageCoverage",
+        "ClaudeCodeProvider",
+        "CodexProvider",
+        "AntigravityProvider",
+        "TranscriptResolver",
+        "register_provider",
+        "provider_specs",
+        "create_providers",
+        "collect_provider_snapshot",
+        "get_provider",
+        "list_providers",
+        "agent_label",
+        "provider_data_roots",
+        "collect_multi_agent_sessions",
+    ]
 
 
 def test_one_metadata_definition_drives_bootstrap_and_full_registry():
