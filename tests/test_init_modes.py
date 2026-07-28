@@ -21,6 +21,10 @@ from ccstory.init_categories import (
     run_skip_mode,
     sample_sessions_for_deep,
 )
+from ccstory.session_summarizer import (
+    LEGACY_UNKNOWN_EVIDENCE,
+    SessionSummary,
+)
 from ccstory.time_tracking import SessionStat
 
 
@@ -192,6 +196,81 @@ class TestRunDeepClampsBadInputs:
                 console=Console(file=StringIO()),
             )
         assert rc == 0
+
+
+class TestRunDeepEvidenceEligibility:
+    def test_only_current_auto_or_record_summary_feeds_classification(
+        self, tmp_home: Path,
+    ):
+        sessions = [
+            _mk_session(source, f"-Users-x-{source}", 10, 100)
+            for source in (
+                "legacy", "stale", "fallback", "skipped",
+                "missing", "empty-stale", "current", "record",
+            )
+        ]
+        next(s for s in sessions if s.session_id == "empty-stale").first_user_text = ""
+        summaries = {
+            "legacy": SessionSummary(
+                "legacy", "LEGACY CACHED PROSE", "auto",
+                evidence_fingerprint=LEGACY_UNKNOWN_EVIDENCE,
+                observed_evidence_fingerprint=LEGACY_UNKNOWN_EVIDENCE,
+            ),
+            "stale": SessionSummary(
+                "stale", "STALE CACHED PROSE", "auto",
+                evidence_fingerprint="old",
+                observed_evidence_fingerprint="new",
+            ),
+            "empty-stale": SessionSummary(
+                "empty-stale", "EMPTY STALE CACHED PROSE", "auto",
+                evidence_fingerprint="old",
+                observed_evidence_fingerprint="new",
+            ),
+            "fallback": SessionSummary(
+                "fallback", "FALLBACK CACHED PROSE", "fallback",
+            ),
+            "skipped": SessionSummary(
+                "skipped", "SKIPPED CACHED PROSE", "skipped",
+            ),
+            "current": SessionSummary(
+                "current", "CURRENT AUTO PROSE", "auto",
+                evidence_fingerprint="same",
+                observed_evidence_fingerprint="same",
+            ),
+            "record": SessionSummary(
+                "record", "HUMAN RECORD PROSE", "record",
+            ),
+        }
+        captured: list[tuple[str, str, str]] = []
+
+        def classify(items, **_kwargs):
+            captured.extend(items)
+            return {sid: "coding" for sid, _project, _summary in items}
+
+        with (
+            patch.object(init_categories, "llm_available", return_value=True),
+            patch.object(
+                init_categories, "collect_sessions", return_value=sessions,
+            ),
+            patch.object(init_categories, "get_many", return_value=summaries),
+            patch.object(
+                init_categories, "classify_sessions_by_content",
+                side_effect=classify,
+            ),
+        ):
+            rc = run_deep_mode(
+                days=7, max_n=20, dry_run=True,
+                console=Console(file=StringIO()),
+            )
+
+        assert rc == 0
+        by_id = {sid: text for sid, _project, text in captured}
+        for source in ("legacy", "stale", "fallback", "skipped", "missing"):
+            assert by_id[source] == f"first user msg for {source}"
+            assert f"{source.upper()} CACHED PROSE" not in by_id[source]
+        assert by_id["current"] == "CURRENT AUTO PROSE"
+        assert by_id["record"] == "HUMAN RECORD PROSE"
+        assert "empty-stale" not in by_id
 
 
 # --- Default arg sanity -----------------------------------------------------

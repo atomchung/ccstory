@@ -42,7 +42,10 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 from . import recap  # noqa: E402 — module import so recap.CONFIG_PATH reads live (test monkeypatches target the attribute, not a copied value)
 from .categorizer import load_rules, load_settings, normalize_project_name  # noqa: E402
-from .session_summarizer import CacheUnavailable  # noqa: E402
+from .session_summarizer import (  # noqa: E402
+    CacheUnavailable,
+    summary_evidence_status,
+)
 from .recap import RecapUnavailable, build_recap, parse_window  # noqa: E402
 from .report import (  # noqa: E402
     _session_summary_text,
@@ -187,6 +190,12 @@ def _compact_recap(result) -> dict:
                 "summary": (
                     _session_summary_text(s, result.summaries) or None
                 ),
+                "summary_evidence": {
+                    "status": summary_evidence_status(
+                        result.summaries.get(s.session_id)
+                        if result.summaries else None
+                    ),
+                },
             }
             for s in top
         ],

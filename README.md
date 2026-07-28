@@ -71,7 +71,10 @@ lines from the instant first/last-message fallback to LLM-polished prose:
 > default (instant) mode first, re-running it with `--llm-narrative` upgrades
 > those cached fallbacks to polished summaries — so `ccstory month
 > --llm-narrative` polishes weeks you already skimmed. Already-polished
-> sessions are reused (no re-burn) unless their prompt version is stale;
+> sessions are reused (no re-burn) while their exact bounded transcript
+> evidence, project, evidence policy, prompt, and narrator policy remain
+> current. Transcript growth is detected on the next selected
+> `--llm-narrative` run;
 > add `--refresh` to force every in-window summary to regenerate (e.g. after
 > a narrator model-policy change you want reflected).
 
@@ -402,8 +405,9 @@ Codex calls run with `--ephemeral --sandbox read-only`; Claude calls use
 `--no-session-persistence`. Antigravity has no equivalent ephemeral mode, so
 it may retain local CLI session metadata. JSON records `summary_narrator` for each LLM summary and
 `narrative.provenance` for aggregate prose; Markdown identifies each aggregate
-narrator. Existing unprovenanced cache rows refresh on the next
-`--llm-narrative` run.
+narrator. Existing unprovenanced cache rows are retained as `legacy` history
+without a global transcript scan or narrator re-burn. They refresh lazily only
+when their session is selected by a later `--llm-narrative` run.
 
 There is no single fixed call total: it depends on init mode, uncached
 sessions, narrative depth, and which cache entries already exist. Calls use
@@ -419,7 +423,7 @@ not use an API key or add a separate API charge.
 | Overall narrative | 0 or 1 on a cache miss | Reused while its rendered inputs and prompt are unchanged |
 | Per-category narrative | Up to 1 per eligible bucket on a cache miss | Reused while that bucket's inputs and prompt are unchanged |
 | Previous-window narrative | 0 or 1 on a cache miss | Reused while its comparison inputs and prompt are unchanged |
-| `--llm-narrative` | 1 per 40 uncached or stale sessions | Reused per session; `--refresh` deliberately regenerates |
+| `--llm-narrative` | 1 per 40 uncached or stale sessions | Reused while exact bounded evidence is unchanged; `--refresh` deliberately regenerates |
 
 The default recap uses hybrid classification, a per-category narrative, and a
 previous-window narrative; per-session LLM prose remains opt-in. Use
@@ -450,6 +454,16 @@ call. The terminal and JSON provenance report this partial-LLM state,
 successful provider/model, lane timing, attempts, and coarse batch progress
 without exposing transcript text or prompts.
 
+Each automatic session summary records a private fingerprint of only that
+session's exact bounded evidence (up to 700 characters in the batch lane), project,
+and evidence-policy version. Neighboring sessions in a batch do not participate
+in its identity. If evidence changes and regeneration fails or the budget ends,
+the old summary remains in the detailed session history with a compact
+`summary evidence: stale` marker; it is excluded from fresh Top focus,
+classification, category/overall synthesis, and comparison prose. Legacy rows
+are marked `legacy` until lazily refreshed. Human `record` rows remain
+authoritative even under `--refresh`.
+
 If no configured local narrator is available, LLM classification and synthesis degrade
 gracefully: classification uses folder/fallback rules, per-session prose uses
 the local first/last-message fallback, and no narrator quota is used. This does
@@ -472,6 +486,12 @@ carries `schema_version` (currently 1): renames/removals bump it, additive
 fields don't — consumers should tolerate unknown keys. Covers window, totals
 (hours/tokens/cost/cache), buckets, per-session lines, model breakdown, unpriced models (`unpriced_models`), provider coverage (`usage_coverage`), narrative, comparison, artifacts, and the pricing snapshot date. The markdown
 report file is still written either way; JSON is a view, not a replacement.
+Every full-JSON session includes additive
+`summary_evidence.status` (`current`, `stale`, `legacy`, `unavailable`, or
+`not_applicable`). Raw evidence, fingerprints, transcript paths, and additional
+session identifiers are never included. Library callers can derive the same
+enum without I/O using the pure
+`ccstory.session_summarizer.summary_evidence_status(summary)` helper.
 
 ## Obsidian export
 
@@ -596,7 +616,8 @@ Repo activity metadata providers. There is no ccstory telemetry or account.
   explicitly remains local-only.
   The pypistats request sends a package name to pypistats.org. No conversation
   text, prompt, summary, local path, or commit contents are included.
-- **Cache**: `~/.ccstory/cache.db` (sqlite, per-session summaries).
+- **Cache**: `~/.ccstory/cache.db` (sqlite, per-session summaries and private
+  evidence fingerprints; reports expose only the status enum).
 - **Reports**: `~/.ccstory/reports/recap-*.md`.
 
 Disable GitHub/PyPI metadata calls with `--no-artifacts` or persistent
@@ -697,7 +718,7 @@ Four read-only tools:
 
 | Tool | Returns |
 |---|---|
-| `get_recap(window, classify, allow_llm, agent)` | Totals, per-category active hours + narrative + a `children` per-project breakdown (name + hours), legacy overall narrative, additive deterministic `top_focus_projection`, top 5 sessions, cost, usage coverage, and unpriced models. |
+| `get_recap(window, classify, allow_llm, agent)` | Totals, per-category active hours + narrative + a `children` per-project breakdown (name + hours), legacy overall narrative, additive deterministic `top_focus_projection`, top 5 sessions with `summary_evidence.status`, cost, usage coverage, and unpriced models. |
 | `compare_to_previous(window, classify, agent)` | Active-hours and cost deltas vs. the immediately preceding same-length window, with current/previous usage coverage and unpriced models. |
 | `get_trend(period, count, classify, agent)` | Per-period series over the last `count` weeks/months (oldest first): active hours, cost, per-category hours, usage coverage, and unpriced models. `count` clamped to 1..24. |
 | `list_categories()` | The bucket rules ccstory classifies sessions into (user + built-in defaults). |

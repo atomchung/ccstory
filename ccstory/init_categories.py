@@ -46,6 +46,7 @@ from .session_summarizer import (
     get_many,
     llm_available,
     run_llm_p,
+    summary_is_synthesis_eligible,
 )
 from .time_tracking import SessionStat, collect_sessions
 
@@ -443,13 +444,20 @@ def run_deep_mode(
         f"across {days} day(s) (cap: {max_n}).\n"
     )
 
-    # Pull summaries we already have; fall back to first_user_text for the rest.
+    # Only current generated prose or an authoritative human record may feed a
+    # fresh classification. Detailed-history fallback/stale/legacy rows remain
+    # visible elsewhere, but deep init must classify from current session text
+    # rather than amplify them into a new durable bucket.
     summaries = get_many([s.session_id for s in sampled])
     items: list[tuple[str, str, str]] = []
     for s in sampled:
         leaf = normalize_project_name(s.project) or s.project
         summ_row = summaries.get(s.session_id)
-        summary = summ_row.summary if summ_row else (s.first_user_text or "")
+        summary = (
+            summ_row.summary
+            if summary_is_synthesis_eligible(summ_row)
+            else (s.first_user_text or "")
+        )
         if not summary:
             continue
         items.append((s.session_id, leaf, summary))

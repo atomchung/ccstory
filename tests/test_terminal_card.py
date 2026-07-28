@@ -329,6 +329,8 @@ class TestCardWrapping:
             session_id="wrapped-focus",
             source="auto",
             summary="解決跨 session 測試環境不一致，建立可重現的 QA 驗證。",
+            evidence_fingerprint="current",
+            observed_evidence_fingerprint="current",
         )
         console = Console(width=72, record=True)
         console.print(render_terminal_card(

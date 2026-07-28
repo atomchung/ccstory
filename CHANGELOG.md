@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Full recap JSON and MCP top-session entries now expose a public-safe
+  `summary_evidence.status` (`current`, `stale`, `legacy`, `unavailable`, or
+  `not_applicable`). Markdown detailed history adds a compact marker for
+  stale, legacy, and unavailable cached summaries; no evidence fingerprint or
+  transcript content is exposed.
 - Configurable local narrative backends. The default fallback order is Claude
   Sonnet, Codex GPT-5.6 Terra, then Antigravity Gemini 3.6 Flash Low; every
   invocation passes an explicit model. `~/.ccstory/config.toml` can reorder,
@@ -19,6 +24,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Local narrator compatibility retries now preserve the caller's exact hard
   timeout even when absolute-deadline subtraction rounds fractionally upward.
+- Per-session automatic-summary cache identity now includes the exact bounded
+  evidence sent to the narrator, its project, and a versioned per-lane evidence
+  policy. Selected `--llm-narrative` sessions are extracted once and observed
+  before cache preflight, so transcript growth rotates identity even when a
+  good auto row exists. Failed, omitted, or budget-exhausted refreshes preserve
+  the old summary/source/timestamp/basis and leave honest stale provenance.
+  Legacy rows migrate lazily without a global transcript scan or narrator
+  re-burn; human `record` rows remain authoritative even under force refresh.
+- Stale and legacy automatic summaries remain visible only in detailed
+  history. Fresh Top focus, content classification, category/overall
+  synthesis, and comparison prose consume only current automatic summaries or
+  authoritative human records.
 - Top-level `ccstory --help` and `ccstory --version` now use a lightweight
   stdlib-only bootstrap, avoiding imports of transcript providers, the recap
   pipeline, and Rich rendering until a real command runs.
@@ -85,6 +102,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Scoped GitHub merged-PR queries to the report window and recursively split
   capped date ranges, preventing repositories with more than 200 lifetime PRs
   from emitting false warnings or undercounting current-window shipped work.
+
+### Fixed
+
+- Deep category initialization no longer sends stale, legacy, fallback, or
+  skipped cached prose into a fresh classification; it uses current session
+  text unless the cache row is a current auto summary or authoritative human
+  record.
+- Importing the shared Claude recap cache now promotes local generated or
+  fallback rows when an incoming human `record` exists, clears obsolete
+  narrator/evidence metadata, and preserves an existing local record over
+  every imported row. Imported automatic summaries still never overwrite any
+  local row.
 
 ## [0.7.2] - 2026-07-26
 

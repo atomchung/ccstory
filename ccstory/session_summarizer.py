@@ -5,8 +5,8 @@ narrative per session.  Narrative work uses the first available configured
 local coding-agent CLI; no API key or ccstory-operated service is involved.
 
 Extracted from ting/personal_os/core/session_summarizer.py. Simplified for v1:
-  - Single source ("auto") — dropped the personal_os curated "record" source
   - DB lives at ~/.ccstory/cache.db (not polluting Claude Code's own dir)
+  - Human-authored ``record`` rows, when imported, remain authoritative
 """
 
 from __future__ import annotations
@@ -65,7 +65,17 @@ _LANGUAGE_ALIASES = {
 # and regenerated on the next `--llm-narrative` run. Keep this an int so the
 # comparison `stored < PROMPT_VERSION` is monotonic.
 PROMPT_VERSION = 3
-CACHE_SCHEMA_VERSION = 4
+CACHE_SCHEMA_VERSION = 5
+
+# Evidence identity is intentionally separate from ``PROMPT_VERSION``.  The
+# latter describes how prose is requested; this version describes which
+# bounded transcript facts are selected for one summary lane.  Bump the
+# relevant lane string when its compaction or metadata contract changes.
+SUMMARY_EVIDENCE_POLICY_VERSION = 1
+LEGACY_UNKNOWN_EVIDENCE = "legacy_unknown_evidence"
+EVIDENCE_UNAVAILABLE = "evidence_unavailable"
+_SUMMARY_EVIDENCE_BATCH_LANE = "batch-700-v1"
+_SUMMARY_EVIDENCE_SINGLE_LANE = "single-8000-v1"
 
 
 _CLAUDE_MD_MAX_CHARS = 500
@@ -326,7 +336,7 @@ def _detect_system_locale() -> str | None:
 class SessionSummary:
     session_id: str
     summary: str
-    source: str  # "auto" | "skipped" | "fallback"
+    source: str  # "record" | "auto" | "skipped" | "fallback"
     project: str | None = None
     created_at: float = 0.0
     # Version of the per-session prompt (_PROMPT_TEMPLATE / PROMPT_VERSION)
@@ -340,6 +350,43 @@ class SessionSummary:
     narrator_provider: str | None = None
     narrator_model: str | None = None
     narrator_fingerprint: str = ""
+    # The evidence basis that produced ``summary`` and the latest evidence
+    # observed for that session.  These values stay private cache metadata;
+    # public surfaces expose only ``summary_evidence_status()``.
+    evidence_fingerprint: str = field(default="", repr=False)
+    observed_evidence_fingerprint: str = field(default="", repr=False)
+
+
+def summary_evidence_status(summary: SessionSummary | None) -> str:
+    """Return public-safe evidence provenance for one detailed summary.
+
+    The helper is pure: it never opens a transcript or cache and never exposes
+    a fingerprint.  ``record`` and extractive ``fallback`` rows are not
+    narrator-evidence products, while a missing cache row (including a native
+    provider title) is likewise ``not_applicable``.
+    """
+    if summary is None or summary.source in ("record", "fallback"):
+        return "not_applicable"
+    if summary.source == "skipped":
+        return "unavailable"
+    if summary.source != "auto":
+        return "not_applicable"
+    basis = summary.evidence_fingerprint
+    observed = summary.observed_evidence_fingerprint
+    if basis == LEGACY_UNKNOWN_EVIDENCE or not basis:
+        return "legacy"
+    if observed == EVIDENCE_UNAVAILABLE or not observed:
+        return "unavailable"
+    return "current" if basis == observed else "stale"
+
+
+def summary_is_synthesis_eligible(summary: SessionSummary | None) -> bool:
+    """Whether detailed prose may be amplified into a fresh derived claim."""
+    if summary is None:
+        return False
+    if summary.source == "record":
+        return True
+    return summary.source == "auto" and summary_evidence_status(summary) == "current"
 
 
 @dataclass(frozen=True)
@@ -696,11 +743,39 @@ def _migration_4_narrator_provenance(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_5_summary_evidence_identity(conn: sqlite3.Connection) -> None:
+    """Add lazy evidence identity without scanning any transcript.
+
+    Existing generated rows are useful history, but their exact narrator input
+    cannot be reconstructed from SQLite alone.  Mark them explicitly as
+    legacy-unknown; a later selected LLM run observes current evidence and
+    refreshes only that selected row.  Non-generated rows are not evidence-
+    bound and retain empty metadata.
+    """
+    _migration_4_narrator_provenance(conn)
+    _add_column_if_missing(
+        conn, "session_summaries", "evidence_fingerprint",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    _add_column_if_missing(
+        conn, "session_summaries", "observed_evidence_fingerprint",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    conn.execute(
+        """UPDATE session_summaries
+           SET evidence_fingerprint = ?,
+               observed_evidence_fingerprint = ?
+           WHERE source = 'auto' AND evidence_fingerprint = ''""",
+        (LEGACY_UNKNOWN_EVIDENCE, LEGACY_UNKNOWN_EVIDENCE),
+    )
+
+
 _MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_1_baseline,
     _migration_2_cache_fingerprints,
     _migration_3_adopt_legacy_classifications,
     _migration_4_narrator_provenance,
+    _migration_5_summary_evidence_identity,
 )
 assert len(_MIGRATIONS) == CACHE_SCHEMA_VERSION
 
@@ -825,18 +900,43 @@ def upsert(
     narrator_provider: str | None = None,
     narrator_model: str | None = None,
     narrator_fingerprint: str = "",
+    evidence_fingerprint: str = "",
+    observed_evidence_fingerprint: str = "",
 ) -> None:
     if not session_id or not summary:
         return
+    if source == "auto" and not evidence_fingerprint:
+        # Direct/library writes without a prepared evidence basis remain
+        # visible history, but must never masquerade as current evidence.
+        evidence_fingerprint = LEGACY_UNKNOWN_EVIDENCE
+    if source == "auto" and not observed_evidence_fingerprint:
+        observed_evidence_fingerprint = evidence_fingerprint
     conn = _connect()
     try:
         conn.execute(
-            """INSERT OR REPLACE INTO session_summaries
+            """INSERT INTO session_summaries
                (session_id, summary, source, project, created_at, prompt_version,
-                narrator_provider, narrator_model, narrator_fingerprint)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                narrator_provider, narrator_model, narrator_fingerprint,
+                evidence_fingerprint, observed_evidence_fingerprint)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(session_id) DO UPDATE SET
+                   summary = excluded.summary,
+                   source = excluded.source,
+                   project = excluded.project,
+                   created_at = excluded.created_at,
+                   prompt_version = excluded.prompt_version,
+                   narrator_provider = excluded.narrator_provider,
+                   narrator_model = excluded.narrator_model,
+                   narrator_fingerprint = excluded.narrator_fingerprint,
+                   evidence_fingerprint = excluded.evidence_fingerprint,
+                   observed_evidence_fingerprint =
+                       excluded.observed_evidence_fingerprint
+               WHERE session_summaries.source <> 'record'
+                  OR excluded.source = 'record'""",
             (session_id, summary.strip(), source, project, time.time(),
-             prompt_version, narrator_provider, narrator_model, narrator_fingerprint),
+             prompt_version, narrator_provider, narrator_model,
+             narrator_fingerprint, evidence_fingerprint,
+             observed_evidence_fingerprint),
         )
         conn.commit()
     finally:
@@ -849,7 +949,8 @@ def get(session_id: str) -> SessionSummary | None:
         row = conn.execute(
             """SELECT session_id, summary, source, project, created_at,
                       prompt_version, narrator_provider, narrator_model,
-                      narrator_fingerprint
+                      narrator_fingerprint, evidence_fingerprint,
+                      observed_evidence_fingerprint
                FROM session_summaries WHERE session_id = ?""",
             (session_id,),
         ).fetchone()
@@ -867,7 +968,8 @@ def get_many(session_ids: list[str]) -> dict[str, SessionSummary]:
         rows = conn.execute(
             f"""SELECT session_id, summary, source, project, created_at,
                        prompt_version, narrator_provider, narrator_model,
-                       narrator_fingerprint
+                       narrator_fingerprint, evidence_fingerprint,
+                       observed_evidence_fingerprint
                 FROM session_summaries WHERE session_id IN ({placeholders})""",
             session_ids,
         ).fetchall()
@@ -899,10 +1001,11 @@ def import_from_claude_recap() -> int:
     """Pull cached summaries from ~/.claude/session_summaries.db (written by
     the personal_os /recap skill) into ccstory's cache.
 
-    Idempotent — uses INSERT OR IGNORE so existing ccstory entries are
-    preserved. Drops the recap-only `task_slug` column since ccstory's
-    schema doesn't carry it. Silently returns 0 if the recap DB is absent
-    (fresh users won't have it).
+    Idempotent and source-aware: an incoming human ``record`` promotes a local
+    auto/fallback/skipped row, while an existing local record is authoritative
+    and every incoming non-record loses to any local row. Drops the recap-only
+    `task_slug` column since ccstory's schema doesn't carry it. Silently returns
+    0 if the recap DB is absent (fresh users won't have it).
     """
     if not RECAP_DB_PATH.exists():
         return 0
@@ -918,16 +1021,43 @@ def import_from_claude_recap() -> int:
             LOG.warning("attach recap DB failed: %s", e)
             return 0
         try:
-            cur = conn.execute(
-                """INSERT OR IGNORE INTO session_summaries
+            before_changes = conn.total_changes
+            conn.execute(
+                """INSERT INTO session_summaries
                    (session_id, summary, source, project, created_at,
-                    prompt_version)
-                   SELECT session_id, summary, source, project, created_at, ?
+                    prompt_version, narrator_provider, narrator_model,
+                    narrator_fingerprint, evidence_fingerprint,
+                    observed_evidence_fingerprint)
+                   SELECT session_id, summary, source, project, created_at,
+                          CASE WHEN source = 'auto' THEN ? ELSE 0 END,
+                          NULL, NULL, '',
+                          CASE WHEN source = 'auto' THEN ? ELSE '' END,
+                          CASE WHEN source = 'auto' THEN ? ELSE '' END
                    FROM recap.session_summaries
-                   WHERE summary IS NOT NULL AND summary <> ''""",
-                (PROMPT_VERSION,),
+                   WHERE summary IS NOT NULL AND summary <> ''
+                   ON CONFLICT(session_id) DO UPDATE SET
+                       summary = excluded.summary,
+                       source = excluded.source,
+                       project = excluded.project,
+                       created_at = excluded.created_at,
+                       prompt_version = 0,
+                       narrator_provider = NULL,
+                       narrator_model = NULL,
+                       narrator_fingerprint = '',
+                       evidence_fingerprint = '',
+                       observed_evidence_fingerprint = ''
+                   WHERE excluded.source = 'record'
+                     AND session_summaries.source <> 'record'""",
+                (
+                    PROMPT_VERSION,
+                    LEGACY_UNKNOWN_EVIDENCE,
+                    LEGACY_UNKNOWN_EVIDENCE,
+                ),
             )
-            n = cur.rowcount or 0
+            # Cursor.rowcount for INSERT...SELECT has varied across sqlite3
+            # versions. Connection total_changes gives the exact inserted +
+            # promoted-row count while blocked precedence conflicts add zero.
+            n = conn.total_changes - before_changes
             conn.commit()
             return n
         finally:
@@ -944,6 +1074,29 @@ def missing_ids(session_ids: list[str]) -> list[str]:
         return []
     have = set(get_many(session_ids).keys())
     return [sid for sid in session_ids if sid not in have]
+
+
+def _record_observed_evidence(observations: dict[str, str]) -> None:
+    """Persist latest observations without changing summary history.
+
+    In particular this never touches summary/source/created_at or the basis
+    fingerprint, so a failed regeneration leaves the previous row intact and
+    visibly stale.  Missing rows are deliberately ignored; their first
+    successful/fallback write owns row creation.
+    """
+    if not observations:
+        return
+    conn = _connect()
+    try:
+        conn.executemany(
+            """UPDATE session_summaries
+               SET observed_evidence_fingerprint = ?
+               WHERE session_id = ? AND source <> 'record'""",
+            [(fingerprint, session_id) for session_id, fingerprint in observations.items()],
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def resolve_transcript_path(sess) -> Path | None:
@@ -1020,6 +1173,32 @@ SUMMARY_MIN_BATCH_SIZE = 10
 SUMMARY_BATCH_SLOW_SEC = 30
 _SUMMARY_BATCH_EXCERPT_CHARS = 700
 SUMMARY_OMISSION_RETRY_SIZE = 5
+
+
+@dataclass(frozen=True)
+class PreparedSummaryEvidence:
+    """One session's private, bounded narrator input and cache identity."""
+
+    session_id: str
+    project: str
+    excerpt: str
+    bounded_evidence: str
+    evidence_fingerprint: str
+
+
+@dataclass
+class SummaryBackfillPlan:
+    """Reusable preflight shared by recap progress and the write path."""
+
+    ids: list[str]
+    existing: dict[str, SessionSummary]
+    todo: list[str]
+    prepared: dict[str, PreparedSummaryEvidence]
+    unavailable: set[str]
+    unavailable_summaries: dict[str, str]
+    projects: dict[str, str]
+    use_llm: bool
+    force: bool
 
 
 def _compact_batch_excerpt(excerpt: str, max_chars: int = _SUMMARY_BATCH_EXCERPT_CHARS) -> str:
@@ -1120,6 +1299,43 @@ def _compact_batch_excerpt(excerpt: str, max_chars: int = _SUMMARY_BATCH_EXCERPT
     compacted = "\n\n".join(rendered)
     assert len(compacted) <= max_chars
     return compacted
+
+
+def _summary_evidence_fingerprint(
+    *, project: str, bounded_evidence: str, lane: str,
+) -> str:
+    """Hash one session's own narrator evidence, never its batch neighbors."""
+    return _cache_fingerprint(
+        "session-summary-evidence",
+        f"policy={SUMMARY_EVIDENCE_POLICY_VERSION}",
+        f"lane={lane}",
+        f"project={project}",
+        bounded_evidence,
+    )
+
+
+def _prepare_summary_evidence(
+    session_id: str,
+    project: str,
+    excerpt: str,
+    *,
+    lane: str,
+) -> PreparedSummaryEvidence:
+    if lane == _SUMMARY_EVIDENCE_BATCH_LANE:
+        bounded = _compact_batch_excerpt(excerpt)
+    elif lane == _SUMMARY_EVIDENCE_SINGLE_LANE:
+        bounded = excerpt[:8000]
+    else:
+        raise ValueError(f"unknown summary evidence lane: {lane}")
+    return PreparedSummaryEvidence(
+        session_id=session_id,
+        project=project,
+        excerpt=excerpt,
+        bounded_evidence=bounded,
+        evidence_fingerprint=_summary_evidence_fingerprint(
+            project=project, bounded_evidence=bounded, lane=lane,
+        ),
+    )
 
 
 _SUMMARY_BATCH_PROMPT = """{language_directive}
@@ -1430,13 +1646,17 @@ def summarize_sessions_via_llm_batch(
     batch_size: int = SUMMARY_BATCH_SIZE,
     budget: NarrativeBudget | None = None,
     on_chunk_complete: Callable[[int, int], None] | None = None,
+    evidence_prepared: bool = False,
 ) -> dict[str, NarrativeCall]:
     """Generate per-session prose in bounded batches.
 
-    ``items`` is ``[(session_id, project, excerpt)]``. The returned mapping is
-    intentionally sparse: a model omission, malformed JSON, or failed batch
-    does not manufacture a cache entry. ``backfill_for_sessions`` owns the
-    existing per-session fallback policy for those cases.
+    ``items`` is ``[(session_id, project, excerpt)]``.  Internal prepared-plan
+    callers set ``evidence_prepared=True`` and pass the already-bounded exact
+    evidence whose fingerprint was observed; direct callers retain the legacy
+    raw-excerpt convenience.  The returned mapping is intentionally sparse: a
+    model omission, malformed JSON, or failed batch does not manufacture a
+    cache entry. ``backfill_for_sessions`` owns the existing per-session
+    fallback policy for those cases.
     """
     if not items or not llm_available():
         return {}
@@ -1465,7 +1685,7 @@ def summarize_sessions_via_llm_batch(
         def make_prompt(prompt_chunk: list[tuple[str, str, str]]) -> str:
             rows = "\n\n".join(
                 f"[session_id={session_id}; project={project}]\n"
-                f"{_compact_batch_excerpt(excerpt)}"
+                f"{excerpt if evidence_prepared else _compact_batch_excerpt(excerpt)}"
                 for session_id, project, excerpt in prompt_chunk
             )
             return _SUMMARY_BATCH_PROMPT.format(
@@ -1625,27 +1845,136 @@ def _fallback_narrative(excerpt: str) -> str:
     return f"{user_msgs[0][:60]} → {user_msgs[-1][:60]}"
 
 
-def _needs_llm(existing: SessionSummary | None, force: bool = False) -> bool:
+def _needs_llm(
+    existing: SessionSummary | None,
+    force: bool = False,
+    observed_evidence_fingerprint: str | None = None,
+) -> bool:
     """Whether a session should be (re)sent to the configured narrator.
 
     - missing            → yes (never summarized)
-    - source == skipped  → no  (no usable content; retrying only wastes calls)
+    - source == record   → no  (human-authored and authoritative, even force)
+    - source == skipped  → only when usable evidence is now observed
     - source == fallback → yes (Layer 0: upgrade the instant fallback to auto)
     - source == auto     → only if `force`, or its prompt_version is behind
                            PROMPT_VERSION (Layer 1: refresh when the prompt —
-                           or the model it's tuned for — has improved)
+                           or the model it's tuned for — has improved), or the
+                           exact bounded evidence changed / is legacy-unknown
     """
     if existing is None:
         return True
-    if existing.source == "skipped":
+    if existing.source == "record":
         return False
+    if existing.source == "skipped":
+        return bool(
+            observed_evidence_fingerprint
+            and observed_evidence_fingerprint != EVIDENCE_UNAVAILABLE
+        )
     if existing.source == "fallback":
-        return True
-    if force:  # source == "auto"
+        return observed_evidence_fingerprint != EVIDENCE_UNAVAILABLE
+    if existing.source != "auto":
+        return False
+    if observed_evidence_fingerprint == EVIDENCE_UNAVAILABLE:
+        return False
+    if force:
         return True
     return (
         (existing.prompt_version or 0) < PROMPT_VERSION
         or existing.narrator_fingerprint != narrative_config_fingerprint()
+        or existing.evidence_fingerprint == LEGACY_UNKNOWN_EVIDENCE
+        or (
+            observed_evidence_fingerprint is not None
+            and existing.evidence_fingerprint != observed_evidence_fingerprint
+        )
+    )
+
+
+def prepare_backfill_plan(
+    sessions: list,
+    *,
+    use_llm: bool = False,
+    force: bool = False,
+) -> SummaryBackfillPlan:
+    """Extract selected evidence once, observe it, then decide narrator work.
+
+    LLM runs inspect every non-record session in the selected window so a
+    growing transcript can invalidate an otherwise-good auto row.  Normal
+    non-LLM runs preserve their cheap cache behavior and inspect only missing
+    rows.  Observation is committed before ``todo`` is computed, so a later
+    failure or budget stop still leaves honest stale provenance.
+    """
+    by_id = {s.session_id: s for s in sessions if getattr(s, "session_id", None)}
+    ids = list(by_id)
+    existing = get_many(ids)
+    if use_llm:
+        candidates = [
+            sid for sid in ids
+            if existing.get(sid) is None or existing[sid].source != "record"
+        ]
+    else:
+        candidates = [sid for sid in ids if existing.get(sid) is None]
+
+    from .providers import TranscriptResolver
+
+    resolver = TranscriptResolver()
+    prepared: dict[str, PreparedSummaryEvidence] = {}
+    unavailable: set[str] = set()
+    unavailable_summaries: dict[str, str] = {}
+    projects: dict[str, str] = {}
+    observations: dict[str, str] = {}
+    lane = _SUMMARY_EVIDENCE_BATCH_LANE if use_llm else _SUMMARY_EVIDENCE_SINGLE_LANE
+    for sid in candidates:
+        sess = by_id[sid]
+        projects[sid] = str(getattr(sess, "project", "") or "")
+        jsonl_path = resolver.path_for(sess)
+        if jsonl_path is None:
+            unavailable.add(sid)
+            unavailable_summaries[sid] = "(jsonl not found)"
+            if sid in existing:
+                observations[sid] = EVIDENCE_UNAVAILABLE
+            continue
+        provider = resolver.provider_for(sess)
+        project, excerpt = _extract_excerpt(jsonl_path, provider=provider)
+        projects[sid] = project
+        if not excerpt:
+            unavailable.add(sid)
+            unavailable_summaries[sid] = "(no meaningful conversation)"
+            if sid in existing:
+                observations[sid] = EVIDENCE_UNAVAILABLE
+            continue
+        item = _prepare_summary_evidence(
+            sid, project, excerpt, lane=lane,
+        )
+        prepared[sid] = item
+        if sid in existing:
+            observations[sid] = item.evidence_fingerprint
+
+    if use_llm:
+        _record_observed_evidence(observations)
+        existing = get_many(ids)
+        todo = []
+        for sid in candidates:
+            current = existing.get(sid)
+            item = prepared.get(sid)
+            if current is None:
+                todo.append(sid)
+            elif item is not None and _needs_llm(
+                current, force, item.evidence_fingerprint,
+            ):
+                todo.append(sid)
+    else:
+        todo = candidates
+
+    return SummaryBackfillPlan(
+        ids=ids,
+        existing=existing,
+        todo=todo,
+        prepared=prepared,
+        unavailable=unavailable,
+        unavailable_summaries=unavailable_summaries,
+        projects=projects,
+        use_llm=use_llm,
+        force=force,
     )
 
 
@@ -1673,18 +2002,34 @@ def summarize_session(
     if not use_llm:
         if existing:
             return existing
-    elif existing and not _needs_llm(existing, force):
+    elif existing and existing.source == "record":
         return existing
 
     project, excerpt = _extract_excerpt(jsonl_path, provider=provider)
     if not excerpt:
-        # Nothing usable to summarize now — don't clobber a prior summary.
-        if existing and existing.source in ("auto", "fallback"):
+        # Nothing usable to summarize now — observe that fact without
+        # clobbering any prior row or its original timestamp/basis.
+        if use_llm and existing:
+            _record_observed_evidence({session_id: EVIDENCE_UNAVAILABLE})
+            return get(session_id)
+        if existing:
             return existing
         upsert(session_id, "(no meaningful conversation)", "skipped", project=project)
         return get(session_id)
     if use_llm:
-        call = summarize_via_claude_p(excerpt)
+        prepared = _prepare_summary_evidence(
+            session_id, project, excerpt, lane=_SUMMARY_EVIDENCE_SINGLE_LANE,
+        )
+        if existing:
+            _record_observed_evidence(
+                {session_id: prepared.evidence_fingerprint},
+            )
+            existing = get(session_id)
+        if existing and not _needs_llm(
+            existing, force, prepared.evidence_fingerprint,
+        ):
+            return existing
+        call = summarize_via_claude_p(prepared.bounded_evidence)
         # Compatibility with callers that monkeypatch the old helper to a
         # plain string; production always returns NarrativeCall.
         if isinstance(call, str):
@@ -1696,11 +2041,13 @@ def summarize_session(
                 narrator_provider=call.provider,
                 narrator_model=call.model,
                 narrator_fingerprint=narrative_config_fingerprint(),
+                evidence_fingerprint=prepared.evidence_fingerprint,
+                observed_evidence_fingerprint=prepared.evidence_fingerprint,
             )
             return get(session_id)
-        # claude -p failed: keep a good existing summary instead of
-        # downgrading it to a fallback on a transient failure.
-        if existing and existing.source == "auto":
+        # A narrator failure never rewrites prior history.  Its observed
+        # fingerprint already makes a changed auto row visibly stale.
+        if existing:
             return existing
     upsert(session_id, _fallback_narrative(excerpt), "fallback", project=project)
     return get(session_id)
@@ -2561,6 +2908,7 @@ def backfill_for_sessions(
     batch_size: int = SUMMARY_BATCH_SIZE,
     budget: NarrativeBudget | None = None,
     on_chunk_complete: Callable[[int, int], None] | None = None,
+    prepared_plan: SummaryBackfillPlan | None = None,
 ) -> dict:
     """Summarize sessions that are missing or, under `use_llm`, stale.
 
@@ -2574,80 +2922,84 @@ def backfill_for_sessions(
     Returns {"summarized": N, "fallback": F, "skipped": M, "already": K,
              "regenerated": R}.
     """
-    by_id = {s.session_id: s for s in sessions if getattr(s, "session_id", None)}
-    ids = list(by_id.keys())
-    existing = get_many(ids)
-    if use_llm:
-        todo = [sid for sid in ids if _needs_llm(existing.get(sid), force)]
-    else:
-        todo = [sid for sid in ids if existing.get(sid) is None]
-    regenerated = sum(1 for sid in todo if existing.get(sid) is not None)
-    summarized = fallback = skipped = 0
-    from .providers import TranscriptResolver
-
-    resolver = TranscriptResolver()
-    prepared: list[tuple[str, str, str]] = []
-    projects: dict[str, str] = {}
-
-    for sid in todo:
-        sess = by_id[sid]
-        jsonl_path = resolver.path_for(sess)
-        if jsonl_path is None:
-            # Only record a "not found" skip when nothing is cached;
-            # otherwise keep the existing summary rather than clobber it.
-            if existing.get(sid) is None:
-                upsert(sid, "(jsonl not found)", "skipped", project=sess.project)
-            skipped += 1
-            continue
-        if not use_llm:
-            result = summarize_session(
-                sid, jsonl_path, use_llm=False, force=force,
-                provider=resolver.provider_for(sess),
-            )
-            if result and result.source == "fallback":
-                fallback += 1
-            else:
-                skipped += 1
-            continue
-
-        project, excerpt = _extract_excerpt(
-            jsonl_path, provider=resolver.provider_for(sess),
-        )
-        if not excerpt:
-            # Retain a useful existing auto/fallback result rather than
-            # replacing it with an empty-excerpt marker.
-            if existing.get(sid) is None:
-                upsert(sid, "(no meaningful conversation)", "skipped", project=project)
-            skipped += 1
-            continue
-        projects[sid] = project
-        prepared.append((sid, project, excerpt))
-
-    generated = (
-        summarize_sessions_via_llm_batch(
-            prepared, batch_size=batch_size, budget=budget,
-            on_chunk_complete=on_chunk_complete,
-        )
-        if use_llm else {}
+    plan = prepared_plan or prepare_backfill_plan(
+        sessions, use_llm=use_llm, force=force,
     )
-    for sid, _project, excerpt in prepared:
+    if plan.use_llm != use_llm or plan.force != force:
+        raise ValueError("prepared summary plan does not match backfill options")
+    ids = plan.ids
+    existing = plan.existing
+    todo = plan.todo
+    regenerated = 0
+    summarized = fallback = skipped = 0
+    prepared_items = [
+        plan.prepared[sid] for sid in todo if sid in plan.prepared
+    ]
+    for sid in todo:
+        if sid not in plan.unavailable:
+            continue
+        if existing.get(sid) is None:
+            # A path miss and an empty transcript share public unavailable
+            # provenance; neither is evidence suitable for a narrator call.
+            upsert(
+                sid, plan.unavailable_summaries[sid], "skipped",
+                project=plan.projects.get(sid),
+            )
+        skipped += 1
+
+    if not use_llm:
+        for item in prepared_items:
+            upsert(
+                item.session_id,
+                _fallback_narrative(item.excerpt),
+                "fallback",
+                project=item.project,
+            )
+            fallback += 1
+        generated: dict[str, NarrativeCall] = {}
+    else:
+        generated = summarize_sessions_via_llm_batch(
+            [
+                (item.session_id, item.project, item.bounded_evidence)
+                for item in prepared_items
+            ],
+            batch_size=batch_size,
+            budget=budget,
+            on_chunk_complete=on_chunk_complete,
+            evidence_prepared=True,
+        )
+
+    for item in prepared_items if use_llm else []:
+        sid = item.session_id
         call = generated.get(sid)
         if call is not None:
             upsert(
-                sid, call.stdout, "auto", project=projects[sid],
+                sid, call.stdout, "auto", project=item.project,
                 prompt_version=PROMPT_VERSION,
                 narrator_provider=call.provider,
                 narrator_model=call.model,
                 narrator_fingerprint=narrative_config_fingerprint(),
+                evidence_fingerprint=item.evidence_fingerprint,
+                observed_evidence_fingerprint=item.evidence_fingerprint,
             )
             summarized += 1
+            if existing.get(sid) is not None:
+                regenerated += 1
             continue
-        # Exactly preserve the old non-destructive contract: a failed refresh
-        # retains an existing auto summary; only a missing/fallback row falls
-        # back to the extractive narrative.
-        if existing.get(sid) and existing[sid].source == "auto":
+        # Failure/omission/budget exhaustion preserves every field of an old
+        # row except the already-recorded observation.  New rows alone receive
+        # a local fallback.
+        old = existing.get(sid)
+        if old is not None:
+            if old.source == "fallback":
+                fallback += 1
+            elif old.source == "skipped":
+                skipped += 1
             continue
-        upsert(sid, _fallback_narrative(excerpt), "fallback", project=projects[sid])
+        upsert(
+            sid, _fallback_narrative(item.excerpt), "fallback",
+            project=item.project,
+        )
         fallback += 1
 
     if on_progress:
