@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Top-level `ccstory --help` and `ccstory --version` now use a lightweight
+  stdlib-only bootstrap, avoiding imports of transcript providers, the recap
+  pipeline, and Rich rendering until a real command runs.
 - Antigravity subagent discovery now caches its transcript pass and extracts
   legacy UUID references directly, avoiding a comparison against every known
   session ID for each `INVOKE_SUBAGENT` record. Regression tests now protect

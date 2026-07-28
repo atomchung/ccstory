@@ -56,7 +56,7 @@ Homepage = "https://github.com/atomchung/ccstory"
 Issues = "https://github.com/atomchung/ccstory/issues"
 
 [project.scripts]
-ccstory = "ccstory.cli:main"
+ccstory = "ccstory.bootstrap:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["ccstory"]
