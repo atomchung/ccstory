@@ -459,12 +459,34 @@ class NarrativeBudget:
     def record_batch(
         self, lane: str, completed: int, total: int, item_count: int, *,
         outcome: str = "completed",
+        requested_count: int | None = None,
+        valid_count: int | None = None,
+        recovered_count: int | None = None,
+        untried_count: int | None = None,
+        unresolved_count: int | None = None,
+        elapsed_sec: float | None = None,
     ) -> None:
         """Capture coarse batch progress, never individual work-item identity."""
-        self._record(
-            "batch", lane=self._lane_name(lane), completed=completed,
-            total=total, item_count=item_count, outcome=outcome,
-        )
+        metadata: dict[str, object] = {
+            "event": "batch",
+            "lane": self._lane_name(lane),
+            "completed": completed,
+            "total": total,
+            "item_count": item_count,
+            "outcome": outcome,
+        }
+        for name, value in (
+            ("requested_count", requested_count),
+            ("valid_count", valid_count),
+            ("recovered_count", recovered_count),
+            ("untried_count", untried_count),
+            ("unresolved_count", unresolved_count),
+        ):
+            if value is not None:
+                metadata[name] = max(0, int(value))
+        if elapsed_sec is not None:
+            metadata["elapsed_sec"] = round(max(0.0, elapsed_sec), 3)
+        self.trace.append(metadata)
 
     def finish_call(
         self, started: float, *, timed_out: bool = False, success: bool = False,
@@ -997,6 +1019,7 @@ SUMMARY_PROBE_BATCH_SIZE = 10
 SUMMARY_MIN_BATCH_SIZE = 10
 SUMMARY_BATCH_SLOW_SEC = 30
 _SUMMARY_BATCH_EXCERPT_CHARS = 700
+SUMMARY_OMISSION_RETRY_SIZE = 5
 
 
 def _compact_batch_excerpt(excerpt: str, max_chars: int = _SUMMARY_BATCH_EXCERPT_CHARS) -> str:
@@ -1418,22 +1441,30 @@ def summarize_sessions_via_llm_batch(
     while start < len(items):
         if budget is not None and budget.remaining_sec() <= 0:
             budget.stopped_reason = "budget_exhausted"
+            requested_count = min(current_batch_size, len(items) - start)
             budget.record_batch(
                 "session_summaries", chunk_index + 1, chunk_index + 1, 0,
                 outcome="budget_exhausted",
+                requested_count=requested_count,
+                valid_count=0,
+                unresolved_count=requested_count,
+                elapsed_sec=0.0,
             )
             break
         chunk_index += 1
         chunk = items[start:start + current_batch_size]
-        rows = "\n\n".join(
-            f"[session_id={session_id}; project={project}]\n"
-            f"{_compact_batch_excerpt(excerpt)}"
-            for session_id, project, excerpt in chunk
-        )
-        prompt = _SUMMARY_BATCH_PROMPT.format(
-            language_directive=language_directive(), rows=rows,
-        )
-        started = time.monotonic()
+        def make_prompt(prompt_chunk: list[tuple[str, str, str]]) -> str:
+            rows = "\n\n".join(
+                f"[session_id={session_id}; project={project}]\n"
+                f"{_compact_batch_excerpt(excerpt)}"
+                for session_id, project, excerpt in prompt_chunk
+            )
+            return _SUMMARY_BATCH_PROMPT.format(
+                language_directive=language_directive(), rows=rows,
+            )
+
+        prompt = make_prompt(chunk)
+        primary_started = time.monotonic()
         try:
             call = _run_budgeted_llm_p(
                 prompt, timeout, budget, lane="session_summaries",
@@ -1441,19 +1472,97 @@ def summarize_sessions_via_llm_batch(
         except (subprocess.SubprocessError, OSError) as exc:
             LOG.warning("batch session summarization errored: %s", exc)
             call = None
+        primary_elapsed = time.monotonic() - primary_started
+        primary_valid_count = 0
+        primary_outcome = "failed"
         if call is not None:
             requested_ids = {session_id for session_id, _, _ in chunk}
-            for session_id, summary in _parse_batch_summaries(
-                call.stdout, requested_ids,
-            ).items():
+            parsed = _parse_batch_summaries(call.stdout, requested_ids)
+            primary_valid_count = len(parsed)
+            if primary_valid_count == len(chunk):
+                primary_outcome = "completed"
+            elif primary_valid_count:
+                primary_outcome = "partial"
+            else:
+                primary_outcome = "empty"
+            for session_id, summary in parsed.items():
                 out[session_id] = NarrativeCall(
                     summary, call.provider, call.model,
                 )
-        elapsed = time.monotonic() - started
+            missing = [item for item in chunk if item[0] not in parsed]
+            if missing:
+                # A retry is deliberately smaller than the failed primary
+                # chunk.  For a one-item primary chunk no non-empty strict
+                # subset exists, so the omission remains fail-closed.
+                retry_limit = min(
+                    SUMMARY_OMISSION_RETRY_SIZE,
+                    max(0, len(chunk) // 2),
+                    max(0, len(chunk) - 1),
+                )
+                retry_chunk = missing[:retry_limit]
+                if retry_chunk:
+                    retry_call: NarrativeCall | None = None
+                    retry_parsed: dict[str, str] = {}
+                    retry_elapsed = 0.0
+                    retry_outcome = "failed"
+                    retry_budget_exhausted = (
+                        budget is not None and budget.remaining_sec() <= 0
+                    )
+                    if not retry_budget_exhausted:
+                        retry_started = time.monotonic()
+                        try:
+                            retry_call = _run_budgeted_llm_p(
+                                make_prompt(retry_chunk), timeout, budget,
+                                lane="session_summaries_retry",
+                            )
+                        except (subprocess.SubprocessError, OSError) as exc:
+                            LOG.warning("batch omission retry errored: %s", exc)
+                        retry_elapsed = time.monotonic() - retry_started
+                    if retry_call is not None:
+                        retry_ids = {
+                            session_id for session_id, _, _ in retry_chunk
+                        }
+                        # Parse exactly once, then use only validated requested
+                        # rows for both cache writes and trace outcome/counts.
+                        retry_parsed = _parse_batch_summaries(
+                            retry_call.stdout, retry_ids,
+                        )
+                        recovered_count = len(retry_parsed)
+                        if recovered_count == len(retry_chunk):
+                            retry_outcome = "recovered"
+                        elif recovered_count:
+                            retry_outcome = "partial"
+                        else:
+                            retry_outcome = "empty"
+                        for session_id, summary in retry_parsed.items():
+                            out[session_id] = NarrativeCall(
+                                summary, retry_call.provider, retry_call.model,
+                            )
+                    elif retry_budget_exhausted or (
+                        budget is not None
+                        and budget.stopped_reason == "budget_exhausted"
+                        and budget.remaining_sec() <= 0
+                    ):
+                        retry_outcome = "budget_exhausted"
+                        if budget is not None:
+                            budget.stopped_reason = "budget_exhausted"
+                    recovered_count = len(retry_parsed)
+                    if budget is not None:
+                        budget.record_batch(
+                            "session_summaries_retry", chunk_index, chunk_index,
+                            len(retry_chunk),
+                            outcome=retry_outcome,
+                            requested_count=len(retry_chunk),
+                            valid_count=recovered_count,
+                            recovered_count=recovered_count,
+                            untried_count=len(missing) - len(retry_chunk),
+                            unresolved_count=len(missing) - recovered_count,
+                            elapsed_sec=retry_elapsed,
+                        )
         # Probe first, then react to current-model speed without assuming
         # linear token latency. Failed or slow chunks shrink the next request;
         # a quick probe grows toward the normal 40-session ceiling.
-        if call is None or elapsed >= SUMMARY_BATCH_SLOW_SEC:
+        if call is None or primary_elapsed >= SUMMARY_BATCH_SLOW_SEC:
             current_batch_size = max(SUMMARY_MIN_BATCH_SIZE, current_batch_size // 2)
         elif current_batch_size < batch_size:
             current_batch_size = min(batch_size, current_batch_size * 2)
@@ -1465,6 +1574,11 @@ def summarize_sessions_via_llm_batch(
             )
             budget.record_batch(
                 "session_summaries", chunk_index, projected_total, len(chunk),
+                outcome=primary_outcome,
+                requested_count=len(chunk),
+                valid_count=primary_valid_count,
+                unresolved_count=len(chunk) - primary_valid_count,
+                elapsed_sec=primary_elapsed,
             )
         if on_chunk_complete is not None:
             remaining = len(items) - start
