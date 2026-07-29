@@ -77,7 +77,7 @@ valid_until = "2026-07-31"
             "path": str(path.resolve()),
         }
         assert context.source_fingerprint == (
-            "sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest()
+            "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
         )
 
     def test_schema_serialization_round_trips(self):

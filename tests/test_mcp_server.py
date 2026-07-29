@@ -10,6 +10,7 @@ installed `mcp` SDK), so these call `get_recap` / `compare_to_previous` /
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -310,7 +311,7 @@ class TestGetRecap:
         source = tmp_home / ".ccstory" / "configured-goals.toml"
         config = recap.CONFIG_PATH
         config.write_text(
-            f'[goal_context]\npath = "{source}"\n',
+            f"[goal_context]\npath = {json.dumps(str(source))}\n",
             encoding="utf-8",
         )
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import stat
 from pathlib import Path
 from types import SimpleNamespace
@@ -237,7 +238,7 @@ class TestManagedGoalCLI:
         text = path.read_text()
         assert text.index('id = "alpha"') < text.index('id = "zeta"')
         assert not list(path.parent.glob(f".{path.name}.*.tmp"))
-        if hasattr(stat, "S_IMODE"):
+        if os.name != "nt":
             assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
     def test_atomic_replace_failure_preserves_original_and_cleans_temp(
@@ -373,7 +374,7 @@ class TestGoalSourceSelection:
             external, "external", "First version", "external-app"
         )
         config.write_text(
-            f'[goal_context]\npath = "{external}"\n',
+            f"[goal_context]\npath = {json.dumps(str(external))}\n",
             encoding="utf-8",
         )
 
