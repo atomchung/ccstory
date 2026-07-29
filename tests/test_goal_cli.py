@@ -17,9 +17,13 @@ from ccstory import cli as cli_module
 from ccstory import goal_store
 from ccstory.cli import _run_goal
 from ccstory.goal_store import (
+    GoalSourceOperation,
+    ManagedTomlGoalSource,
+    ReadOnlyTomlGoalSource,
     load_managed_goal_context,
     managed_goal_context_path,
     resolve_goal_context_source,
+    select_goal_source,
 )
 from ccstory.goals import GoalContextError
 
@@ -273,6 +277,53 @@ class TestManagedGoalCLI:
 
 
 class TestGoalSourceSelection:
+    def test_adapter_capabilities_and_managed_round_trip(self, tmp_path: Path):
+        managed_path = tmp_path / "managed.toml"
+        managed = ManagedTomlGoalSource(managed_path, aliases={})
+        readonly = ReadOnlyTomlGoalSource(
+            tmp_path / "external.toml", kind="explicit", aliases={}
+        )
+
+        assert managed.capabilities == {
+            GoalSourceOperation.READ,
+            GoalSourceOperation.UPSERT,
+            GoalSourceOperation.DELETE,
+        }
+        assert readonly.capabilities == {GoalSourceOperation.READ}
+        assert managed.read().goals == ()
+        managed.upsert(
+            "owned",
+            title="Owned path",
+            projects=["owned-app"],
+        )
+        assert [goal.id for goal in managed.read().goals] == ["owned"]
+        assert managed.delete("owned") is True
+        assert managed.read().goals == ()
+
+    def test_readonly_mutation_rejects_before_changing_bytes(
+        self, tmp_path: Path
+    ):
+        external = tmp_path / "external.toml"
+        before = _goal_file(external, "external", "External", "external-app")
+        source = ReadOnlyTomlGoalSource(external, kind="configured", aliases={})
+
+        with pytest.raises(GoalContextError, match="read-only"):
+            source.upsert("new", title="New", projects=["new-app"])
+        with pytest.raises(GoalContextError, match="read-only"):
+            source.delete("external")
+        assert external.read_bytes() == before
+
+    def test_managed_adapter_owns_only_its_injected_path(self, tmp_path: Path):
+        first = ManagedTomlGoalSource(tmp_path / "first.toml", aliases={})
+        second_path = tmp_path / "second.toml"
+        second_before = _goal_file(
+            second_path, "second", "Second", "second-app"
+        )
+
+        first.upsert("first", title="First", projects=["first-app"])
+        assert [goal.id for goal in first.read().goals] == ["first"]
+        assert second_path.read_bytes() == second_before
+
     def test_precedence_is_explicit_then_configured_then_managed(
         self, tmp_home: Path, tmp_path: Path
     ):
@@ -299,6 +350,16 @@ class TestGoalSourceSelection:
         assert [goal.id for goal in selected.goals] == ["explicit"]
         assert selected.source_metadata["source_kind"] == "explicit"
 
+        source = select_goal_source(
+            "explicit.toml",
+            config_path=config,
+            cwd=explicit.parent,
+            managed_path=managed,
+            aliases={},
+        )
+        assert isinstance(source, ReadOnlyTomlGoalSource)
+        assert source.source_kind == "explicit"
+
         selected = resolve_goal_context_source(
             config_path=config,
             managed_path=managed,
@@ -306,6 +367,12 @@ class TestGoalSourceSelection:
         )
         assert [goal.id for goal in selected.goals] == ["configured"]
         assert selected.source_metadata["source_kind"] == "configured"
+
+        source = select_goal_source(
+            config_path=config, managed_path=managed, aliases={}
+        )
+        assert isinstance(source, ReadOnlyTomlGoalSource)
+        assert source.source_kind == "configured"
 
         config.unlink()
         selected = resolve_goal_context_source(
@@ -315,6 +382,12 @@ class TestGoalSourceSelection:
         )
         assert [goal.id for goal in selected.goals] == ["managed"]
         assert selected.source_metadata["source_kind"] == "managed"
+
+        source = select_goal_source(
+            config_path=config, managed_path=managed, aliases={}
+        )
+        assert isinstance(source, ManagedTomlGoalSource)
+        assert source.source_kind == "managed"
 
     def test_tilde_expands_and_explicit_does_not_read_invalid_config(
         self, tmp_home: Path

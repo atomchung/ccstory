@@ -278,6 +278,15 @@ path = "/absolute/or/config-relative/goals.toml"
 Override that source for one recap with `--goals-file PATH`. Explicit,
 configured, and managed sources have that precedence; `ccstory goal
 set/unset` always mutates only the managed default.
+
+Internally, source selection returns a capability-bearing Goal Source Adapter.
+The managed adapter explicitly permits `read`, `upsert`, and `delete`;
+configured and explicit TOML adapters permit only `read`. Agents and library
+integrations must inspect those runtime capabilities rather than treating a
+path or a `source_kind` value as write authority. This lets an agent safely use
+`ccstory goal set ...` for the managed source while guiding the user back to an
+external source's owning system when that source is selected.
+
 The external file uses the same strict v1 TOML schema:
 
 ```toml
