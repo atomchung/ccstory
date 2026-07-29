@@ -16,6 +16,7 @@ from ccstory.init_categories import (
     _aggregate_folder_rules,
     _parse_toml_categories,
     _salvage_toml_categories,
+    _write_config,
     run_deep_mode,
     run_quick_mode,
     run_skip_mode,
@@ -152,6 +153,24 @@ class TestRunSkipMode:
         rc = run_skip_mode(dry_run=True, console=Console(file=StringIO()))
         assert rc == 0
         assert not cfg.exists()
+
+
+def test_init_config_rewrite_preserves_goal_context_source(tmp_home: Path):
+    config = tmp_home / ".ccstory" / "config.toml"
+    config.write_text(
+        "[categories]\n"
+        '"old" = ["old-app"]\n'
+        "\n"
+        "[goal_context]\n"
+        'path = "../personal-os/goals.toml"\n',
+        encoding="utf-8",
+    )
+
+    _write_config(config, {"new": ["new-app"]})
+
+    rendered = config.read_text(encoding="utf-8")
+    assert "[goal_context]" in rendered
+    assert 'path = "../personal-os/goals.toml"' in rendered
 
 
 # --- run_quick_mode / run_deep_mode dispatcher hooks ------------------------

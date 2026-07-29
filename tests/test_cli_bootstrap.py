@@ -362,12 +362,22 @@ def test_unknown_option_keeps_full_cli_argparse_contract():
     assert "unrecognized arguments" in module.stderr
 
 
+def test_goal_help_routes_to_the_goal_subcommand_parser():
+    result = _run(["-m", "ccstory", "goal", "--help"])
+
+    assert result.returncode == 0
+    assert result.stdout.startswith("usage: ccstory goal")
+    assert "set,list,unset" in result.stdout
+    assert result.stderr == ""
+
+
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [
         (["--help"], True),
         (["week", "--help"], True),
         (["trend", "--help"], False),
+        (["goal", "--help"], False),
         (["mcp", "--version"], False),
         (["--", "--help"], False),
         (["week", "--", "--help"], False),
