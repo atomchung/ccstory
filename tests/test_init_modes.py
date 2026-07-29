@@ -138,7 +138,6 @@ class TestAggregateFolderRules:
 
 class TestRunSkipMode:
     def test_writes_template_config_when_missing(self, tmp_home: Path):
-        from ccstory import categorizer
         cfg = tmp_home / ".ccstory" / "config.toml"
         assert not cfg.exists()
         rc = run_skip_mode(console=Console(file=StringIO()))
@@ -171,6 +170,31 @@ def test_init_config_rewrite_preserves_goal_context_source(tmp_home: Path):
     rendered = config.read_text(encoding="utf-8")
     assert "[goal_context]" in rendered
     assert 'path = "../personal-os/goals.toml"' in rendered
+
+
+def test_init_config_rewrite_invalidates_cached_parse(
+    tmp_home: Path,
+    monkeypatch,
+):
+    from ccstory import categorizer
+
+    config = tmp_home / ".ccstory" / "config.toml"
+    config.write_text(
+        "[categories]\n"
+        '"old" = ["old-app"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        categorizer,
+        "_toml_stamp",
+        lambda path: (1, 1) if path.exists() else None,
+    )
+
+    assert categorizer.list_user_categories(config) == {"old": ["old-app"]}
+
+    _write_config(config, {"new": ["new-app"]})
+
+    assert categorizer.list_user_categories(config) == {"new": ["new-app"]}
 
 
 # --- run_quick_mode / run_deep_mode dispatcher hooks ------------------------

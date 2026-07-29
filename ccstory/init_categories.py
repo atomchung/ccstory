@@ -35,6 +35,7 @@ from rich.table import Table
 
 from .categorizer import (
     CONFIG_PATH,
+    _invalidate_toml_cache,
     _load_state,
     _render_goal_context_config,
     _render_narrative_config,
@@ -242,6 +243,7 @@ def _write_config(path: Path, proposal: dict[str, list[str]],
     lines.extend(_render_narrative_config(narrative))
     lines.extend(_render_goal_context_config(goal_context))
     path.write_text("\n".join(lines), encoding="utf-8")
+    _invalidate_toml_cache(path)
     return backup
 
 
