@@ -24,6 +24,25 @@ from ccstory.session_summarizer import (
 
 
 class TestAddCategoryKeywords:
+    def test_internal_writes_invalidate_cache_when_stat_stamp_is_unchanged(
+        self, tmp_home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(
+            categorizer,
+            "_toml_stamp",
+            lambda path: (1, 1) if path.exists() else None,
+        )
+
+        add_category_keywords("old-bucket", ["only-keyword"])
+        assert list_user_categories() == {
+            "old-bucket": ["only-keyword"],
+        }
+
+        add_category_keywords("new-bucket", ["only-keyword"])
+        assert list_user_categories() == {
+            "new-bucket": ["only-keyword"],
+        }
+
     def test_creates_config_when_missing(self, tmp_home: Path):
         assert not categorizer.CONFIG_PATH.exists()
         cats, moved = add_category_keywords("research", ["ai-project-research"])
