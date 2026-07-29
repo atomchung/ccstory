@@ -10,6 +10,7 @@ installed `mcp` SDK), so these call `get_recap` / `compare_to_previous` /
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -302,6 +303,79 @@ class TestGetRecap:
         assert {s["agent"] for s in claude["top_sessions"]} == {"claude"}
         assert codex["agent"] == "codex"
         assert {s["agent"] for s in codex["top_sessions"]} == {"codex"}
+
+    def test_goal_projection_reloads_configured_source_on_each_call(
+        self, tmp_home, jsonl_factory,
+    ):
+        _seed_session(jsonl_factory, "-Users-me-proj", "sess-1", hours_ago=2)
+        source = tmp_home / ".ccstory" / "configured-goals.toml"
+        config = recap.CONFIG_PATH
+        config.write_text(
+            f"[goal_context]\npath = {json.dumps(str(source))}\n",
+            encoding="utf-8",
+        )
+
+        def write_source(title: str) -> None:
+            source.write_text(
+                "schema_version = 1\n\n"
+                "[[goals]]\n"
+                'id = "current-goal"\n'
+                f'title = "{title}"\n'
+                'projects = ["proj"]\n',
+                encoding="utf-8",
+            )
+
+        write_source("First title")
+        first = get_recap(window="week")
+        write_source("Second title")
+        second = get_recap(window="week")
+
+        assert first["goals"]["source_kind"] == "configured"
+        assert first["goals"]["goals"][0]["title"] == "First title"
+        assert second["goals"]["goals"][0]["title"] == "Second title"
+        assert (
+            first["goals"]["context_fingerprint"]
+            != second["goals"]["context_fingerprint"]
+        )
+        assert second["goals"]["goals"][0]["total_hours"] > 0
+        assert "path" not in second["goals"]
+        assert str(source) not in repr(second["goals"])
+
+    def test_goal_projection_reloads_managed_default_on_each_call(
+        self, tmp_home, jsonl_factory,
+    ):
+        _seed_session(jsonl_factory, "-Users-me-proj", "sess-1", hours_ago=2)
+        first = get_recap(window="week")
+        assert "goals" not in first
+
+        managed = tmp_home / ".ccstory" / "goals.toml"
+        managed.write_text(
+            "schema_version = 1\n\n"
+            "[[goals]]\n"
+            'id = "managed-goal"\n'
+            'title = "Managed title"\n'
+            'projects = ["proj"]\n',
+            encoding="utf-8",
+        )
+        second = get_recap(window="week")
+
+        assert second["goals"]["source_kind"] == "managed"
+        assert second["goals"]["goals"][0]["id"] == "managed-goal"
+
+    def test_invalid_goal_source_is_a_normalized_tool_error(
+        self, tmp_home, jsonl_factory,
+    ):
+        _seed_session(jsonl_factory, "-Users-me-proj", "sess-1", hours_ago=2)
+        recap.CONFIG_PATH.write_text(
+            '[goal_context]\npath = "missing-goals.toml"\n',
+            encoding="utf-8",
+        )
+
+        out = get_recap(window="week")
+
+        assert out["ok"] is False
+        assert out["agent"] == "all"
+        assert "configured goal context file does not exist" in out["error"]
 
 
 class TestCompareToPrevious:

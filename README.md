@@ -255,6 +255,59 @@ session's *area* only — its project is the physical fact of which folder the
 work happened in, never reassigned. Results cache in `~/.ccstory/cache.db` so
 reruns are free.
 
+## Goal activity
+
+GoalContext v1 lets a recap relate measured activity to owner-defined goals
+without asking a narrator to infer those goals. Manage the private default
+file with:
+
+```bash
+ccstory goal set ship-recap --title "Ship the recap" --project ccstory
+ccstory goal list
+ccstory goal unset ship-recap
+```
+
+The managed source is `~/.ccstory/goals.toml`. To read an external,
+read-only source instead, configure `~/.ccstory/config.toml`:
+
+```toml
+[goal_context]
+path = "/absolute/or/config-relative/goals.toml"
+```
+
+Override that source for one recap with `--goals-file PATH`. Explicit,
+configured, and managed sources have that precedence; `ccstory goal
+set/unset` always mutates only the managed default.
+The external file uses the same strict v1 TOML schema:
+
+```toml
+schema_version = 1
+
+[[goals]]
+id = "ship-recap"
+title = "Ship the recap"
+projects = ["ccstory"]
+valid_from = 2026-07-01       # optional, inclusive local report date
+valid_until = 2026-09-30      # optional, inclusive local report date
+```
+
+Parsing is strict: unknown fields, invalid dates, and duplicate goal ids fail
+with an actionable error. Project references do not have to appear in current
+session history, so a valid future project can be declared before its first
+session.
+
+When goals are selected, the terminal card adds up to five highest-contribution
+rows, Markdown and full JSON include every goal, and MCP `get_recap` reloads
+the current configured/default source on every call. `compare_to_previous` and
+`get_trend` remain goal-free. Shared per-goal hours overlap and are
+**non-additive**; the global covered/exclusive/shared/unattributed buckets
+count each activity contribution once. Unattributed time remains visible.
+
+These values are activity/contribution evidence, not goal progress,
+completion, outcome, or acceptance. Goal titles and source content never enter
+narrator prompts or narrator traces. Public output includes only a sanitized
+source kind and content fingerprint, never the source path.
+
 ## Multiple coding agents
 
 This release currently reads Claude Code (`~/.claude/projects`), OpenAI Codex
@@ -358,7 +411,7 @@ pypi = ["my-package"]        # extra packages beyond auto-detection
 `Top focus` is the largest Category plus a compact, multi-session account of
 the strongest work and projects in it. It never promotes a raw prompt, command,
 or path as the explanation. `## What you did` is the separate cross-Category
-integration: 2-4 goal threads (bold header + bullets) that explain what the
+integration: 2-4 work themes (bold header + bullets) that explain what the
 period added up to. Per-category narrative is the normal recap flow; choose a
 different depth explicitly:
 
@@ -485,7 +538,7 @@ stdout is pure JSON (progress goes to stderr, same as markdown mode), so
 `ccstory week --json | jq .totals.active_hours` just works. The envelope
 carries `schema_version` (currently 1): renames/removals bump it, additive
 fields don't — consumers should tolerate unknown keys. Covers window, totals
-(hours/tokens/cost/cache), buckets, per-session lines, model breakdown, unpriced models (`unpriced_models`), provider coverage (`usage_coverage`), narrative, comparison, artifacts, and the pricing snapshot date. The markdown
+(hours/tokens/cost/cache), buckets, per-session lines, model breakdown, unpriced models (`unpriced_models`), provider coverage (`usage_coverage`), narrative, optional `goals`, comparison, artifacts, and the pricing snapshot date. The markdown
 report file is still written either way; JSON is a view, not a replacement.
 Every full-JSON session includes additive
 `summary_evidence.status` (`current`, `stale`, `legacy`, `unavailable`, or
@@ -608,6 +661,10 @@ Repo activity metadata providers. There is no ccstory telemetry or account.
   --model gpt-5.6-terra`, then `agy -p --model gemini-3.6-flash-low --effort
   low`. The selected CLI contacts its provider using your signed-in session and
   plan quota; ccstory does not use your API key or operate a proxy.
+- **GoalContext**: goal titles, source content/path/fingerprint, and
+  attribution never enter narrator prompts or traces. Recap output exposes the
+  goal rows, a sanitized source kind, and the fingerprint, but never the source
+  path.
 - **Pricing**: ccstory makes no pricing network requests. Model prices ship with each release and come from the LiteLLM registry.
 - **Repo activity**: local git supplies repo-wide commit counts. If `gh` is
   installed and authenticated, ccstory sends the repo slug and report date
@@ -738,7 +795,7 @@ Four read-only tools:
 
 | Tool | Returns |
 |---|---|
-| `get_recap(window, classify, allow_llm, agent)` | Totals, per-category active hours + narrative + a `children` per-project breakdown (name + hours), legacy overall narrative, additive deterministic `top_focus_projection`, top 5 sessions with `summary_evidence.status`, cost, usage coverage, and unpriced models. |
+| `get_recap(window, classify, allow_llm, agent)` | Totals, per-category active hours + narrative + a `children` per-project breakdown (name + hours), legacy overall narrative, additive deterministic `top_focus_projection`, optional current goal-activity projection, top 5 sessions with `summary_evidence.status`, cost, usage coverage, and unpriced models. |
 | `compare_to_previous(window, classify, agent)` | Active-hours and cost deltas vs. the immediately preceding same-length window, with current/previous usage coverage and unpriced models. |
 | `get_trend(period, count, classify, agent)` | Per-period series over the last `count` weeks/months (oldest first): active hours, cost, per-category hours, usage coverage, and unpriced models. `count` clamped to 1..24. |
 | `list_categories()` | The bucket rules ccstory classifies sessions into (user + built-in defaults). |

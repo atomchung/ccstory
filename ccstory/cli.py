@@ -13,7 +13,7 @@ Flags:
                        summaries; add --refresh to force-regenerate all.
     --minimal          Skip per-session narrative entirely (fastest)
                        (deprecated alias: --no-summary)
-    --no-aggregate     Skip the overall goal-thread narrative
+    --no-aggregate     Skip the overall work-theme narrative
     --reports-dir PATH Override default ~/.ccstory/reports/
 
 The recap pipeline itself lives in `ccstory.recap.build_recap()` — this
@@ -44,12 +44,21 @@ from .categorizer import (
     add_category_keywords,
     colors_for,
     ensure_default_config,
+    load_project_aliases,
     list_user_categories,
     load_settings,
     normalize_project_name,
     preview_classification,
     remove_category_keywords,
 )
+from .goal_store import (
+    load_managed_goal_context,
+    managed_goal_context_path,
+    resolve_goal_context_source,
+    set_managed_goal,
+    unset_managed_goal,
+)
+from .goals import GoalContextError
 from .recap import (
     CONFIG_PATH,
     REPORTS_DIR,
@@ -313,6 +322,126 @@ def _run_category(argv: list[str], console: Console) -> int:
     return 0
 
 
+def _run_goal(argv: list[str], console: Console) -> int:
+    """``ccstory goal {set,list,unset}`` — mutate only the managed store."""
+
+    p = argparse.ArgumentParser(
+        prog="ccstory goal",
+        description=(
+            "Manage local GoalContext v1 definitions in "
+            "~/.ccstory/goals.toml."
+        ),
+    )
+    sub = p.add_subparsers(dest="command", required=True)
+
+    set_p = sub.add_parser("set", help="Create or replace one goal by id")
+    set_p.add_argument("goal_id")
+    set_p.add_argument("--title", required=True)
+    set_p.add_argument(
+        "--project",
+        dest="projects",
+        action="append",
+        required=True,
+        help="Linked project; repeat for multiple projects",
+    )
+    set_p.add_argument("--valid-from", default=None, metavar="YYYY-MM-DD")
+    set_p.add_argument("--valid-until", default=None, metavar="YYYY-MM-DD")
+
+    list_p = sub.add_parser("list", help="List managed goals")
+    list_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the versioned GoalContext schema as JSON",
+    )
+
+    unset_p = sub.add_parser("unset", help="Remove one goal by id")
+    unset_p.add_argument("goal_id")
+    args = p.parse_args(argv)
+
+    path = managed_goal_context_path()
+    aliases = load_project_aliases(CONFIG_PATH)
+    try:
+        if args.command == "set":
+            context, replaced = set_managed_goal(
+                args.goal_id,
+                title=args.title,
+                projects=args.projects,
+                valid_from=args.valid_from,
+                valid_until=args.valid_until,
+                path=path,
+                aliases=aliases,
+            )
+            goal = next(
+                goal
+                for goal in context.goals
+                if goal.id == args.goal_id.strip()
+            )
+            action = "Updated" if replaced else "Set"
+            console.print(
+                f"[green]✓[/green] {action} goal `{goal.id}` · "
+                f"{goal.title} · {', '.join(goal.projects)}"
+            )
+            return 0
+
+        if args.command == "unset":
+            removed = unset_managed_goal(
+                args.goal_id,
+                path=path,
+                aliases=aliases,
+            )
+            if removed:
+                console.print(
+                    f"[green]✓[/green] Removed goal `{args.goal_id.strip()}`"
+                )
+            else:
+                console.print(
+                    f"[yellow]not found:[/yellow] goal "
+                    f"`{args.goal_id.strip()}`; nothing changed"
+                )
+            return 0
+
+        context = load_managed_goal_context(path, aliases=aliases)
+        if args.json:
+            sys.stdout.write(
+                _json.dumps(
+                    context.to_schema_dict(),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n"
+            )
+            return 0
+        if not context.goals:
+            console.print(
+                "[dim]No managed goals. Add one with: "
+                "ccstory goal set <goal-id> --title <title> "
+                "--project <project>[/dim]"
+            )
+            return 0
+        table = Table(title=f"Goals · {path}", title_style="bold")
+        table.add_column("ID", style="cyan", no_wrap=True)
+        table.add_column("Title")
+        table.add_column("Projects", style="dim")
+        table.add_column("Valid", style="dim", no_wrap=True)
+        for goal in context.goals:
+            valid = (
+                f"{goal.valid_from.isoformat() if goal.valid_from else '…'}"
+                " → "
+                f"{goal.valid_until.isoformat() if goal.valid_until else '…'}"
+            )
+            table.add_row(
+                goal.id,
+                goal.title,
+                ", ".join(goal.projects),
+                valid,
+            )
+        console.print(table)
+        return 0
+    except GoalContextError as exc:
+        console.print(f"[red]✗[/red] {exc}")
+        return 1
+
+
 def _run_trend(argv: list[str]) -> int:
     p = argparse.ArgumentParser(
         prog="ccstory trend",
@@ -459,7 +588,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
     raw = list(argv) if argv is not None else sys.argv[1:]
 
     # Manual dispatch for subcommands — keeps default `ccstory week`
-    # / `ccstory month` flow simple positional. `init` / `category` only
+    # / `ccstory month` flow simple positional. `init` / `category` / `goal` only
     # emit progress lines, so a stdout Console is fine; `trend` and the
     # default recap path resolve --format themselves and may switch to
     # a stderr Console so the markdown report can own stdout. `mcp` owns
@@ -473,6 +602,9 @@ def _dispatch(argv: list[str] | None = None) -> int:
     if raw and raw[0] == "category":
         logging.basicConfig(level=logging.WARNING)
         return _run_category(raw[1:], Console())
+    if raw and raw[0] == "goal":
+        logging.basicConfig(level=logging.WARNING)
+        return _run_goal(raw[1:], Console())
     if raw and raw[0] == "mcp":
         logging.basicConfig(level=logging.WARNING)
         return _run_mcp(raw[1:])
@@ -510,6 +642,15 @@ def _dispatch(argv: list[str] | None = None) -> int:
         format="%(levelname)s %(name)s: %(message)s",
     )
 
+    try:
+        goal_context = resolve_goal_context_source(
+            args.goals_file,
+            config_path=CONFIG_PATH,
+            aliases=load_project_aliases(CONFIG_PATH),
+        )
+    except GoalContextError as e:
+        sys.exit(str(e))
+
     # `build_recap` re-checks this; the early exit is only so a first-time
     # user gets the message before the first-run preview prints. Derive it
     # from the registry so a third-provider-only install is not rejected.
@@ -540,6 +681,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
             agent=args.agent,
             reports_dir=args.reports_dir,
             console=console,
+            goal_context=goal_context,
         )
     except (ValueError, RecapUnavailable) as e:
         sys.exit(str(e))
@@ -578,6 +720,8 @@ def _dispatch(argv: list[str] | None = None) -> int:
             comparison=result.comparison,
             artifacts=result.artifacts,
             agent=result.agent,
+            goal_context=result.goal_context,
+            goal_breakdown=result.goal_breakdown,
             console=console,
         )
         console.print(f"[dim]Prices as of {get_snapshot_date()}[/dim]")

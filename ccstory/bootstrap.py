@@ -23,7 +23,7 @@ from .provider_metadata import bundled_provider_names
 VALID_OUTPUT_FORMATS = ("auto", "markdown", "card", "json")
 VALID_REPORT_FLAVORS = ("plain", "obsidian")
 
-_SUBCOMMANDS = frozenset(("trend", "init", "category", "mcp"))
+_SUBCOMMANDS = frozenset(("trend", "init", "category", "goal", "mcp"))
 _VERSION_PLACEHOLDER = "<version is not needed for this argv>"
 
 
@@ -73,6 +73,8 @@ def build_top_level_parser(
             "      Per-bucket sparklines + burn-% over N periods.\n"
             "  ccstory category {list,set,unset} ...\n"
             "      Edit project-bucket rules from the CLI.\n"
+            "  ccstory goal {list,set,unset} ...\n"
+            "      Manage local goals in ~/.ccstory/goals.toml.\n"
             "  ccstory mcp\n"
             "      Serve recap/comparison/category data over MCP (stdio) so\n"
             "      other agents can query ccstory live. Requires the optional\n"
@@ -110,7 +112,7 @@ def build_top_level_parser(
                              "unless their prompt version is stale. Add "
                              "--refresh to force-regenerate them all.")
     parser.add_argument("--no-aggregate", action="store_true",
-                        help="Skip the overall goal-thread narrative "
+                        help="Skip the overall work-theme narrative "
                              "(one configured narrator call across all buckets)")
     parser.add_argument("--no-compare", action="store_true",
                         help="Skip the vs-previous-window comparison block")
@@ -119,7 +121,7 @@ def build_top_level_parser(
                         help="Narrative depth. `per-category` (default) = a header + "
                              "bullets per bucket; an unavailable narrator uses a "
                              "deterministic local fallback. `overall` = 2-4 "
-                             "goal threads (bold header + bullets) across "
+                             "work themes (bold header + bullets) across "
                              "all buckets. Each category can use one configured narrator call per "
                              "bucket, cached until the bucket's session set "
                              "changes). `both` = overall first, then "
@@ -159,6 +161,16 @@ def build_top_level_parser(
                              "not just this window. Implies --refresh.")
     parser.add_argument("--reports-dir", type=Path, default=default_reports_dir,
                         help=f"Markdown report output dir (default: {default_reports_dir})")
+    parser.add_argument(
+        "--goals-file",
+        type=Path,
+        default=None,
+        help=(
+            "Read GoalContext v1 from PATH for this recap. Overrides "
+            "config.toml [goal_context].path and the managed "
+            "~/.ccstory/goals.toml default."
+        ),
+    )
     parser.add_argument("--format", dest="output_format",
                         choices=VALID_OUTPUT_FORMATS, default="auto",
                         help="Output style. `card` = Rich panel (terminal). "

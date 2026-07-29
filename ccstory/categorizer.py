@@ -281,6 +281,46 @@ def load_settings(config_path: Path | None = None) -> dict:
     }
 
 
+def _extract_goal_context_config(
+    cfg: dict,
+) -> dict[str, str] | None:
+    """Return the supported ``[goal_context]`` table, validated strictly.
+
+    Goal source selection shares ccstory's existing config reader, but this
+    table is intentionally tiny: accepting malformed or unknown fields here
+    would make a later category rewrite silently discard configuration that
+    ccstory never understood.
+    """
+
+    raw = cfg.get("goal_context")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("config [goal_context] must be a table")
+    unknown = sorted(set(raw) - {"path"})
+    if unknown:
+        raise ValueError(
+            "config [goal_context] has unsupported field(s): "
+            + ", ".join(repr(name) for name in unknown)
+        )
+    path = raw.get("path")
+    if not isinstance(path, str) or not path.strip():
+        raise ValueError(
+            "config [goal_context].path must be a non-blank string"
+        )
+    return {"path": path.strip()}
+
+
+def load_goal_context_path(config_path: Path | None = None) -> str | None:
+    """Read the optional external GoalContext path from ``config.toml``."""
+
+    if config_path is None:
+        config_path = CONFIG_PATH
+    cfg = _load_toml(config_path) or {}
+    goal_context = _extract_goal_context_config(cfg)
+    return goal_context["path"] if goal_context is not None else None
+
+
 # Rich color names for each default bucket. Used by report.py for bar chart,
 # highlight line, and per-category headings. Base ANSI names (not `bright_*`
 # or fixed 256-color shades) so the palette tracks the user's terminal theme
@@ -660,6 +700,7 @@ def _render_config(
     language: str | None = None,
     projects: dict[str, str] | None = None,
     narrative: dict[str, object] | None = None,
+    goal_context: dict[str, str] | None = None,
 ) -> str:
     """Re-render config.toml from scratch from in-memory state.
 
@@ -667,7 +708,7 @@ def _render_config(
     `category set/unset` commands produce minimal diffs. The optional
     ``[projects]`` aliases and the optional ``[narrative]`` backend policy are
     preserved.  A category edit must not silently reset the model/provider
-    policy a user selected for recap prose.
+    policy a user selected for recap prose or the selected GoalContext source.
     """
     import json as _json
     lines = [
@@ -708,6 +749,7 @@ def _render_config(
         lines.append("[categories]")
     lines.append("")
     lines.extend(_render_narrative_config(narrative))
+    lines.extend(_render_goal_context_config(goal_context))
     return "\n".join(lines)
 
 
@@ -742,13 +784,36 @@ def _render_narrative_config(narrative: dict[str, object] | None) -> list[str]:
     return lines
 
 
+def _render_goal_context_config(
+    goal_context: dict[str, str] | None,
+) -> list[str]:
+    """Render the one supported source-selection table without mutation."""
+
+    if goal_context is None:
+        return []
+    import json as _json
+
+    return [
+        "[goal_context]",
+        f"path = {_json.dumps(goal_context['path'])}",
+        "",
+    ]
+
+
 def _load_state(
     path: Path,
 ) -> tuple[
-    dict[str, list[str]], dict[str, str], str, float, str | None, dict[str, object]
+    dict[str, list[str]],
+    dict[str, str],
+    str,
+    float,
+    str | None,
+    dict[str, object],
+    dict[str, str] | None,
 ]:
     """Read existing config (or defaults) into
-    ``(categories, projects, default_bucket, quota, language, narrative)``.
+    ``(categories, projects, default_bucket, quota, language, narrative,
+    goal_context)``.
 
     ``projects`` is the raw ``[projects]`` alias table, preserved so a
     ``category set/unset`` re-render never silently drops the user's aliases.
@@ -775,7 +840,16 @@ def _load_state(
         lang = lang.strip()
     raw_narrative = cfg.get("narrative")
     narrative = raw_narrative if isinstance(raw_narrative, dict) else {}
-    return categories, projects, default_bucket, quota, lang, narrative
+    goal_context = _extract_goal_context_config(cfg)
+    return (
+        categories,
+        projects,
+        default_bucket,
+        quota,
+        lang,
+        narrative,
+        goal_context,
+    )
 
 
 def add_category_keywords(
@@ -802,7 +876,15 @@ def add_category_keywords(
     if not cleaned:
         raise ValueError("at least one non-empty keyword required")
 
-    categories, projects, default_bucket, quota, language, narrative = _load_state(path)
+    (
+        categories,
+        projects,
+        default_bucket,
+        quota,
+        language,
+        narrative,
+        goal_context,
+    ) = _load_state(path)
     moved: list[tuple[str, str]] = []
     for kw in cleaned:
         for b, kws in list(categories.items()):
@@ -817,7 +899,15 @@ def add_category_keywords(
             target.append(kw)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        _render_config(categories, default_bucket, quota, language, projects, narrative),
+        _render_config(
+            categories,
+            default_bucket,
+            quota,
+            language,
+            projects,
+            narrative,
+            goal_context,
+        ),
         encoding="utf-8",
     )
     return categories, moved
@@ -839,7 +929,15 @@ def remove_category_keywords(
     if not cleaned:
         raise ValueError("at least one non-empty keyword required")
 
-    categories, projects, default_bucket, quota, language, narrative = _load_state(path)
+    (
+        categories,
+        projects,
+        default_bucket,
+        quota,
+        language,
+        narrative,
+        goal_context,
+    ) = _load_state(path)
     missing: list[str] = []
     target = categories.get(bucket, [])
     for kw in cleaned:
@@ -851,7 +949,15 @@ def remove_category_keywords(
         del categories[bucket]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        _render_config(categories, default_bucket, quota, language, projects, narrative),
+        _render_config(
+            categories,
+            default_bucket,
+            quota,
+            language,
+            projects,
+            narrative,
+            goal_context,
+        ),
         encoding="utf-8",
     )
     return categories, missing
@@ -863,7 +969,7 @@ def list_user_categories(
     """Return the current user `[categories]` mapping (empty if none)."""
     if path is None:
         path = CONFIG_PATH
-    categories, _, _, _, _, _ = _load_state(path)
+    categories, _, _, _, _, _, _ = _load_state(path)
     return categories
 
 

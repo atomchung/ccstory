@@ -36,6 +36,7 @@ from rich.table import Table
 from .categorizer import (
     CONFIG_PATH,
     _load_state,
+    _render_goal_context_config,
     _render_narrative_config,
     colors_for,
     ensure_default_config,
@@ -213,10 +214,11 @@ def _write_config(path: Path, proposal: dict[str, list[str]],
     """Backup existing then write new config. Returns backup path if any."""
     backup: Path | None = None
     narrative: dict[str, object] = {}
+    goal_context: dict[str, str] | None = None
     if path.exists():
         # ``init`` replaces classification rules, but its setup flow must not
-        # reset the separately-chosen narrator/provider policy.
-        _, _, _, _, _, narrative = _load_state(path)
+        # reset separately-chosen narrator/provider or GoalContext policy.
+        _, _, _, _, _, narrative, goal_context = _load_state(path)
         backup = path.with_suffix(f".toml.bak-{int(time.time())}")
         shutil.copy2(path, backup)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -238,6 +240,7 @@ def _write_config(path: Path, proposal: dict[str, list[str]],
         lines.append(f'"{bucket}" = [{plist}]')
     lines.append("")
     lines.extend(_render_narrative_config(narrative))
+    lines.extend(_render_goal_context_config(goal_context))
     path.write_text("\n".join(lines), encoding="utf-8")
     return backup
 

@@ -21,6 +21,15 @@ from ccstory.provider_metadata import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+
+def test_help_uses_work_theme_terminology():
+    help_text = bootstrap.build_top_level_parser(version="test").format_help()
+    normalized = " ".join(help_text.split())
+    assert "overall work-theme narrative" in normalized
+    assert "work themes (bold header + bullets)" in normalized
+    assert ("goal" + "-thread") not in normalized
+
+
 _DIRECT_BOOTSTRAP = (
     "from ccstory.bootstrap import main; "
     "raise SystemExit(main())"
@@ -362,12 +371,22 @@ def test_unknown_option_keeps_full_cli_argparse_contract():
     assert "unrecognized arguments" in module.stderr
 
 
+def test_goal_help_routes_to_the_goal_subcommand_parser():
+    result = _run(["-m", "ccstory", "goal", "--help"])
+
+    assert result.returncode == 0
+    assert result.stdout.startswith("usage: ccstory goal")
+    assert "set,list,unset" in result.stdout
+    assert result.stderr == ""
+
+
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [
         (["--help"], True),
         (["week", "--help"], True),
         (["trend", "--help"], False),
+        (["goal", "--help"], False),
         (["mcp", "--version"], False),
         (["--", "--help"], False),
         (["week", "--", "--help"], False),

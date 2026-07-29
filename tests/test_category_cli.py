@@ -142,6 +142,30 @@ class TestRoundTripWithLoadRules:
         txt = categorizer.CONFIG_PATH.read_text()
         assert 'language = "Traditional Chinese"' in txt
 
+    def test_goal_context_source_preserved_across_category_writes(
+        self, tmp_home: Path
+    ):
+        categorizer.CONFIG_PATH.write_text(
+            'default_bucket = "coding"\n'
+            "monthly_quota_usd = 3500\n"
+            "[categories]\n"
+            '"writing" = ["blog"]\n'
+            "\n"
+            "[goal_context]\n"
+            'path = "../personal-os/goals.toml"\n',
+            encoding="utf-8",
+        )
+
+        add_category_keywords("writing", ["newsletter"])
+        text_after_set = categorizer.CONFIG_PATH.read_text()
+        assert "[goal_context]" in text_after_set
+        assert 'path = "../personal-os/goals.toml"' in text_after_set
+
+        remove_category_keywords("writing", ["blog"])
+        text_after_unset = categorizer.CONFIG_PATH.read_text()
+        assert "[goal_context]" in text_after_unset
+        assert 'path = "../personal-os/goals.toml"' in text_after_unset
+
 
 def _seed_caches(period_keys: list[str]) -> None:
     """Drop a row into each cache table so we can verify invalidation."""

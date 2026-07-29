@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `ccstory goal set/list/unset` for the private managed
+  `~/.ccstory/goals.toml` store. Recaps select one source by
+  `--goals-file` (explicit) → config `[goal_context].path` → managed-default
+  precedence; external sources are read-only.
+- Recaps can now project a selected GoalContext v1 across the terminal card,
+  Markdown report, full JSON envelope, and compact MCP `get_recap` result.
+  Shared per-goal hours are explicitly non-additive, global coverage buckets
+  count each contribution once, unattributed activity stays visible, and every
+  surface states that contribution evidence is not progress, completion,
+  outcome, or acceptance. Public provenance includes only a sanitized source
+  kind and content fingerprint, never the source path. An absent or empty goal
+  context adds no section or JSON key.
+- MCP `get_recap` reloads the configured or managed goal source for every
+  call, remains read-only, and normalizes invalid goal sources into its usual
+  tool-error shape. Trend and comparison tools remain goal-free.
+
+### Changed
+
+- The narrator-inferred cross-category `What you did` concept is now called
+  **work themes** in the active prompt, CLI help, documentation, and tests, so
+  it cannot be confused with owner-authored GoalContext goals. Existing public
+  narrative fields and behavior are unchanged.
+
 ## [0.8.0] - 2026-07-28
 
 ### Changed

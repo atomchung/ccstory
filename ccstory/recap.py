@@ -38,6 +38,11 @@ from .categorizer import (
     normalize_project_name,
     resolve_session_bucket,
 )
+from .goals import (
+    GoalBreakdown,
+    GoalContext,
+    build_goal_breakdown,
+)
 from .providers import (
     agent_label,
     collect_provider_snapshot,
@@ -193,6 +198,10 @@ class RecapResult:
     # The window's SamplingPlan. Appended last so positional construction
     # stays compatible. None for a run that produced no narrative lanes.
     sampling: object | None = None
+    # Goal source/provenance and its deterministic window attribution are
+    # appended only; #218 owns every rendered/JSON/MCP surface.
+    goal_context: GoalContext | None = None
+    goal_breakdown: GoalBreakdown | None = None
 
     def to_json(self) -> dict:
         """The machine-readable envelope (`schema_version: 1`), same shape
@@ -213,6 +222,8 @@ class RecapResult:
             agent=self.agent,
             narrative_provenance=self.narrative_provenance,
             sampling=self.sampling,
+            goal_context=self.goal_context,
+            goal_breakdown=self.goal_breakdown,
         )
         if self.report_path is not None:
             payload["report_path"] = str(self.report_path)
@@ -248,7 +259,7 @@ def _synthesize_overall(
     budget: NarrativeBudget | None = None,
     plan=None,
 ) -> str | None:
-    """Synthesize the overall goal-thread narrative for the period.
+    """Synthesize the overall work-theme narrative for the period.
 
     Single configured-narrator call across all categories — replaces the old
     per-bucket aggregate path. Cache-friendly: only re-runs when the set of
@@ -588,6 +599,7 @@ def build_recap(
     reports_dir: Path | None = None,
     write_report: bool = True,
     console: Console | None = None,
+    goal_context: GoalContext | None = None,
 ) -> RecapResult:
     """Run the full recap pipeline for one window and return the result.
 
@@ -615,6 +627,7 @@ def build_recap(
                                          coding agent's sessions to include
       reports_dir       --reports-dir    None → ~/.ccstory/reports
       write_report      (CLI always writes)  False skips the report file
+      goal_context      optional validated GoalContext v1 for attribution
 
     `console` controls progress output: pass a Rich Console to see status
     lines / progress bars (the CLI passes its own; scripts typically pass
@@ -692,6 +705,14 @@ def build_recap(
         f"{usage.assistant_turns:,} turns\n"
     )
 
+    project_aliases = load_project_aliases(CONFIG_PATH)
+    goal_breakdown = build_goal_breakdown(
+        sessions,
+        goal_context,
+        aliases=project_aliases,
+        timezone=since.tzinfo,
+    )
+
     # `refresh` wipes the content-classification cache so the rules that
     # just changed actually take effect. Without this, sessions that were
     # claude-classified before the rule edit keep their old bucket. Done
@@ -760,7 +781,7 @@ def build_recap(
     # aliases feed the layer-2 (area → project) rollup (#69); layer-1 area
     # totals are independent of it.
     rollups = rollup_by_category(
-        sessions, aliases=load_project_aliases(CONFIG_PATH),
+        sessions, aliases=project_aliases,
     )
     console.print(
         f"[green]✓[/green] [dim]resolved into {len(rollups)} categories[/dim]\n"
@@ -898,6 +919,8 @@ def build_recap(
         category_narratives=category_narratives or None,
         agent=agent,
         narrative_provenance=narrative_provenance,
+        goal_context=goal_context,
+        goal_breakdown=goal_breakdown,
     )
 
     report_path: Path | None = None
@@ -926,4 +949,6 @@ def build_recap(
         counts=counts,
         narrative_provenance=narrative_provenance,
         sampling=sampling_plan,
+        goal_context=goal_context,
+        goal_breakdown=goal_breakdown,
     )
