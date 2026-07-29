@@ -6,7 +6,9 @@ import json
 import os
 import tempfile
 from collections.abc import Mapping
+from enum import StrEnum
 from pathlib import Path
+from typing import NoReturn, Protocol
 
 from .categorizer import load_goal_context_path
 from .goals import (
@@ -16,6 +18,136 @@ from .goals import (
     load_goal_context,
     parse_goal_context,
 )
+
+
+class GoalSourceOperation(StrEnum):
+    """Operations a GoalContext source explicitly permits at runtime."""
+
+    READ = "read"
+    UPSERT = "upsert"
+    DELETE = "delete"
+
+
+class GoalSourceAdapter(Protocol):
+    """Runtime-owned access contract for one selected GoalContext source."""
+
+    path: Path
+    source_kind: str
+    capabilities: frozenset[GoalSourceOperation]
+
+    def read(self) -> GoalContext: ...
+
+    def upsert(
+        self,
+        goal_id: str,
+        *,
+        title: str,
+        projects: list[str],
+        valid_from: str | None = None,
+        valid_until: str | None = None,
+    ) -> tuple[GoalContext, bool]: ...
+
+    def delete(self, goal_id: str) -> bool: ...
+
+
+class ReadOnlyTomlGoalSource:
+    """A structural external TOML source that deliberately cannot mutate."""
+
+    capabilities = frozenset({GoalSourceOperation.READ})
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        kind: str,
+        aliases: Mapping[str, str] | None = None,
+    ) -> None:
+        self.path = path
+        self.source_kind = kind
+        self._aliases = aliases
+
+    def read(self) -> GoalContext:
+        context = load_goal_context(self.path, aliases=self._aliases)
+        if context is None:  # Selected adapter paths are always concrete.
+            raise GoalContextError(  # pragma: no cover
+                f"{self.source_kind} goal context file does not exist: {self.path}"
+            )
+        return _with_source_kind(context, self.source_kind)
+
+    def upsert(
+        self,
+        goal_id: str,
+        *,
+        title: str,
+        projects: list[str],
+        valid_from: str | None = None,
+        valid_until: str | None = None,
+    ) -> tuple[GoalContext, bool]:
+        del goal_id, title, projects, valid_from, valid_until
+        self._mutation_not_allowed()
+
+    def delete(self, goal_id: str) -> bool:
+        del goal_id
+        self._mutation_not_allowed()
+
+    def _mutation_not_allowed(self) -> NoReturn:
+        raise GoalContextError(
+            f"{self.source_kind} goal context source is read-only: {self.path}"
+        )
+
+
+class ManagedTomlGoalSource:
+    """The sole mutable TOML source, owning exactly the injected path."""
+
+    capabilities = frozenset(
+        {
+            GoalSourceOperation.READ,
+            GoalSourceOperation.UPSERT,
+            GoalSourceOperation.DELETE,
+        }
+    )
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        aliases: Mapping[str, str] | None = None,
+    ) -> None:
+        self.path = path
+        self.source_kind = "managed"
+        self._aliases = aliases
+
+    def read(self) -> GoalContext:
+        return _with_source_kind(
+            load_managed_goal_context(self.path, aliases=self._aliases),
+            self.source_kind,
+        )
+
+    def upsert(
+        self,
+        goal_id: str,
+        *,
+        title: str,
+        projects: list[str],
+        valid_from: str | None = None,
+        valid_until: str | None = None,
+    ) -> tuple[GoalContext, bool]:
+        return set_managed_goal(
+            goal_id,
+            title=title,
+            projects=projects,
+            valid_from=valid_from,
+            valid_until=valid_until,
+            path=self.path,
+            aliases=self._aliases,
+        )
+
+    def delete(self, goal_id: str) -> bool:
+        return unset_managed_goal(
+            goal_id,
+            path=self.path,
+            aliases=self._aliases,
+        )
 
 
 def managed_goal_context_path() -> Path:
@@ -53,6 +185,8 @@ def render_goal_context_toml(context: GoalContext) -> bytes:
     """Serialize validated v1 data in one deterministic strict TOML form."""
 
     lines = [f"schema_version = {GOAL_CONTEXT_SCHEMA_VERSION}", ""]
+    if not context.goals:
+        lines.append("goals = []")
     for goal in context.goals:
         lines.extend(
             (
@@ -246,15 +380,15 @@ def _with_source_kind(context: GoalContext, source_kind: str) -> GoalContext:
     )
 
 
-def resolve_goal_context_source(
+def select_goal_source(
     goals_file: str | Path | None = None,
     *,
     config_path: Path,
     cwd: Path | None = None,
     managed_path: Path | None = None,
     aliases: Mapping[str, str] | None = None,
-) -> GoalContext | None:
-    """Load exactly one GoalContext by explicit/configured/managed precedence."""
+) -> GoalSourceAdapter | None:
+    """Select one source by explicit/configured/managed precedence."""
 
     source_kind: str
     if goals_file is not None:
@@ -286,7 +420,26 @@ def resolve_goal_context_source(
         raise GoalContextError(
             f"{source_kind} goal context file does not exist: {source}"
         )
-    context = load_goal_context(source, aliases=aliases)
-    if context is None:  # All selected paths are explicit to the core loader.
-        return None  # pragma: no cover
-    return _with_source_kind(context, source_kind)
+    if source_kind == "managed":
+        return ManagedTomlGoalSource(source, aliases=aliases)
+    return ReadOnlyTomlGoalSource(source, kind=source_kind, aliases=aliases)
+
+
+def resolve_goal_context_source(
+    goals_file: str | Path | None = None,
+    *,
+    config_path: Path,
+    cwd: Path | None = None,
+    managed_path: Path | None = None,
+    aliases: Mapping[str, str] | None = None,
+) -> GoalContext | None:
+    """Compatibility wrapper that loads the selected GoalContext source."""
+
+    source = select_goal_source(
+        goals_file,
+        config_path=config_path,
+        cwd=cwd,
+        managed_path=managed_path,
+        aliases=aliases,
+    )
+    return source.read() if source is not None else None

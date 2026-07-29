@@ -52,11 +52,9 @@ from .categorizer import (
     remove_category_keywords,
 )
 from .goal_store import (
-    load_managed_goal_context,
+    ManagedTomlGoalSource,
     managed_goal_context_path,
     resolve_goal_context_source,
-    set_managed_goal,
-    unset_managed_goal,
 )
 from .goals import GoalContextError
 from .recap import (
@@ -360,16 +358,15 @@ def _run_goal(argv: list[str], console: Console) -> int:
 
     path = managed_goal_context_path()
     aliases = load_project_aliases(CONFIG_PATH)
+    source = ManagedTomlGoalSource(path, aliases=aliases)
     try:
         if args.command == "set":
-            context, replaced = set_managed_goal(
+            context, replaced = source.upsert(
                 args.goal_id,
                 title=args.title,
                 projects=args.projects,
                 valid_from=args.valid_from,
                 valid_until=args.valid_until,
-                path=path,
-                aliases=aliases,
             )
             goal = next(
                 goal
@@ -384,11 +381,7 @@ def _run_goal(argv: list[str], console: Console) -> int:
             return 0
 
         if args.command == "unset":
-            removed = unset_managed_goal(
-                args.goal_id,
-                path=path,
-                aliases=aliases,
-            )
+            removed = source.delete(args.goal_id)
             if removed:
                 console.print(
                     f"[green]✓[/green] Removed goal `{args.goal_id.strip()}`"
@@ -400,7 +393,7 @@ def _run_goal(argv: list[str], console: Console) -> int:
                 )
             return 0
 
-        context = load_managed_goal_context(path, aliases=aliases)
+        context = source.read()
         if args.json:
             sys.stdout.write(
                 _json.dumps(

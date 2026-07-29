@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `~/.ccstory/goals.toml` store. Recaps select one source by
   `--goals-file` (explicit) → config `[goal_context].path` → managed-default
   precedence; external sources are read-only.
+- Goal source selection now returns a runtime capability adapter: the managed
+  source explicitly owns read/upsert/delete, while explicit and configured
+  TOML sources are structurally read-only. This gives agents and library
+  integrations one provider-neutral access seam without granting write
+  authority through GoalContext data or configuration.
 - Recaps can now project a selected GoalContext v1 across the terminal card,
   Markdown report, full JSON envelope, and compact MCP `get_recap` result.
   Shared per-goal hours are explicitly non-additive, global coverage buckets
@@ -31,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **work themes** in the active prompt, CLI help, documentation, and tests, so
   it cannot be confused with owner-authored GoalContext goals. Existing public
   narrative fields and behavior are unchanged.
+
+### Fixed
+
+- Deleting the final managed goal now serializes a strict, reloadable
+  `goals = []` GoalContext instead of leaving a schema that omitted the
+  required goals collection.
 
 ## [0.8.0] - 2026-07-28
 

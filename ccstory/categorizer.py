@@ -174,12 +174,7 @@ def _load_toml(path: Path) -> dict | None:
     in the past (issue #9).
     """
     cache_key = str(path.expanduser().resolve())
-    try:
-        stat = path.stat()
-    except OSError:
-        stamp = None
-    else:
-        stamp = (stat.st_mtime_ns, stat.st_size)
+    stamp = _toml_stamp(path)
 
     cached = _toml_cache.get(cache_key)
     if cached is not None and cached[0] == stamp:
@@ -213,6 +208,22 @@ def _load_toml(path: Path) -> dict | None:
         LOG.warning("failed to parse %s: %s", path, e)
         _toml_cache[cache_key] = (stamp, None)
         return None
+
+
+def _toml_stamp(path: Path) -> tuple[int, int] | None:
+    """Return the cheap cache guard for one config path."""
+
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_mtime_ns, stat.st_size
+
+
+def _invalidate_toml_cache(path: Path) -> None:
+    """Drop a config entry after an in-process writer replaces its contents."""
+
+    _toml_cache.pop(str(path.expanduser().resolve()), None)
 
 
 def load_rules(config_path: Path | None = None) -> list[CategoryRule]:
@@ -687,6 +698,7 @@ monthly_quota_usd = 3500
 """
     try:
         path.write_text(template, encoding="utf-8")
+        _invalidate_toml_cache(path)
         return True
     except OSError as e:
         LOG.warning("could not write template config to %s: %s", path, e)
@@ -910,6 +922,7 @@ def add_category_keywords(
         ),
         encoding="utf-8",
     )
+    _invalidate_toml_cache(path)
     return categories, moved
 
 
@@ -960,6 +973,7 @@ def remove_category_keywords(
         ),
         encoding="utf-8",
     )
+    _invalidate_toml_cache(path)
     return categories, missing
 
 
