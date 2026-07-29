@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from ccstory import recap
+from ccstory import session_summarizer as ss
 from ccstory.goals import parse_goal_context
 from tests.conftest import make_assistant_msg, make_user_msg
 
@@ -19,7 +20,7 @@ def test_goal_result_fields_are_appended_for_positional_compatibility():
     assert fields[-2:] == ["goal_context", "goal_breakdown"]
 
 
-def test_recap_computes_one_goal_breakdown_without_exposing_surfaces(
+def test_recap_computes_one_goal_breakdown_and_projects_surfaces(
     jsonl_factory, monkeypatch
 ):
     session_id = "goal-recap-session"
@@ -83,8 +84,9 @@ def test_recap_computes_one_goal_breakdown_without_exposing_surfaces(
         == result.goal_breakdown.covered_contribution
     )
 
-    # #218 owns output surfaces; #217 only hands the objects downstream.
-    assert "Alpha outcome" not in result.markdown
+    assert "## Goal activity" in result.markdown
+    assert "Alpha outcome" in result.markdown
+    assert result.to_json()["goals"]["goals"][0]["id"] == "goal-alpha"
     assert "goal_context" not in result.to_json()
     assert "goal_breakdown" not in result.to_json()
 
@@ -116,3 +118,85 @@ def test_recap_without_context_keeps_optional_fields_empty(jsonl_factory):
 
     assert result.goal_context is None
     assert result.goal_breakdown is None
+    assert "## Goal activity" not in result.markdown
+    assert "goals" not in result.to_json()
+
+
+def test_goal_context_never_enters_narrator_prompt_or_trace(
+    jsonl_factory, monkeypatch
+):
+    session_id = "goal-privacy-session"
+    jsonl_factory(
+        "-Users-me-alpha-app",
+        session_id,
+        [
+            make_user_msg("Do ordinary project work", _recent_ts(2.5)),
+            make_assistant_msg(
+                "Starting", _recent_ts(2.4), f"{session_id}-m1"
+            ),
+            make_user_msg("Add ordinary tests", _recent_ts(2.3)),
+            make_assistant_msg(
+                "Done", _recent_ts(2.2), f"{session_id}-m2"
+            ),
+        ],
+    )
+    secrets = (
+        "SECRET GOAL TITLE",
+        "SECRET SOURCE CONTENT",
+        "/Users/private/goals.toml",
+        "sha256:secret-goal-fingerprint",
+    )
+    context = parse_goal_context(
+        {
+            "schema_version": 1,
+            "goals": [
+                {
+                    "id": "private-goal",
+                    "title": secrets[0],
+                    "projects": ["alpha-app"],
+                }
+            ],
+        },
+        aliases={},
+        source_metadata={
+            "source_kind": "configured",
+            "content": secrets[1],
+            "path": secrets[2],
+        },
+        source_fingerprint=secrets[3],
+    )
+    ss.upsert(
+        session_id,
+        "Completed ordinary project work and added tests.",
+        source="provided",
+        project="alpha-app",
+    )
+    prompts: list[str] = []
+
+    def fake_narrator(prompt, *_args, **_kwargs):
+        prompts.append(prompt)
+        return ss.NarrativeCall(
+            "**Ordinary work shipped**\n- Added ordinary tests.",
+            "codex",
+            "test-model",
+        )
+
+    monkeypatch.setattr(ss, "llm_available", lambda: True)
+    monkeypatch.setattr(ss, "run_llm_p", fake_narrator)
+
+    result = recap.build_recap(
+        "week",
+        narrative="overall",
+        classify="folder",
+        compare=False,
+        artifacts=False,
+        write_report=False,
+        goal_context=context,
+    )
+
+    assert prompts
+    narrator_material = "\n".join(prompts)
+    narrator_trace = str(result.narrative_provenance)
+    for secret in secrets:
+        assert secret not in narrator_material
+        assert secret not in narrator_trace

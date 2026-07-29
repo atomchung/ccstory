@@ -19,6 +19,7 @@ from rich.text import Text
 
 from .artifacts import ArtifactsReport, MARKDOWN_REPO_LIMIT
 from .categorizer import colors_for, load_settings, normalize_project_name
+from .goals import GoalBreakdown, GoalContext
 from .providers import agent_label, list_providers
 from .session_identity import evidence_session_id, public_session_id
 from .session_summarizer import (
@@ -42,6 +43,84 @@ from .trends import PeriodComparison, PeriodPoint, sparkline, trend_by_category
 
 # Supported markdown flavors for render_report().
 VALID_FLAVORS = ("plain", "obsidian")
+
+# Public GoalContext projection (#218).  GoalContext is owner-authored input,
+# not narrator material: this projection is the only renderer-facing shape,
+# and deliberately carries no source path or arbitrary source metadata.
+_PUBLIC_GOAL_SOURCE_KINDS = frozenset(
+    ("managed", "configured", "explicit", "provided")
+)
+_GOAL_ACTIVITY_DISCLAIMER = (
+    "Activity/contribution evidence only; not goal progress, completion, "
+    "outcome, or acceptance."
+)
+_GLOBAL_GOAL_BUCKET_SEMANTICS = "additive_each_contribution_counted_once"
+
+
+def build_goal_projection(
+    context: GoalContext | None,
+    breakdown: GoalBreakdown | None,
+) -> dict | None:
+    """Project one selected GoalContext and its one reviewed breakdown.
+
+    The attribution core records seconds.  Public renderers consume only this
+    hour-denominated projection, so unit conversion, ordering, provenance
+    sanitization, and semantic disclaimers cannot drift between terminal,
+    Markdown, JSON, and MCP.
+    """
+    if context is None or breakdown is None or not context.goals:
+        return None
+
+    source_kind = context.source_metadata.get("source_kind", "provided")
+    if source_kind not in _PUBLIC_GOAL_SOURCE_KINDS:
+        source_kind = "provided"
+
+    def hours(seconds: float) -> float:
+        return round(seconds / 3600, 2)
+
+    ordered_goals = sorted(
+        breakdown.goals,
+        key=lambda goal: (-goal.total_contribution, goal.goal_id),
+    )
+    goals = [
+        {
+            "id": goal.goal_id,
+            "title": goal.title,
+            "total_hours": hours(goal.total_contribution),
+            "exclusive_hours": hours(goal.exclusive_contribution),
+            "shared_hours": hours(goal.shared_contribution),
+            "shared_hours_is_non_additive": True,
+            "projects_touched": list(goal.projects_touched),
+            "latest_activity": (
+                goal.latest_activity.isoformat()
+                if goal.latest_activity is not None
+                else None
+            ),
+        }
+        for goal in ordered_goals
+    ]
+    covered = breakdown.covered_contribution
+    return {
+        "schema_version": 1,
+        "source_kind": source_kind,
+        "context_fingerprint": context.source_fingerprint or None,
+        "per_goal_shared_semantics": breakdown.per_goal_shared_semantics,
+        "global_bucket_semantics": _GLOBAL_GOAL_BUCKET_SEMANTICS,
+        "disclaimer": _GOAL_ACTIVITY_DISCLAIMER,
+        "coverage": {
+            "covered_hours": hours(covered),
+            "exclusive_hours": hours(breakdown.exclusive_contribution),
+            "shared_hours": hours(breakdown.shared_contribution),
+            "unattributed_hours": hours(breakdown.unattributed_contribution),
+            "unattributed_share": (
+                round(breakdown.unattributed_contribution / covered, 4)
+                if covered
+                else 0.0
+            ),
+        },
+        "goals": goals,
+    }
+
 
 # ----- Multi-agent breakdown (#133) -------------------------------------------
 #
@@ -458,7 +537,7 @@ _INNER_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 
 
 def _narrative_headers(narrative: str) -> list[str]:
-    """Pull the bold thread headers out of a goal-thread overall narrative.
+    """Pull bold theme headers out of a work-theme overall narrative.
 
     `session_summarizer._OVERALL_PROMPT` (#98) shapes the overall narrative
     as 2-4 blocks, each a `**bold header**` line (the concrete win) followed
@@ -514,6 +593,52 @@ def _md_cell(value: str) -> str:
         .replace("\r", " ")
         .replace("\n", " ")
     )
+
+
+def _render_goal_projection_markdown(projection: dict) -> list[str]:
+    """Render the full GoalContext projection after time distribution."""
+    lines = [
+        "## Goal activity",
+        "",
+        "| Goal | Total contribution | Exclusive | Shared (non-additive) | "
+        "Projects | Latest |",
+        "|---|---:|---:|---:|---|---|",
+    ]
+    for goal in projection["goals"]:
+        label = f"{_md_cell(goal['title'])} (`{_md_cell(goal['id'])}`)"
+        projects = ", ".join(
+            f"`{_md_cell(project)}`"
+            for project in goal["projects_touched"]
+        ) or "—"
+        lines.append(
+            f"| {label} | {goal['total_hours']:.2f}h | "
+            f"{goal['exclusive_hours']:.2f}h | {goal['shared_hours']:.2f}h | "
+            f"{projects} | {goal['latest_activity'] or '—'} |"
+        )
+    coverage = projection["coverage"]
+    lines.extend(
+        [
+            "",
+            f"**Unattributed:** {coverage['unattributed_hours']:.2f}h "
+            f"({coverage['unattributed_share']*100:.1f}% of covered activity).",
+            "",
+            "> Shared hours overlap across goals and are non-additive per goal. "
+            "Global exclusive/shared/unattributed buckets count each "
+            "contribution once.",
+            f"> {projection['disclaimer']}",
+            "",
+        ]
+    )
+    source_note = f"> Source: `{projection['source_kind']}`"
+    if projection["context_fingerprint"] is not None:
+        source_note += (
+            " · Context fingerprint: "
+            f"`{_md_cell(projection['context_fingerprint'])}`"
+        )
+    else:
+        source_note += " · Context fingerprint unavailable"
+    lines.insert(-1, source_note + ".")
+    return lines
 
 
 def _yaml_scalar(value: str) -> str:
@@ -690,6 +815,8 @@ def render_report(
     category_narratives: dict[str, str] | None = None,
     agent: str | None = None,
     narrative_provenance: dict | None = None,
+    goal_context: GoalContext | None = None,
+    goal_breakdown: GoalBreakdown | None = None,
 ) -> str:
     """Produce the full markdown report.
 
@@ -747,6 +874,10 @@ def render_report(
             f"| {_md_cell(r.category)} | {h_m} | {pct:.0f}% | {r.sessions} | {r.messages:,} |"
         )
     lines.append("")
+
+    goal_projection = build_goal_projection(goal_context, goal_breakdown)
+    if goal_projection is not None:
+        lines.extend(_render_goal_projection_markdown(goal_projection))
 
     if comparison:
         lines.append(render_comparison_markdown(comparison))
@@ -1016,6 +1147,8 @@ def build_report_json(
     agent: str | None = None,
     narrative_provenance: dict | None = None,
     sampling: object | None = None,
+    goal_context: GoalContext | None = None,
+    goal_breakdown: GoalBreakdown | None = None,
 ) -> dict:
     """Machine-readable envelope mirroring the markdown report's content.
 
@@ -1155,6 +1288,9 @@ def build_report_json(
             ),
         },
     }
+    goal_projection = build_goal_projection(goal_context, goal_breakdown)
+    if goal_projection is not None:
+        payload["goals"] = goal_projection
     if comparison:
         payload["comparison"] = {
             "previous_label": comparison.previous_label,
@@ -1296,6 +1432,8 @@ def render_terminal_card(
     comparison: PeriodComparison | None = None,
     artifacts: ArtifactsReport | None = None,
     agent: str | None = None,
+    goal_context: GoalContext | None = None,
+    goal_breakdown: GoalBreakdown | None = None,
 ) -> Panel:
     """Rich Panel summarizing the recap. Designed for screenshot sharing."""
     summaries = summaries or {}
@@ -1405,12 +1543,52 @@ def render_terminal_card(
         parts.append(Text("By project", style="bold underline"))
         parts.append(proj_table)
 
+    goal_projection = build_goal_projection(goal_context, goal_breakdown)
+    if goal_projection is not None:
+        parts.append(Text(""))
+        parts.append(Text("Goal activity", style="bold underline"))
+        goal_table = Table.grid(padding=(0, 1))
+        goal_table.add_column(width=28, overflow="ellipsis")
+        goal_table.add_column(justify="right", width=7)
+        goal_table.add_column(justify="right", width=7)
+        goal_table.add_column(justify="right", width=8)
+        goal_table.add_row(
+            Text("Goal", style="dim"),
+            Text("Total", style="dim"),
+            Text("Excl.", style="dim"),
+            Text("Shared*", style="dim"),
+        )
+        visible_goals = goal_projection["goals"][:5]
+        for goal in visible_goals:
+            label = Text(goal["title"])
+            label.append(f" [{goal['id']}]", style="dim")
+            goal_table.add_row(
+                label,
+                Text(f"{goal['total_hours']:.2f}h"),
+                Text(f"{goal['exclusive_hours']:.2f}h"),
+                Text(f"{goal['shared_hours']:.2f}h"),
+            )
+        parts.append(goal_table)
+        hidden_count = len(goal_projection["goals"]) - len(visible_goals)
+        if hidden_count:
+            parts.append(
+                Text(f"+{hidden_count} more in full report", style="dim")
+            )
+        unattributed = goal_projection["coverage"]["unattributed_hours"]
+        parts.append(Text(f"Unattributed  {unattributed:.2f}h", style="dim"))
+        parts.append(
+            Text(
+                "* Shared non-additive · activity, not progress/completion.",
+                style="dim",
+            )
+        )
+
     if overall_narrative:
         parts.append(Text(""))
         parts.append(Text("What you did", style="bold underline"))
         headers = _narrative_headers(overall_narrative)
         if headers:
-            # Goal-thread narrative (#98): show each thread's bold header
+            # Work-theme narrative (#98): show each theme's bold header
             # (the concrete win) only — supporting bullets are one line away
             # via the "Full report" footer. Table.grid gives wrapped headers
             # a hanging indent instead of restarting at column 0.

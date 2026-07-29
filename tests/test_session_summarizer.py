@@ -1480,6 +1480,12 @@ class TestSynthesizeOverallForPeriod:
         assert "don't pad" in ss._OVERALL_PROMPT
         assert "1-3 bullet" in ss._OVERALL_PROMPT
 
+    def test_prompt_names_inferred_narrative_as_work_themes(self):
+        assert "WORK THEMES" in ss._OVERALL_PROMPT
+        old_term = "GOAL" + " THREADS"
+        assert old_term not in ss._OVERALL_PROMPT
+        assert old_term.lower() not in ss._OVERALL_PROMPT.lower()
+
     def test_empty_input_returns_none(self, tmp_home: Path):
         out = synthesize_overall_for_period(
             period_key="2026-05",

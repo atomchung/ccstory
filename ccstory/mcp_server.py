@@ -41,7 +41,13 @@ logging.basicConfig(level=logging.WARNING)
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 from . import recap  # noqa: E402 — module import so recap.CONFIG_PATH reads live (test monkeypatches target the attribute, not a copied value)
-from .categorizer import load_rules, load_settings, normalize_project_name  # noqa: E402
+from .categorizer import (  # noqa: E402
+    load_project_aliases,
+    load_rules,
+    load_settings,
+    normalize_project_name,
+)
+from .goal_store import resolve_goal_context_source  # noqa: E402
 from .session_identity import (  # noqa: E402
     evidence_session_id,
     public_session_id,
@@ -54,6 +60,7 @@ from .recap import RecapUnavailable, build_recap, parse_window  # noqa: E402
 from .report import (  # noqa: E402
     _session_summary_text,
     agent_breakdown,
+    build_goal_projection,
     top_focus_narrative,
 )
 from .time_tracking import collect_sessions, rollup_by_category  # noqa: E402
@@ -161,7 +168,7 @@ def _compact_recap(result) -> dict:
             sampling_projection = plan_compact_projection(plan)
         except AttributeError:
             sampling_projection = None
-    return {
+    payload = {
         "ok": True,
         "agent": result.agent,
         "label": result.label,
@@ -236,6 +243,13 @@ def _compact_recap(result) -> dict:
         "unpriced_models": result.usage.unpriced_models,
         "report_path": str(result.report_path) if result.report_path else None,
     }
+    goal_projection = build_goal_projection(
+        getattr(result, "goal_context", None),
+        getattr(result, "goal_breakdown", None),
+    )
+    if goal_projection is not None:
+        payload["goals"] = goal_projection
+    return payload
 
 
 def _compact_comparison(cmp) -> dict:
@@ -293,8 +307,15 @@ def get_recap(
     or `"hybrid"`, and/or `allow_llm=True`, to opt into LLM-assisted
     classification / narrative synthesis (slower, may cost tokens).
     `agent` selects all providers or one registered provider id.
+    If a configured or managed GoalContext exists, it is reloaded for this
+    call and returned as read-only activity/contribution evidence under
+    `goals`; no goal content is sent to the narrator.
     """
     try:
+        goal_context = resolve_goal_context_source(
+            config_path=recap.CONFIG_PATH,
+            aliases=load_project_aliases(recap.CONFIG_PATH),
+        )
         result = build_recap(
             window,
             classify=classify,
@@ -306,6 +327,7 @@ def get_recap(
             write_report=False,
             agent=agent,
             console=None,
+            goal_context=goal_context,
         )
     except _TOOL_ERRORS as e:
         out = _normalize_error(e)

@@ -13,7 +13,7 @@ Flags:
                        summaries; add --refresh to force-regenerate all.
     --minimal          Skip per-session narrative entirely (fastest)
                        (deprecated alias: --no-summary)
-    --no-aggregate     Skip the overall goal-thread narrative
+    --no-aggregate     Skip the overall work-theme narrative
     --reports-dir PATH Override default ~/.ccstory/reports/
 
 The recap pipeline itself lives in `ccstory.recap.build_recap()` — this
@@ -720,6 +720,8 @@ def _dispatch(argv: list[str] | None = None) -> int:
             comparison=result.comparison,
             artifacts=result.artifacts,
             agent=result.agent,
+            goal_context=result.goal_context,
+            goal_breakdown=result.goal_breakdown,
             console=console,
         )
         console.print(f"[dim]Prices as of {get_snapshot_date()}[/dim]")

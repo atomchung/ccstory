@@ -21,6 +21,15 @@ from ccstory.provider_metadata import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+
+def test_help_uses_work_theme_terminology():
+    help_text = bootstrap.build_top_level_parser(version="test").format_help()
+    normalized = " ".join(help_text.split())
+    assert "overall work-theme narrative" in normalized
+    assert "work themes (bold header + bullets)" in normalized
+    assert ("goal" + "-thread") not in normalized
+
+
 _DIRECT_BOOTSTRAP = (
     "from ccstory.bootstrap import main; "
     "raise SystemExit(main())"

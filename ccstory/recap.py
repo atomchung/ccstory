@@ -222,6 +222,8 @@ class RecapResult:
             agent=self.agent,
             narrative_provenance=self.narrative_provenance,
             sampling=self.sampling,
+            goal_context=self.goal_context,
+            goal_breakdown=self.goal_breakdown,
         )
         if self.report_path is not None:
             payload["report_path"] = str(self.report_path)
@@ -257,7 +259,7 @@ def _synthesize_overall(
     budget: NarrativeBudget | None = None,
     plan=None,
 ) -> str | None:
-    """Synthesize the overall goal-thread narrative for the period.
+    """Synthesize the overall work-theme narrative for the period.
 
     Single configured-narrator call across all categories — replaces the old
     per-bucket aggregate path. Cache-friendly: only re-runs when the set of
@@ -917,6 +919,8 @@ def build_recap(
         category_narratives=category_narratives or None,
         agent=agent,
         narrative_provenance=narrative_provenance,
+        goal_context=goal_context,
+        goal_breakdown=goal_breakdown,
     )
 
     report_path: Path | None = None

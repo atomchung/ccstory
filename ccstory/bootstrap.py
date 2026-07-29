@@ -112,7 +112,7 @@ def build_top_level_parser(
                              "unless their prompt version is stale. Add "
                              "--refresh to force-regenerate them all.")
     parser.add_argument("--no-aggregate", action="store_true",
-                        help="Skip the overall goal-thread narrative "
+                        help="Skip the overall work-theme narrative "
                              "(one configured narrator call across all buckets)")
     parser.add_argument("--no-compare", action="store_true",
                         help="Skip the vs-previous-window comparison block")
@@ -121,7 +121,7 @@ def build_top_level_parser(
                         help="Narrative depth. `per-category` (default) = a header + "
                              "bullets per bucket; an unavailable narrator uses a "
                              "deterministic local fallback. `overall` = 2-4 "
-                             "goal threads (bold header + bullets) across "
+                             "work themes (bold header + bullets) across "
                              "all buckets. Each category can use one configured narrator call per "
                              "bucket, cached until the bucket's session set "
                              "changes). `both` = overall first, then "

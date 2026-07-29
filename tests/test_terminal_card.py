@@ -1,10 +1,10 @@
 """Tests for the recap terminal card: bucket color collisions (bug report)
-and the "What you did" goal-thread narrative rendering (#98 follow-up).
+and the "What you did" work-theme narrative rendering (#98 follow-up).
 
 Bug report: with several custom `[categories]` buckets (none matching the
 built-in BUCKET_COLORS keys), color_for()'s per-bucket hash regularly put
 two different buckets on the same bar color, and the "What you did" section
-printed the raw `**bold**`/`- bullet` markup from the #98 goal-thread prompt
+printed the raw `**bold**`/`- bullet` markup from the #98 work-theme prompt
 verbatim instead of rendering it — and printed all of it, several times
 longer than the old 3-sentence narrative it replaced.
 """
@@ -229,7 +229,7 @@ class TestWhatYouDidCard:
         ))
         return console.export_text()
 
-    def test_goal_thread_narrative_shows_headers_without_raw_markup(self):
+    def test_work_theme_narrative_shows_headers_without_raw_markup(self):
         narrative = (
             "**fomo-kernel 現金 ingestion 地基與 TWR 三柱績效雙雙上卡**\n"
             "- 現金流與帳戶級現金部位首次接進核心引擎（build_state）\n"
