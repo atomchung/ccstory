@@ -23,7 +23,9 @@ from .provider_metadata import bundled_provider_names
 VALID_OUTPUT_FORMATS = ("auto", "markdown", "card", "json")
 VALID_REPORT_FLAVORS = ("plain", "obsidian")
 
-_SUBCOMMANDS = frozenset(("trend", "init", "category", "goal", "mcp"))
+_SUBCOMMANDS = frozenset(
+    ("trend", "init", "category", "goal", "goal-history", "mcp")
+)
 _VERSION_PLACEHOLDER = "<version is not needed for this argv>"
 
 
@@ -75,6 +77,8 @@ def build_top_level_parser(
             "      Edit project-bucket rules from the CLI.\n"
             "  ccstory goal {list,set,unset} ...\n"
             "      Manage local goals in ~/.ccstory/goals.toml.\n"
+            "  ccstory goal-history [--weeks N] [--agent AGENT]\n"
+            "      Read-only completed weekly goal activity as JSON.\n"
             "  ccstory mcp\n"
             "      Serve recap/comparison/category data over MCP (stdio) so\n"
             "      other agents can query ccstory live. Requires the optional\n"
