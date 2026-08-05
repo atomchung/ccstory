@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import date, datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
+from datetime import date, datetime, timedelta, timezone, tzinfo
 
 import pytest
 
@@ -27,6 +26,50 @@ UTC = timezone.utc
 OLDER_SINCE = datetime(2026, 7, 6, tzinfo=UTC)
 BOUNDARY = datetime(2026, 7, 13, tzinfo=UTC)
 NEWER_UNTIL = datetime(2026, 7, 20, tzinfo=UTC)
+
+_ZERO = timedelta(0)
+_HOUR = timedelta(hours=1)
+
+
+class _Pacific2026(tzinfo):
+    """Portable US-Pacific fixture with the real 2026 DST transitions."""
+
+    _standard_offset = timedelta(hours=-8)
+    _start = datetime(2026, 3, 8, 2)
+    _end = datetime(2026, 11, 1, 2)
+
+    def utcoffset(self, value: datetime | None) -> timedelta:
+        return self._standard_offset + self.dst(value)
+
+    def dst(self, value: datetime | None) -> timedelta:
+        if value is None or value.tzinfo is None:
+            return _ZERO
+        if value.tzinfo is not self:
+            raise ValueError("datetime has a different timezone")
+        local = value.replace(tzinfo=None)
+        if self._start + _HOUR <= local < self._end - _HOUR:
+            return _HOUR
+        if self._end - _HOUR <= local < self._end:
+            return _ZERO if value.fold else _HOUR
+        if self._start <= local < self._start + _HOUR:
+            return _HOUR if value.fold else _ZERO
+        return _ZERO
+
+    def tzname(self, value: datetime | None) -> str:
+        return "PDT" if self.dst(value) else "PST"
+
+    def fromutc(self, value: datetime) -> datetime:
+        if value.tzinfo is not self:
+            raise ValueError("fromutc requires this timezone")
+        start = self._start.replace(tzinfo=self)
+        end = self._end.replace(tzinfo=self)
+        standard_time = value + self._standard_offset
+        daylight_time = standard_time + _HOUR
+        if end <= daylight_time < end + _HOUR:
+            return standard_time.replace(fold=1)
+        if standard_time < start or daylight_time >= end:
+            return standard_time
+        return daylight_time
 
 
 def _session(
@@ -300,7 +343,7 @@ def test_input_window_and_session_permutations_do_not_change_output():
 
 
 def test_dst_week_uses_seven_local_days_not_fixed_elapsed_seconds():
-    pacific = ZoneInfo("America/Los_Angeles")
+    pacific = _Pacific2026()
     since = datetime(2026, 3, 2, tzinfo=pacific)
     until = datetime(2026, 3, 9, tzinfo=pacific)
     assert until.timestamp() - since.timestamp() == 167 * 3600
