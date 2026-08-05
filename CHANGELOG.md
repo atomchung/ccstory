@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added `ccstory goal-history` and MCP `get_goal_activity_history` as one
+  shared, read-only JSON projection over deterministic weekly goal activity.
+  Requests default to 4 completed local ISO weeks, reject counts outside 1..24,
+  collect every window in one provider snapshot, and reuse the existing
+  window-pure `build_goal_activity_series()` / `attribute_goals()` accounting.
+  Results include zero-activity effective goals, exclusive/shared/unattributed
+  hours, safe source provenance, explicit non-additive/disclaimer semantics,
+  and `coverage_status: unavailable` rather than mistaking token-usage coverage
+  for activity completeness. The surface never writes reports or GoalContext,
+  calls a narrator, or exposes session ids, prompts, transcript/source paths,
+  corrections, or internal evidence.
 - Added `ccstory goal set/list/unset` for the private managed
   `~/.ccstory/goals.toml` store. Recaps select one source by
   `--goals-file` (explicit) → config `[goal_context].path` → managed-default

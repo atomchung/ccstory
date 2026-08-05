@@ -8,11 +8,13 @@ in `recap.py`, `compare_to_previous()` in `trends.py`, `load_rules()` in
 `categorizer.py`) — this module adds protocol plumbing and a *third*,
 purposely smaller JSON shape on top, not new business logic.
 
-Compact JSON is a distinct contract from the other two ccstory already
-documents (the semi-stable function signatures, and the `--json` /
-`RecapResult.to_json()` envelope): it drops the full per-session list down
-to a handful of top sessions, and never returns raw transcript text. See
-README "MCP server" for the full field reference.
+Most compact MCP JSON is a distinct contract from the other two ccstory
+already documents (the semi-stable function signatures, and the `--json` /
+`RecapResult.to_json()` envelope): it drops the full per-session list down to
+a handful of top sessions, and never returns raw transcript text. The focused
+goal-history tool intentionally shares its whole sanitized success projection
+with the dedicated CLI/library seam. See README "MCP server" for the full
+field reference.
 
 v0 scope (deliberately): read-only, no fresh `claude -p` calls unless the
 caller opts in (`get_recap`'s `allow_llm`; `compare_to_previous` and
@@ -21,6 +23,9 @@ guarantee actually comes from), stdio transport only. `get_trend` landed
 last, after the other three tools' conventions had settled (the ordering
 issue #35 asked for), and follows them: compact points, cache-only bucket
 resolution, cost figures behind the same config [prices] override step.
+`get_goal_activity_history` is the later additive fifth tool: it bypasses
+classification and cost/narrative lanes and returns only deterministic weekly
+goal activity.
 """
 
 from __future__ import annotations
@@ -39,6 +44,7 @@ from typing import Literal
 logging.basicConfig(level=logging.WARNING)
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
+from pydantic import StrictInt  # noqa: E402
 
 from . import recap  # noqa: E402 — module import so recap.CONFIG_PATH reads live (test monkeypatches target the attribute, not a copied value)
 from .categorizer import (  # noqa: E402
@@ -48,6 +54,12 @@ from .categorizer import (  # noqa: E402
     normalize_project_name,
 )
 from .goal_store import resolve_goal_context_source  # noqa: E402
+from .goal_history import (  # noqa: E402
+    DEFAULT_GOAL_ACTIVITY_WEEKS,
+    collect_goal_activity_history as _collect_goal_activity_history,
+    public_goal_activity_error,
+    validate_goal_activity_weeks,
+)
 from .session_identity import (  # noqa: E402
     evidence_session_id,
     public_session_id,
@@ -492,6 +504,42 @@ def get_trend(
             for p in points
         ],
     }
+
+
+@mcp.tool()
+def get_goal_activity_history(
+    weeks: StrictInt = DEFAULT_GOAL_ACTIVITY_WEEKS,
+    agent: Agent = "all",
+) -> dict:
+    """Completed local weekly goal-activity buckets, oldest first.
+
+    This focused result is deterministic, read-only, and sanitized: it returns
+    hour-denominated contribution evidence plus GoalContext provenance and
+    accounting disclaimers, never session ids, transcript paths, or prompts.
+    It performs one provider snapshot for all requested weeks, never calls a
+    narrator, and never writes a report or GoalContext. ``weeks`` defaults to
+    4 and must be an integer from 1 through 24; invalid values are rejected
+    rather than clamped. A configured or managed GoalContext is required.
+    """
+
+    try:
+        count = validate_goal_activity_weeks(weeks)
+        aliases = load_project_aliases(recap.CONFIG_PATH)
+        goal_context = resolve_goal_context_source(
+            config_path=recap.CONFIG_PATH,
+            aliases=aliases,
+        )
+        return _collect_goal_activity_history(
+            goal_context,
+            weeks=count,
+            agent=agent,
+            aliases=aliases,
+        )
+    except _TOOL_ERRORS as exc:
+        out = _normalize_error(exc)
+        out["error"] = public_goal_activity_error(exc)
+        out["agent"] = agent
+        return out
 
 
 @mcp.tool()

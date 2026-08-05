@@ -10,6 +10,7 @@ installed `mcp` SDK), so these call `get_recap` / `compare_to_previous` /
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -17,8 +18,10 @@ from types import SimpleNamespace
 import pytest
 
 pytest.importorskip("mcp")
+from mcp.server.fastmcp.exceptions import ToolError  # noqa: E402
 
 from ccstory import cli, recap  # noqa: E402
+from ccstory import goal_history as goal_history_module  # noqa: E402
 from ccstory import session_summarizer as ss  # noqa: E402
 from tests.conftest import make_assistant_msg, make_user_msg  # noqa: E402
 
@@ -26,9 +29,11 @@ from ccstory.mcp_server import (  # noqa: E402
     _compact_comparison,
     _compact_recap,
     compare_to_previous,
+    get_goal_activity_history,
     get_recap,
     get_trend,
     list_categories,
+    mcp,
 )
 from ccstory.token_usage import ModelUsage, UsageReport  # noqa: E402
 from ccstory.trends import PeriodComparison, PeriodPoint  # noqa: E402
@@ -604,6 +609,143 @@ class TestGetTrend:
         assert claude["points"][-1]["active_hours"] > 0
 
 
+class TestGetGoalActivityHistory:
+    @staticmethod
+    def _write_goal_source(path, title="Ship history"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "schema_version = 1\n\n"
+            "[[goals]]\n"
+            'id = "ship-history"\n'
+            f'title = "{title}"\n'
+            'projects = ["proj"]\n',
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _empty_snapshot(monkeypatch):
+        calls = []
+
+        def fake_snapshot(windows, *, agent, engaged_only=True):
+            calls.append((dict(windows), agent))
+            return SimpleNamespace(
+                sessions_by_window={key: [] for key in windows}
+            )
+
+        monkeypatch.setattr(
+            goal_history_module, "collect_provider_snapshot", fake_snapshot
+        )
+        return calls
+
+    def test_mcp_and_cli_share_the_exact_success_projection(
+        self, tmp_home, monkeypatch, capsys,
+    ):
+        managed = tmp_home / ".ccstory" / "goals.toml"
+        self._write_goal_source(managed)
+        calls = self._empty_snapshot(monkeypatch)
+        real_planner = goal_history_module.completed_local_week_windows
+
+        def fixed_planner(weeks, *, now=None):
+            return real_planner(
+                weeks,
+                now=datetime(2026, 7, 22, 15, 30, tzinfo=timezone.utc),
+            )
+
+        monkeypatch.setattr(
+            goal_history_module,
+            "completed_local_week_windows",
+            fixed_planner,
+        )
+
+        mcp_payload = get_goal_activity_history(weeks=2, agent="claude")
+        assert cli._run_goal_history(
+            ["--weeks", "2", "--agent", "claude"]
+        ) == 0
+        captured = capsys.readouterr()
+        cli_payload = json.loads(captured.out)
+
+        assert captured.err == ""
+        assert cli_payload == mcp_payload
+        assert mcp_payload["ok"] is True
+        assert mcp_payload["source_kind"] == "managed"
+        assert mcp_payload["count"] == 2
+        assert len(calls) == 2
+        assert all(len(windows) == 2 for windows, _agent in calls)
+        assert not (tmp_home / ".ccstory" / "cache.db").exists()
+        assert not (tmp_home / ".ccstory" / "reports").exists()
+
+    @pytest.mark.parametrize("weeks", [True, 0, -1, 25, 4.0, "4"])
+    def test_invalid_count_is_normalized_not_clamped(
+        self, tmp_home, monkeypatch, weeks,
+    ):
+        self._write_goal_source(tmp_home / ".ccstory" / "goals.toml")
+        calls = self._empty_snapshot(monkeypatch)
+
+        out = get_goal_activity_history(weeks=weeks)
+
+        assert out["ok"] is False
+        assert out["agent"] == "all"
+        assert "goal activity weeks" in out["error"]
+        assert calls == []
+
+    @pytest.mark.parametrize("weeks", ["4", 4.0, True])
+    def test_protocol_rejects_coercible_non_integer_counts(self, weeks):
+        with pytest.raises(ToolError, match="valid integer"):
+            asyncio.run(
+                mcp.call_tool(
+                    "get_goal_activity_history",
+                    {"weeks": weeks},
+                )
+            )
+
+    def test_missing_or_invalid_context_fails_before_collection(
+        self, tmp_home, monkeypatch,
+    ):
+        calls = self._empty_snapshot(monkeypatch)
+
+        missing = get_goal_activity_history()
+        assert missing["ok"] is False
+        assert "No GoalContext source is configured" in missing["error"]
+
+        source = tmp_home / ".ccstory" / "invalid.toml"
+        invalid_bytes = b"schema_version = 1\ngoals = [not valid"
+        source.write_bytes(invalid_bytes)
+        recap.CONFIG_PATH.write_text(
+            f'[goal_context]\npath = {json.dumps(str(source))}\n',
+            encoding="utf-8",
+        )
+        invalid = get_goal_activity_history()
+        assert invalid["ok"] is False
+        assert (
+            "could not load or validate its selected GoalContext"
+            in invalid["error"]
+        )
+        assert str(source) not in invalid["error"]
+        assert source.read_bytes() == invalid_bytes
+        assert calls == []
+
+    def test_configured_source_is_reloaded_and_only_safe_provenance_is_returned(
+        self, tmp_home, monkeypatch,
+    ):
+        source = tmp_home / ".ccstory" / "private-goals.toml"
+        recap.CONFIG_PATH.write_text(
+            f'[goal_context]\npath = {json.dumps(str(source))}\n',
+            encoding="utf-8",
+        )
+        self._empty_snapshot(monkeypatch)
+
+        self._write_goal_source(source, "First title")
+        first = get_goal_activity_history(weeks=1)
+        self._write_goal_source(source, "Second title")
+        second = get_goal_activity_history(weeks=1)
+
+        assert first["buckets"][0]["goals"][0]["title"] == "First title"
+        assert second["buckets"][0]["goals"][0]["title"] == "Second title"
+        assert first["context_fingerprint"] != second["context_fingerprint"]
+        assert second["source_kind"] == "configured"
+        assert str(source) not in json.dumps(second)
+
+
 class TestListCategories:
     def test_returns_default_rules_shape(self, tmp_home):
         out = list_categories()
@@ -635,6 +777,7 @@ def test_no_stdout_leak_across_tools(tmp_home, jsonl_factory, capsys):
     get_recap(window="week")
     compare_to_previous(window="week")
     get_trend(period="week", count=2)
+    get_goal_activity_history()
     list_categories()
     assert capsys.readouterr().out == ""
 

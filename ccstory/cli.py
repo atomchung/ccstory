@@ -56,6 +56,13 @@ from .goal_store import (
     managed_goal_context_path,
     resolve_goal_context_source,
 )
+from .goal_history import (
+    DEFAULT_GOAL_ACTIVITY_WEEKS,
+    MAX_GOAL_ACTIVITY_WEEKS,
+    collect_goal_activity_history,
+    public_goal_activity_error,
+    validate_goal_activity_weeks,
+)
 from .goals import GoalContextError
 from .recap import (
     CONFIG_PATH,
@@ -435,6 +442,71 @@ def _run_goal(argv: list[str], console: Console) -> int:
         return 1
 
 
+def _run_goal_history(argv: list[str]) -> int:
+    """``ccstory goal-history`` — one read-only sanitized JSON series."""
+
+    p = argparse.ArgumentParser(
+        prog="ccstory goal-history",
+        description=(
+            "Return completed local weekly goal activity buckets as "
+            "sanitized JSON. Read-only; never runs a narrator or writes a "
+            "report."
+        ),
+    )
+    p.add_argument(
+        "--weeks",
+        type=int,
+        default=DEFAULT_GOAL_ACTIVITY_WEEKS,
+        help=(
+            "Number of completed local ISO weeks, oldest first "
+            f"(default {DEFAULT_GOAL_ACTIVITY_WEEKS}, max "
+            f"{MAX_GOAL_ACTIVITY_WEEKS})"
+        ),
+    )
+    p.add_argument(
+        "--agent",
+        choices=["all", *list_providers()],
+        default="all",
+        help="Which coding agent's sessions to include",
+    )
+    p.add_argument(
+        "--goals-file",
+        type=Path,
+        default=None,
+        help=(
+            "Read GoalContext v1 from PATH for this request. Overrides "
+            "config.toml [goal_context].path and the managed default."
+        ),
+    )
+    args = p.parse_args(argv)
+
+    try:
+        weeks = validate_goal_activity_weeks(args.weeks)
+        aliases = load_project_aliases(CONFIG_PATH)
+        context = resolve_goal_context_source(
+            args.goals_file,
+            config_path=CONFIG_PATH,
+            aliases=aliases,
+        )
+        payload = collect_goal_activity_history(
+            context,
+            weeks=weeks,
+            agent=args.agent,
+            aliases=aliases,
+        )
+    except (GoalContextError, ValueError) as exc:
+        print(
+            f"ccstory goal-history: {public_goal_activity_error(exc)}",
+            file=sys.stderr,
+        )
+        return 1
+
+    sys.stdout.write(
+        _json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    )
+    return 0
+
+
 def _run_trend(argv: list[str]) -> int:
     p = argparse.ArgumentParser(
         prog="ccstory trend",
@@ -584,8 +656,8 @@ def _dispatch(argv: list[str] | None = None) -> int:
     # / `ccstory month` flow simple positional. `init` / `category` / `goal` only
     # emit progress lines, so a stdout Console is fine; `trend` and the
     # default recap path resolve --format themselves and may switch to
-    # a stderr Console so the markdown report can own stdout. `mcp` owns
-    # stdout for the whole process (protocol stream) — no Console at all.
+    # a stderr Console so the markdown report can own stdout. `goal-history`
+    # owns stdout as a single JSON object; `mcp` owns it as a protocol stream.
     if raw and raw[0] == "trend":
         logging.basicConfig(level=logging.WARNING)
         return _run_trend(raw[1:])
@@ -598,6 +670,9 @@ def _dispatch(argv: list[str] | None = None) -> int:
     if raw and raw[0] == "goal":
         logging.basicConfig(level=logging.WARNING)
         return _run_goal(raw[1:], Console())
+    if raw and raw[0] == "goal-history":
+        logging.basicConfig(level=logging.WARNING)
+        return _run_goal_history(raw[1:])
     if raw and raw[0] == "mcp":
         logging.basicConfig(level=logging.WARNING)
         return _run_mcp(raw[1:])

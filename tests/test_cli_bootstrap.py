@@ -380,6 +380,16 @@ def test_goal_help_routes_to_the_goal_subcommand_parser():
     assert result.stderr == ""
 
 
+def test_goal_history_help_routes_to_the_read_only_json_parser():
+    result = _run(["-m", "ccstory", "goal-history", "--help"])
+
+    assert result.returncode == 0
+    assert result.stdout.startswith("usage: ccstory goal-history")
+    assert "completed local ISO weeks" in result.stdout
+    assert "sanitized JSON" in result.stdout
+    assert result.stderr == ""
+
+
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [
@@ -387,6 +397,7 @@ def test_goal_help_routes_to_the_goal_subcommand_parser():
         (["week", "--help"], True),
         (["trend", "--help"], False),
         (["goal", "--help"], False),
+        (["goal-history", "--help"], False),
         (["mcp", "--version"], False),
         (["--", "--help"], False),
         (["week", "--", "--help"], False),

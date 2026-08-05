@@ -317,6 +317,35 @@ completion, outcome, or acceptance. Goal titles and source content never enter
 narrator prompts or narrator traces. Public output includes only a sanitized
 source kind and content fingerprint, never the source path.
 
+For a bounded history that a dashboard can visualize without rebuilding goal
+accounting, use the dedicated read-only JSON command:
+
+```bash
+ccstory goal-history                         # 4 completed local ISO weeks
+ccstory goal-history --weeks 8 --agent codex
+ccstory goal-history --goals-file ./goals.toml | jq .buckets
+```
+
+Buckets are completed Monday 00:00 → Monday 00:00 weeks in the machine's local
+timezone, oldest first. The default is 4 and the hard maximum is 24; zero,
+negative, non-integer, and over-limit counts are rejected rather than silently
+clamped. All windows are passed through one provider snapshot, then each bucket
+uses the same window-pure session slices, canonical project identity,
+effective-date rules, wall-clock accounting, and `attribute_goals()` path as a
+current recap. A session crossing Monday contributes only its bounded facts to
+each side.
+
+The result is hours-only and includes every goal effective in each bucket,
+including zero-activity goals, plus exclusive/shared/unattributed coverage,
+safe source kind/fingerprint, and explicit additive/non-additive semantics.
+`coverage_status` is currently `unavailable`: provider token
+`usage_coverage` does not prove that historical activity collection is
+complete, so ccstory does not relabel it as activity coverage. The command
+requires a selected GoalContext and fails before collection when none is
+configured or when the source is invalid. It never writes a report, touches
+the narrator/cache, mutates GoalContext, or exposes session ids, transcript
+paths, prompts, correction text, or source paths.
+
 ## Multiple coding agents
 
 This release currently reads Claude Code (`~/.claude/projects`), OpenAI Codex
@@ -541,14 +570,18 @@ of parsing markdown:
 ccstory week --json          # shorthand for --format=json
 ccstory month --format json
 ccstory trend --weeks 8 --json
+ccstory goal-history         # dedicated sanitized weekly goal series
 ```
 
 stdout is pure JSON (progress goes to stderr, same as markdown mode), so
-`ccstory week --json | jq .totals.active_hours` just works. The envelope
+`ccstory week --json | jq .totals.active_hours` just works. For recap and trend
+commands, the envelope
 carries `schema_version` (currently 1): renames/removals bump it, additive
 fields don't — consumers should tolerate unknown keys. Covers window, totals
 (hours/tokens/cost/cache), buckets, per-session lines, model breakdown, unpriced models (`unpriced_models`), provider coverage (`usage_coverage`), narrative, optional `goals`, comparison, artifacts, and the pricing snapshot date. The markdown
 report file is still written either way; JSON is a view, not a replacement.
+`goal-history` is deliberately different: it returns only the sanitized series
+and writes no report.
 Every full-JSON session includes additive
 `summary_evidence.status` (`current`, `stale`, `legacy`, `unavailable`, or
 `not_applicable`). Raw evidence, fingerprints, transcript paths, and additional
@@ -732,11 +765,19 @@ scripts, and the [MCP server](#mcp-server) below all call these instead of
 shelling out to the CLI:
 
 ```python
+from pathlib import Path
+
 from ccstory.recap import build_recap
+from ccstory.goal_history import collect_goal_activity_history
+from ccstory.goal_store import resolve_goal_context_source
 from ccstory.time_tracking import collect_sessions, rollup_by_category
 from ccstory.categorizer import classify, load_rules
 
 result   = build_recap("week")                   # one call = full recap
+goals    = resolve_goal_context_source(
+    config_path=Path.home() / ".ccstory" / "config.toml"
+)
+history  = collect_goal_activity_history(goals)  # 4 completed weekly buckets
 sessions = collect_sessions(since, until)        # any window, tz-aware
 rollups  = rollup_by_category(sessions)          # per-bucket hours/share
 bucket   = classify(project_dir)                 # folder-rule bucketing
@@ -751,6 +792,14 @@ shape as `--json` stdout. Keyword args mirror the CLI flags one-to-one
 (`llm_narrative=`, `narrative=`, `classify=`, …); pass a Rich `Console` via
 `console=` for progress output, or nothing for silence. An empty window
 raises `RecapUnavailable` instead of exiting the process.
+
+`collect_goal_activity_history()` is the focused, read-only alternative for
+historical goal activity. It accepts one already-selected `GoalContext`,
+collects all requested completed local weeks in one provider snapshot, and
+returns the exact sanitized hour-denominated shape used by both
+`ccstory goal-history` and MCP `get_goal_activity_history`. It defaults to 4
+weeks, enforces a hard maximum of 24, never runs narrative generation, and
+raises a clear error for a missing context.
 
 Semi-stable means: signatures may still change with minor versions, but
 renames and behavior changes are called out in the changelog instead of
@@ -800,13 +849,14 @@ MCP settings — same shape):
 }
 ```
 
-Four read-only tools:
+Five read-only tools:
 
 | Tool | Returns |
 |---|---|
 | `get_recap(window, classify, allow_llm, agent)` | Totals, per-category active hours + narrative + a `children` per-project breakdown (name + hours), legacy overall narrative, additive deterministic `top_focus_projection`, optional current goal-activity projection, top 5 sessions with `summary_evidence.status`, cost, usage coverage, and unpriced models. |
 | `compare_to_previous(window, classify, agent)` | Active-hours and cost deltas vs. the immediately preceding same-length window, with current/previous usage coverage and unpriced models. |
 | `get_trend(period, count, classify, agent)` | Per-period series over the last `count` weeks/months (oldest first): active hours, cost, per-category hours, usage coverage, and unpriced models. `count` clamped to 1..24. |
+| `get_goal_activity_history(weeks, agent)` | The same sanitized JSON object as `ccstory goal-history`: 4 completed local ISO weeks by default (max 24, invalid counts rejected), every effective goal including zero activity, exclusive/shared/unattributed hours, unavailable activity coverage, source fingerprint, and explicit accounting/disclaimer semantics. Requires configured or managed GoalContext. |
 | `list_categories()` | The bucket rules ccstory classifies sessions into (user + built-in defaults). |
 
 `window` accepts `week` / `month` / `all` / `YYYY-MM`, same as the CLI;
@@ -816,14 +866,19 @@ may call these tools opportunistically mid-conversation, so nothing here
 should cost you latency or tokens unless you explicitly ask for it
 (`classify="content"` / `"hybrid"`, or `allow_llm=True` on `get_recap`;
 `compare_to_previous` and `get_trend` stay cache-only under every
-parameter combination).
+parameter combination). `get_goal_activity_history` bypasses classification,
+cache, report writing, and narrative generation entirely and performs one
+provider snapshot for all of its requested weeks.
 
-**This is a third, distinct JSON contract**, not the same shape as either
+The recap/comparison/trend MCP responses are a third, distinct JSON contract,
+not the same shape as either
 of the two above: not `--json` / `RecapResult.to_json()` (which lists
 every session in the window) and not the Python function signatures.
 MCP responses are deliberately compact — top 5 sessions, not the full
 list — so they're cheap for an agent to read into its own context, and
-never include raw transcript text, only summaries.
+never include raw transcript text, only summaries. Goal history is the focused
+exception: its MCP success object is intentionally identical to the dedicated
+CLI/library projection so local visualizers do not need a second schema.
 
 
 ## Roadmap
