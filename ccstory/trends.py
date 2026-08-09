@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from .categorizer import resolve_session_bucket
+from .local_time import system_local_timezone
 from .providers import collect_provider_snapshot
 from .session_identity import evidence_session_id, public_session_id
 from .time_tracking import CategoryRollup, SessionSlice, SessionStat, rollup_by_category
@@ -315,9 +316,12 @@ def collect_trend(
     the same range describe the same population — without it, a Claude-only
     week would sit next to an every-agent trend line.
     """
-    now = now or datetime.now().astimezone()  # tz-aware local
+    # A trend walks back over historical periods, so its timezone must carry
+    # historical DST rules rather than the offset in effect right now (#233).
+    now = now or datetime.now(system_local_timezone())
     if now.tzinfo is None:
-        now = now.astimezone()  # naive caller input → local-tz aware
+        # Naive caller input is local wall time, per the existing convention.
+        now = now.replace(tzinfo=system_local_timezone())
     if period == "week":
         windows = _week_windows(now, count)
     elif period == "month":

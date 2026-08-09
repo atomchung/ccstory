@@ -2,37 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone, tzinfo
+from datetime import datetime, timedelta, timezone
 
 from ccstory import recap
 from ccstory import session_summarizer as ss
 from ccstory.goals import _date_segments, parse_goal_context
-from tests.conftest import make_assistant_msg, make_user_msg
-
-
-class _SeasonalTimezone(tzinfo):
-    """A minimal DST-observing zone: UTC-4 in Apr-Oct, UTC-5 otherwise.
-
-    Windows CI has no `tzdata`, so `ZoneInfo("America/New_York")` is not
-    resolvable there. This carries the only property these tests need — an
-    offset that depends on the date rather than on when the test runs.
-    """
-
-    _WINTER = timedelta(hours=-5)
-    _SUMMER = timedelta(hours=-4)
-
-    @staticmethod
-    def _is_summer(value: datetime | None) -> bool:
-        return value is not None and 4 <= value.month <= 10
-
-    def utcoffset(self, value: datetime | None) -> timedelta:
-        return self._SUMMER if self._is_summer(value) else self._WINTER
-
-    def dst(self, value: datetime | None) -> timedelta:
-        return timedelta(hours=1) if self._is_summer(value) else timedelta(0)
-
-    def tzname(self, value: datetime | None) -> str:
-        return "SUM" if self._is_summer(value) else "WIN"
+from tests.conftest import (
+    SeasonalTimezone,
+    make_assistant_msg,
+    make_user_msg,
+)
 
 
 def _recent_ts(hours_ago: float) -> str:
@@ -262,7 +241,7 @@ def test_recap_attributes_goals_with_historical_timezone_rules(
         aliases={},
     )
 
-    sentinel = _SeasonalTimezone()
+    sentinel = SeasonalTimezone()
     monkeypatch.setattr(recap, "system_local_timezone", lambda: sentinel)
     seen: dict[str, object] = {}
     real_builder = recap.build_goal_breakdown
@@ -287,7 +266,7 @@ def test_recap_attributes_goals_with_historical_timezone_rules(
 def test_date_segments_split_at_true_local_midnight_out_of_season():
     """A fixed-offset tzinfo mis-dates activity outside the current season."""
 
-    seasonal = _SeasonalTimezone()
+    seasonal = SeasonalTimezone()
     # 04:45-05:45 UTC on 2026-01-15 straddles local midnight at the winter
     # offset (-5), but not at the summer offset (-4) that a `.astimezone()`
     # call made during summer would capture and reuse for a January date.

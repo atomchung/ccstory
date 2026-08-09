@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import locale
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 
 import pytest
@@ -25,6 +25,31 @@ from ccstory import (
     time_tracking,
     token_usage,
 )
+
+
+class SeasonalTimezone(tzinfo):
+    """A minimal DST-observing zone: UTC-4 in Apr-Oct, UTC-5 otherwise.
+
+    Windows CI has no `tzdata`, so `ZoneInfo("America/New_York")` is not
+    resolvable there. This carries the only property the timezone tests need —
+    an offset that depends on the date rather than on when the test runs.
+    """
+
+    _WINTER = timedelta(hours=-5)
+    _SUMMER = timedelta(hours=-4)
+
+    @staticmethod
+    def _is_summer(value: datetime | None) -> bool:
+        return value is not None and 4 <= value.month <= 10
+
+    def utcoffset(self, value: datetime | None) -> timedelta:
+        return self._SUMMER if self._is_summer(value) else self._WINTER
+
+    def dst(self, value: datetime | None) -> timedelta:
+        return timedelta(hours=1) if self._is_summer(value) else timedelta(0)
+
+    def tzname(self, value: datetime | None) -> str:
+        return "SUM" if self._is_summer(value) else "WIN"
 
 
 @pytest.fixture(autouse=True)

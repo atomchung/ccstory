@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ccstory goal-history`, which already resolved historical rules correctly.
   Both surfaces now share one resolver. Non-DST timezones are unaffected.
   (#230)
+- Report and trend window boundaries are now built with historical timezone
+  rules. `parse_window()` and `collect_trend()` derived their local timezone
+  from `datetime.now().astimezone()`, a fixed offset frozen at the current
+  daylight-saving season, so `ccstory 2026-01` requested in summer started and
+  ended an hour off its true local midnight — shifting which sessions fell
+  inside the window. Non-DST timezones are unaffected. (#233)
 
 ## [0.8.1] - 2026-08-06
 
