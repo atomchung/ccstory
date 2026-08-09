@@ -12,6 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Report-local timezone resolution moved from `goal_history` into a shared
   `ccstory.local_time` module, so every surface that maps timestamps onto
   local calendar dates resolves the host timezone the same way.
+- The bounded-window session contract moved from `ccstory.goals` into
+  `time_tracking.validate_window_session()`. It was previously enforced only
+  for goal activity, through a private helper; every consumer of already-
+  bounded `SessionStat` / `SessionSlice` facts can now check it. (#234)
+- `GoalActivitySeries.coverage_status` is now derived from its buckets rather
+  than an init parameter validated against the same derivation, and the
+  managed GoalContext default path has a single call-time definition instead
+  of an import-time constant beside a call-time function. (#234)
 
 ### Fixed
 

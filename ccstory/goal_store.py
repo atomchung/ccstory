@@ -15,6 +15,7 @@ from .goals import (
     GOAL_CONTEXT_SCHEMA_VERSION,
     GoalContext,
     GoalContextError,
+    default_goal_context_path,
     load_goal_context,
     parse_goal_context,
 )
@@ -153,7 +154,7 @@ class ManagedTomlGoalSource:
 def managed_goal_context_path() -> Path:
     """Return the only GoalContext path mutated by ``ccstory goal``."""
 
-    return Path.home() / ".ccstory" / "goals.toml"
+    return default_goal_context_path()
 
 
 def _empty_context(

@@ -107,7 +107,9 @@ valid_until = "2026-07-31"
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         monkeypatch.setattr(
-            goals_module, "DEFAULT_GOAL_CONTEXT_PATH", tmp_path / "missing.toml"
+            goals_module,
+            "default_goal_context_path",
+            lambda: tmp_path / "missing.toml",
         )
 
         assert load_goal_context() is None
