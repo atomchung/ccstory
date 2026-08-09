@@ -19,7 +19,6 @@ if TYPE_CHECKING:
 
 GOAL_CONTEXT_SCHEMA_VERSION = 1
 GOAL_CONTRIBUTION_UNIT = "seconds"
-DEFAULT_GOAL_CONTEXT_PATH = Path.home() / ".ccstory" / "goals.toml"
 PER_GOAL_SHARED_SEMANTICS = "overlapping_non_additive"
 GOAL_ACTIVITY_SERIES_SCHEMA_VERSION = 1
 GOAL_ACTIVITY_BUCKET_UNIT = "week"
@@ -493,10 +492,6 @@ class GoalActivityBucket:
                 "goal activity bucket coverage_status must be complete, "
                 "partial, or unavailable"
             )
-        if self.breakdown.per_goal_shared_semantics != self.per_goal_shared_semantics:
-            raise GoalContextError(
-                "goal activity bucket shared semantics do not match its breakdown"
-            )
 
     @property
     def goals(self) -> tuple[GoalContribution, ...]:
@@ -552,7 +547,6 @@ class GoalActivitySeries:
     buckets: tuple[GoalActivityBucket, ...]
     source_kind: str
     context_fingerprint: str | None
-    coverage_status: str
     schema_version: int = field(
         default=GOAL_ACTIVITY_SERIES_SCHEMA_VERSION, init=False
     )
@@ -592,13 +586,6 @@ class GoalActivitySeries:
             raise GoalContextError(
                 "goal activity series context_fingerprint must be a string or None"
             )
-        expected_coverage = _combined_coverage_status(
-            bucket.coverage_status for bucket in buckets
-        )
-        if self.coverage_status != expected_coverage:
-            raise GoalContextError(
-                "goal activity series coverage_status must summarize its buckets"
-            )
         previous_until: float | None = None
         for bucket in buckets:
             start, end = _window_key(bucket.since, bucket.until)
@@ -607,19 +594,25 @@ class GoalActivitySeries:
                     "goal activity windows must not overlap or duplicate"
                 )
             previous_until = end
+            # Only real init parameters can diverge here. The semantics and
+            # disclaimer fields are `init=False` class constants on both
+            # sides, so comparing them can never fail.
             if (
                 bucket.source_kind != self.source_kind
                 or bucket.context_fingerprint != self.context_fingerprint
-                or bucket.per_goal_shared_semantics
-                != self.per_goal_shared_semantics
-                or bucket.global_bucket_semantics
-                != self.global_bucket_semantics
-                or bucket.disclaimer != self.disclaimer
             ):
                 raise GoalContextError(
                     "goal activity bucket metadata must match its series"
                 )
         object.__setattr__(self, "buckets", buckets)
+
+    @property
+    def coverage_status(self) -> str:
+        """Summarize the buckets' caller-supplied activity coverage."""
+
+        return _combined_coverage_status(
+            bucket.coverage_status for bucket in self.buckets
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -725,6 +718,17 @@ def parse_goal_context(
     )
 
 
+def default_goal_context_path() -> Path:
+    """The managed GoalContext location, resolved at call time.
+
+    Deliberately not a module constant: an import-time `Path.home()` captures
+    whatever `$HOME` was when the module first loaded, which a later
+    environment change cannot correct.
+    """
+
+    return Path.home() / ".ccstory" / "goals.toml"
+
+
 def load_goal_context(
     path: str | Path | None = None,
     *,
@@ -736,7 +740,7 @@ def load_goal_context(
     source = (
         Path(path).expanduser()
         if explicit
-        else DEFAULT_GOAL_CONTEXT_PATH.expanduser()
+        else default_goal_context_path().expanduser()
     )
     try:
         raw = source.read_bytes()
@@ -930,17 +934,20 @@ def build_goal_breakdown(
 def _ordered_window_sessions(
     window: GoalActivityWindow,
 ) -> tuple[SessionStat | SessionSlice, ...]:
-    """Validate the caller's bounded hand-off and return a stable order."""
+    """Validate the caller's bounded hand-off and return a stable order.
+
+    The per-session bounded-window contract belongs to `time_tracking`, which
+    owns those invariants and enforces them for every consumer. This function
+    keeps only what is goal-specific: rejecting a duplicated physical session
+    inside one bucket, and imposing a deterministic order.
+    """
 
     from .time_tracking import (
         SessionSlice,
         SessionStat,
-        WindowEvidence,
-        _validate_bounded_evidence,
-        active_intervals_for_timestamps,
+        validate_window_session,
     )
 
-    lower, upper = _window_key(window.since, window.until)
     seen: set[tuple[str, str]] = set()
     sessions: list[SessionStat | SessionSlice] = []
     for session in window.sessions:
@@ -961,92 +968,10 @@ def _ordered_window_sessions(
                 f"{identity[1]!r} for agent {identity[0]!r}"
             )
         seen.add(identity)
-
-        if session.start.tzinfo is None or session.end.tzinfo is None:
-            raise GoalContextError(
-                "goal activity sessions must have timezone-aware bounds"
-            )
-        if isinstance(session, SessionSlice):
-            if (
-                session.window_since.tzinfo is None
-                or session.window_until.tzinfo is None
-            ):
-                raise GoalContextError(
-                    "goal activity SessionSlice bounds must be timezone-aware"
-                )
-            expected_active_sec = int(
-                math.fsum(
-                    interval.end - interval.start
-                    for interval in session.active_intervals
-                )
-            )
-            if session.active_sec != expected_active_sec:
-                raise GoalContextError(
-                    "goal activity SessionSlice active_sec must match its "
-                    "bounded intervals"
-                )
-            if (
-                not isinstance(session.evidence, WindowEvidence)
-                or tuple(session.timestamps) != session.evidence.timestamps
-                or session.evidence_fingerprint
-                != session.evidence.evidence_fingerprint
-            ):
-                raise GoalContextError(
-                    "goal activity SessionSlice fields must match its bounded evidence"
-                )
-            try:
-                _validate_bounded_evidence(
-                    session.evidence,
-                    window.since,
-                    window.until,
-                    session.active_intervals,
-                )
-            except ValueError as exc:
-                raise GoalContextError(
-                    "goal activity SessionSlice contains invalid bounded evidence"
-                ) from exc
-            if (
-                session.window_since.timestamp() != lower
-                or session.window_until.timestamp() != upper
-            ):
-                raise GoalContextError(
-                    "goal activity SessionSlice bounds must match its bucket"
-                )
-            if any(
-                interval.start < lower or interval.end > upper
-                for interval in session.active_intervals
-            ):
-                raise GoalContextError(
-                    "goal activity SessionSlice contains out-of-window activity"
-                )
-        else:
-            expected_active_sec = int(
-                math.fsum(
-                    interval.end - interval.start
-                    for interval in active_intervals_for_timestamps(
-                        session.timestamps
-                    )
-                )
-            )
-            if session.active_sec != expected_active_sec:
-                raise GoalContextError(
-                    "goal activity SessionStat active_sec must match its intervals"
-                )
-            if (
-                session.start.timestamp() < lower
-                or session.end.timestamp() >= upper
-            ):
-                raise GoalContextError(
-                    "a cross-window SessionStat must be supplied as a bounded "
-                    "SessionSlice"
-                )
-        if any(
-            timestamp < lower or timestamp >= upper
-            for timestamp in session.timestamps
-        ):
-            raise GoalContextError(
-                "goal activity session contains an out-of-window timestamp"
-            )
+        try:
+            validate_window_session(session, window.since, window.until)
+        except ValueError as exc:
+            raise GoalContextError(f"goal activity {exc}") from exc
         sessions.append(session)
 
     return tuple(
@@ -1177,7 +1102,4 @@ def build_goal_activity_series(
         buckets=tuple(buckets),
         source_kind=source_kind,
         context_fingerprint=fingerprint,
-        coverage_status=_combined_coverage_status(
-            bucket.coverage_status for bucket in buckets
-        ),
     )

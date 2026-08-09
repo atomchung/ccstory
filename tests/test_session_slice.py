@@ -9,9 +9,11 @@ import pytest
 from ccstory.time_tracking import (
     ActiveInterval,
     SessionStat,
+    active_intervals_for_timestamps,
     clip_active_intervals,
     make_window_evidence,
     session_slice_for_window,
+    validate_window_session,
     wall_clock_active_sec,
 )
 
@@ -236,3 +238,67 @@ class TestSliceWallClock:
                 datetime.fromtimestamp(1, tz=UTC),
                 datetime.fromtimestamp(1, tz=UTC),
             )
+
+
+class TestValidateWindowSession:
+    """`validate_window_session` is the contract, independent of any consumer.
+
+    It used to live inside `ccstory.goals`, reaching into a private
+    time_tracking helper, so only the goal surfaces enforced it (#234).
+    """
+
+    def test_accepts_a_slice_built_by_the_normal_path(self):
+        stat = _stat(-60, 60)
+        since, until = _window(0, 120)
+        sliced = session_slice_for_window(stat, since, until)
+
+        assert sliced is not None
+        assert validate_window_session(sliced, since, until) is None
+
+    def test_accepts_a_fully_contained_stat(self):
+        stat = _stat(0, 60)
+        since, until = _window(-1, 120)
+        stat.active_sec = int(
+            sum(
+                interval.end - interval.start
+                for interval in active_intervals_for_timestamps(stat.timestamps)
+            )
+        )
+
+        assert validate_window_session(stat, since, until) is None
+
+    def test_rejects_a_stat_that_crosses_the_window(self):
+        stat = _stat(-60, 60)
+        since, until = _window(0, 120)
+        stat.active_sec = int(
+            sum(
+                interval.end - interval.start
+                for interval in active_intervals_for_timestamps(stat.timestamps)
+            )
+        )
+
+        with pytest.raises(ValueError, match="bounded SessionSlice"):
+            validate_window_session(stat, since, until)
+
+    def test_rejects_a_slice_whose_active_sec_was_tampered_with(self):
+        stat = _stat(-60, 60)
+        since, until = _window(0, 120)
+        sliced = session_slice_for_window(stat, since, until)
+        assert sliced is not None
+        sliced.active_sec += 1
+
+        with pytest.raises(ValueError, match="active_sec must match"):
+            validate_window_session(sliced, since, until)
+
+    def test_rejects_a_slice_bound_to_a_different_window(self):
+        stat = _stat(-60, 60)
+        since, until = _window(0, 120)
+        sliced = session_slice_for_window(stat, since, until)
+        assert sliced is not None
+
+        with pytest.raises(ValueError, match="bounds must match its window"):
+            validate_window_session(sliced, *_window(0, 180))
+
+    def test_rejects_a_non_session_value(self):
+        with pytest.raises(ValueError, match="SessionStat or SessionSlice"):
+            validate_window_session(object(), *_window(0, 120))

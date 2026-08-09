@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -433,6 +434,96 @@ def session_slice_for_window(
         category_source=session.category_source,
         physical_engaged=session.engaged,
     )
+
+
+def validate_window_session(
+    session: SessionStat | SessionSlice,
+    since: datetime,
+    until: datetime,
+) -> None:
+    """Reject a session that does not honor its bounded ``[since, until)``.
+
+    `session_slice_for_window()` already establishes these invariants for the
+    slices it builds, but `SessionSlice` and `SessionStat` are plain
+    dataclasses that any caller may construct directly. This is the entry
+    point for a consumer that receives already-bounded session facts from
+    somewhere else and must not trust them blindly.
+
+    Raises ``ValueError`` describing the first violated invariant.
+    """
+
+    if not isinstance(session, (SessionStat, SessionSlice)):
+        raise ValueError(
+            "bounded window sessions must be SessionStat or SessionSlice values"
+        )
+    since_utc, until_utc = _validate_window(since, until)
+    lower = since_utc.timestamp()
+    upper = until_utc.timestamp()
+
+    if session.start.tzinfo is None or session.end.tzinfo is None:
+        raise ValueError("bounded window sessions must have timezone-aware bounds")
+
+    if isinstance(session, SessionSlice):
+        if session.window_since.tzinfo is None or session.window_until.tzinfo is None:
+            raise ValueError("SessionSlice bounds must be timezone-aware")
+        expected_active_sec = int(
+            math.fsum(
+                interval.end - interval.start
+                for interval in session.active_intervals
+            )
+        )
+        if session.active_sec != expected_active_sec:
+            raise ValueError(
+                "SessionSlice active_sec must match its bounded intervals"
+            )
+        if (
+            not isinstance(session.evidence, WindowEvidence)
+            or tuple(session.timestamps) != session.evidence.timestamps
+            or session.evidence_fingerprint != session.evidence.evidence_fingerprint
+        ):
+            raise ValueError(
+                "SessionSlice fields must match its bounded evidence"
+            )
+        try:
+            _validate_bounded_evidence(
+                session.evidence,
+                since_utc,
+                until_utc,
+                session.active_intervals,
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "SessionSlice contains invalid bounded evidence"
+            ) from exc
+        if (
+            session.window_since.timestamp() != lower
+            or session.window_until.timestamp() != upper
+        ):
+            raise ValueError("SessionSlice bounds must match its window")
+        if any(
+            interval.start < lower or interval.end > upper
+            for interval in session.active_intervals
+        ):
+            raise ValueError("SessionSlice contains out-of-window activity")
+    else:
+        expected_active_sec = int(
+            math.fsum(
+                interval.end - interval.start
+                for interval in active_intervals_for_timestamps(session.timestamps)
+            )
+        )
+        if session.active_sec != expected_active_sec:
+            raise ValueError("SessionStat active_sec must match its intervals")
+        if session.start.timestamp() < lower or session.end.timestamp() >= upper:
+            raise ValueError(
+                "a cross-window SessionStat must be supplied as a bounded "
+                "SessionSlice"
+            )
+
+    if any(
+        timestamp < lower or timestamp >= upper for timestamp in session.timestamps
+    ):
+        raise ValueError("bounded window session contains an out-of-window timestamp")
 
 
 def _extract_first_user_text(content) -> str:
