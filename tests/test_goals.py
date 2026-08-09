@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import ccstory.goals as goals_module
+from ccstory.categorizer import project_identity
 from ccstory.goals import (
     GOAL_CONTEXT_SCHEMA_VERSION,
     GoalAttributionInput,
@@ -388,6 +389,37 @@ class TestDeterministicAttribution:
         assert breakdown.exclusive_contribution == 12
         assert breakdown.unattributed_contribution == 0
 
+    def test_chained_aliases_do_not_drop_attribution(self):
+        # `stock` is both an alias target and an alias key. Folding the item
+        # side once more than the goal side used to send every contribution to
+        # `unattributed` with no error (#229).
+        aliases = {"stockdash": "stock", "stock": "investing"}
+        context = parse_goal_context(
+            {
+                "schema_version": 1,
+                "goals": [
+                    {
+                        "id": "chained",
+                        "title": "Chained",
+                        "projects": ["stockdash"],
+                    }
+                ],
+            },
+            aliases=aliases,
+        )
+
+        breakdown = attribute_goals(
+            [GoalAttributionInput("stock", date(2026, 8, 5), 3600)],
+            context,
+            aliases=aliases,
+        )
+
+        assert context.goals[0].projects == ("stock",)
+        assert breakdown is not None
+        assert breakdown.exclusive_contribution == 3600
+        assert breakdown.unattributed_contribution == 0
+        assert breakdown.goals[0].projects_touched == ("investing",)
+
     def test_input_order_does_not_change_breakdown(self):
         context = _context()
         items = [
@@ -541,3 +573,39 @@ class TestSessionBreakdown:
             build_goal_breakdown(
                 [session], _context(), aliases={}, timezone=timezone.utc
             )
+
+    def test_chained_aliases_attribute_real_sessions(self):
+        # End-to-end guard for #229: `session.project` reaches the attribution
+        # core already folded once, so a chained `[projects]` table must not
+        # fold it a second time and strand the whole recap in `unattributed`.
+        aliases = {"stockdash": "stock", "stock": "investing"}
+        start = datetime(2026, 8, 5, 10, tzinfo=timezone.utc)
+        end = start + timedelta(minutes=1)
+        session = self._session(
+            project_identity("-Users-me-Side-project-stockdash", aliases),
+            "chained-session",
+            start,
+            end,
+        )
+        context = parse_goal_context(
+            {
+                "schema_version": 1,
+                "goals": [
+                    {
+                        "id": "chained",
+                        "title": "Chained",
+                        "projects": ["stockdash"],
+                    }
+                ],
+            },
+            aliases=aliases,
+        )
+
+        breakdown = build_goal_breakdown(
+            [session], context, aliases=aliases, timezone=timezone.utc
+        )
+
+        assert breakdown is not None
+        assert breakdown.unattributed_contribution == 0
+        assert breakdown.exclusive_contribution == 60
+        assert breakdown.goals[0].exclusive_contribution == 60

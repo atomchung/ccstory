@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Goal attribution no longer silently drops all activity when `[projects]`
+  contains a chained alias (an alias target that is itself an alias key).
+  `attribute_goals()` folded already-canonical session projects one time more
+  than the goal side, so every contribution landed in `unattributed` with no
+  error. Aliases are now applied symmetrically to both sides. Configurations
+  without aliases, or with unchained aliases, are unaffected. (#229)
+
 ## [0.8.1] - 2026-08-06
 
 ### Added

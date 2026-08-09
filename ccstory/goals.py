@@ -159,12 +159,13 @@ class GoalDefinition:
         object.__setattr__(self, "valid_from", valid_from)
         object.__setattr__(self, "valid_until", valid_until)
 
-    def matches(self, project: str, effective_date: date) -> bool:
-        return (
-            project in self.projects
-            and (self.valid_from is None or effective_date >= self.valid_from)
-            and (self.valid_until is None or effective_date <= self.valid_until)
+    def is_effective_on(self, effective_date: date) -> bool:
+        return (self.valid_from is None or effective_date >= self.valid_from) and (
+            self.valid_until is None or effective_date <= self.valid_until
         )
+
+    def matches(self, project: str, effective_date: date) -> bool:
+        return project in self.projects and self.is_effective_on(effective_date)
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -766,12 +767,28 @@ def attribute_goals(
     *,
     aliases: Mapping[str, str] | None = None,
 ) -> GoalBreakdown | None:
-    """Apply the 0/1/>1 unmatched/exclusive/shared attribution rule."""
+    """Apply the 0/1/>1 unmatched/exclusive/shared attribution rule.
+
+    ``aliases`` is applied symmetrically to the item projects and to the
+    context's goal projects, so callers may pass either raw project names or
+    already-canonical identities.
+    """
 
     if context is None:
         return None
     project_aliases = _alias_map(aliases)
     goals = context.goals
+    # Fold both sides of the comparison the same number of times. `alias_fold`
+    # is idempotent only while no alias target is itself an alias key, so a
+    # chained `[projects]` table folds an already-canonical `session.project`
+    # once more than the goal side and matches nothing (#229).
+    goal_projects = {
+        goal.id: frozenset(
+            _project(project, project_aliases, f"goal {goal.id!r} projects")
+            for project in goal.projects
+        )
+        for goal in goals
+    }
     normalized = sorted(
         (
             item.effective_date,
@@ -790,7 +807,10 @@ def attribute_goals(
 
     for effective_date, project, contribution in normalized:
         matches = [
-            goal for goal in goals if goal.matches(project, effective_date)
+            goal
+            for goal in goals
+            if project in goal_projects[goal.id]
+            and goal.is_effective_on(effective_date)
         ]
         if not matches:
             global_unattributed.append(contribution)
