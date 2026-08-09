@@ -43,6 +43,7 @@ from .goals import (
     GoalContext,
     build_goal_breakdown,
 )
+from .local_time import system_local_timezone
 from .providers import (
     agent_label,
     collect_provider_snapshot,
@@ -710,7 +711,12 @@ def build_recap(
         sessions,
         goal_context,
         aliases=project_aliases,
-        timezone=since.tzinfo,
+        # Not `since.tzinfo`: `parse_window()` builds the window from
+        # `datetime.now().astimezone()`, whose tzinfo is a fixed offset. Goal
+        # attribution splits contributions at local midnight, so a window
+        # reaching back across a DST transition would attribute an hour of
+        # work to the wrong local date and disagree with `goal-history` (#230).
+        timezone=system_local_timezone(),
     )
 
     # `refresh` wipes the content-classification cache so the rules that
