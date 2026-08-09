@@ -141,8 +141,12 @@ def parse_window(raw: str | None) -> tuple[datetime, datetime, str]:
 
     Raises ``ValueError`` on an unrecognized window string.
     """
-    now = datetime.now().astimezone()  # tz-aware local
-    local_tz = now.tzinfo
+    # Not `datetime.now().astimezone()`: its tzinfo is a fixed offset frozen
+    # at the current DST season, and `local_tz` below builds boundaries for
+    # months that may sit in the other season (#233).
+    local_tz = system_local_timezone()
+    now = datetime.now(local_tz)
+
     def _range_label(a: datetime, b: datetime) -> str:
         return f"{a:%Y-%m-%d}_{b:%Y-%m-%d}"
 

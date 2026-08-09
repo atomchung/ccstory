@@ -20,7 +20,11 @@ import pytest
 from ccstory import cli, recap
 from ccstory import session_summarizer as ss
 from ccstory.recap import RecapUnavailable, build_recap, parse_window
-from tests.conftest import make_assistant_msg, make_user_msg
+from tests.conftest import (
+    SeasonalTimezone,
+    make_assistant_msg,
+    make_user_msg,
+)
 
 
 def _recent_ts(hours_ago: float) -> str:
@@ -339,3 +343,46 @@ class TestCliShell:
         with pytest.raises(SystemExit) as exc:
             cli.main(["week"])
         assert "No engaged sessions" in str(exc.value)
+
+
+class TestWindowBoundaryTimezone:
+    """Window boundaries must use historical DST rules, not today's offset.
+
+    `parse_window()` built `local_tz` from `datetime.now().astimezone()`, whose
+    tzinfo is a fixed offset frozen at the current season. A `YYYY-MM` window
+    for a month in the other season therefore started and ended an hour off
+    its true local boundary (#233).
+    """
+
+    def test_month_window_uses_that_month_s_offset(self, monkeypatch):
+        monkeypatch.setattr(
+            recap, "system_local_timezone", lambda: SeasonalTimezone()
+        )
+
+        since, until, label = recap.parse_window("2026-01")
+
+        assert since.utcoffset() == timedelta(hours=-5)
+        assert until.utcoffset() == timedelta(hours=-5)
+        assert (since.year, since.month, since.day) == (2026, 1, 1)
+        assert (until.year, until.month, until.day) == (2026, 2, 1)
+        assert label == "2026-01"
+
+    def test_summer_month_window_uses_the_summer_offset(self, monkeypatch):
+        monkeypatch.setattr(
+            recap, "system_local_timezone", lambda: SeasonalTimezone()
+        )
+
+        since, until, _ = recap.parse_window("2026-07")
+
+        assert since.utcoffset() == timedelta(hours=-4)
+        assert until.utcoffset() == timedelta(hours=-4)
+
+    def test_all_window_uses_the_epoch_date_s_offset(self, monkeypatch):
+        monkeypatch.setattr(
+            recap, "system_local_timezone", lambda: SeasonalTimezone()
+        )
+
+        since, _, _ = recap.parse_window("all")
+
+        # 2000-01-01 is winter; a fixed summer offset would report -4 here.
+        assert since.utcoffset() == timedelta(hours=-5)
