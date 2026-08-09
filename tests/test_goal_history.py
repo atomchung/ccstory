@@ -274,39 +274,7 @@ def test_posix_tz_rules_take_precedence_over_system_zone_files(
     assert actual_elapsed == elapsed
 
 
-@pytest.mark.skipif(
-    not hasattr(system_time, "tzset"),
-    reason="host does not expose POSIX local-time rule switching",
-)
-def test_posix_tz_fallback_distinguishes_repeated_hour_folds():
-    previous = os.environ.get("TZ")
-    try:
-        os.environ["TZ"] = "EST5EDT,M3.2.0,M11.1.0"
-        system_time.tzset()
-        local_timezone = history_module._system_local_timezone()
-        first = datetime(2026, 11, 1, 5, 30, tzinfo=UTC).astimezone(
-            local_timezone
-        )
-        second = datetime(2026, 11, 1, 6, 30, tzinfo=UTC).astimezone(
-            local_timezone
-        )
-        first_result = first.isoformat(), first.fold
-        second_result = second.isoformat(), second.fold
-    finally:
-        if previous is None:
-            os.environ.pop("TZ", None)
-        else:
-            os.environ["TZ"] = previous
-        system_time.tzset()
 
-    assert first_result == (
-        "2026-11-01T01:30:00-04:00",
-        0,
-    )
-    assert second_result == (
-        "2026-11-01T01:30:00-05:00",
-        1,
-    )
 
 
 def test_one_snapshot_builds_independent_sanitized_hour_buckets(monkeypatch):

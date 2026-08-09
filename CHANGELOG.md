@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Report-local timezone resolution moved from `goal_history` into a shared
+  `ccstory.local_time` module, so every surface that maps timestamps onto
+  local calendar dates resolves the host timezone the same way.
+
 ### Fixed
 
 - Goal attribution no longer silently drops all activity when `[projects]`
@@ -15,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   than the goal side, so every contribution landed in `unattributed` with no
   error. Aliases are now applied symmetrically to both sides. Configurations
   without aliases, or with unchained aliases, are unaffected. (#229)
+- Recap goal attribution no longer splits contributions at local midnight with
+  a fixed-offset timezone. The recap window's tzinfo carries only the offset in
+  effect at run time, so a window reaching across a daylight-saving transition
+  attributed an hour of activity to the wrong local date — and disagreed with
+  `ccstory goal-history`, which already resolved historical rules correctly.
+  Both surfaces now share one resolver. Non-DST timezones are unaffected.
+  (#230)
 
 ## [0.8.1] - 2026-08-06
 

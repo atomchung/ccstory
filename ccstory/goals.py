@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .categorizer import load_project_aliases, project_identity
+from .local_time import system_local_timezone
 
 if TYPE_CHECKING:
     from .time_tracking import SessionSlice, SessionStat
@@ -875,9 +876,12 @@ def build_goal_breakdown(
 ) -> GoalBreakdown | None:
     """Attribute existing session evidence using the existing wall-clock scale.
 
-    Validity dates use the report calendar: pass ``since.tzinfo`` from the
-    report window.  The default matches ``parse_window()``'s system-local
-    timezone. Inclusive ``valid_until`` ends at the next local midnight.
+    Validity dates use the report calendar. Pass a timezone carrying historical
+    offset rules — ``system_local_timezone()``, or the report window's tzinfo
+    when that window already uses one. A fixed-offset tzinfo such as
+    ``datetime.now().astimezone().tzinfo`` shifts local midnight for dates
+    outside the currently active daylight-saving season (#230). Inclusive
+    ``valid_until`` ends at the next local midnight.
     """
 
     if context is None:
@@ -888,7 +892,7 @@ def build_goal_breakdown(
         wall_clock_active_sec,
     )
 
-    report_timezone = timezone or datetime.now().astimezone().tzinfo
+    report_timezone = timezone or system_local_timezone()
     if report_timezone is None:  # pragma: no cover
         raise GoalContextError("could not determine the system local timezone")
     sessions = tuple(sessions)
