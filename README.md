@@ -106,6 +106,7 @@ flow after the live debug session on Wednesday.
 | `ccstory category list` | Show your custom bucket rules |
 | `ccstory category set <bucket> <keyword>…` | Pin a project to a bucket |
 | `ccstory category unset <bucket> <keyword>…` | Remove a keyword from a bucket |
+| `ccstory project list` | Discover observed project IDs for `goal set --project` |
 
 ### Advanced
 
@@ -261,6 +262,32 @@ it still checks the built-in keyword table above before falling back, so a
 no-config, no-narrator install still reports across more than one area
 instead of collapsing everything into `coding`.
 
+## Project discovery
+
+`ccstory goal set --project <id>` needs the exact canonical project string a
+recap already uses internally — which is not always obvious from a folder
+name alone once aliases and worktrees are involved. `ccstory project list`
+answers that directly, read-only:
+
+```bash
+ccstory project list                       # observed projects, entire history
+ccstory project list --window month        # this month only
+ccstory project list --agent codex --json
+```
+
+Each row is `project_id` (the same canonical normalization + alias fold
+recap and GoalContext use), `last_seen`, `session_count`, and `agents[]` —
+never a transcript path or session id. A project touched by more than one
+coding agent, or reached through more than one folder alias, collapses onto
+one row. Output is bounded and deterministic: most-recently-observed project
+first, canonical id as the tie-break; the terminal shows a capped top set
+with an explicit count when there are more, and `--json` carries its own
+explicit hard maximum plus `total_count` / `truncated` rather than silently
+growing without bound. The window defaults to `all` (`week` / `month` /
+`YYYY-MM` also accepted) and the command scans through the same provider
+snapshot seam as everything else — no persistent project registry, no second
+transcript index, no model calls.
+
 ## Goal activity
 
 GoalContext v1 lets a recap relate measured activity to owner-defined goals
@@ -272,6 +299,29 @@ ccstory goal set ship-recap --title "Ship the recap" --project ccstory
 ccstory goal list
 ccstory goal unset ship-recap
 ```
+
+`goal set` reports, per linked project, whether it matches a project
+`ccstory project list` already observes:
+
+```
+✓ Set goal `ship-recap` · Ship the recap · ccstory
+  observed: `ccstory`
+```
+
+An unobserved project is not an error — it is kept exactly as given (a valid
+future project can be declared before its first session), just labeled:
+
+```
+✓ Set goal `future-launch` · Future launch · future-app
+  unobserved: `future-app` has no session history yet — did you mean: future-ap? (value unchanged)
+```
+
+A close-spelling suggestion is deterministic guidance only; it never rewrites
+the stored value. Add `--json` for a machine-readable envelope instead —
+`{"ok": true, "replaced": false, "goal": {...}, "projects": [{"project":
+"future-app", "observed": false, "candidates": ["future-ap"]}]}` — where
+`candidates` is present only when there is a close-spelling suggestion to
+offer.
 
 The managed source is `~/.ccstory/goals.toml`. To read an external,
 read-only source instead, configure `~/.ccstory/config.toml`:
@@ -577,6 +627,8 @@ ccstory week --json          # shorthand for --format=json
 ccstory month --format json
 ccstory trend --weeks 8 --json
 ccstory goal-history         # dedicated sanitized weekly goal series
+ccstory project list --json  # observed project IDs, bounded and deterministic
+ccstory goal set my-goal --title "My goal" --project my-app --json
 ```
 
 stdout is pure JSON (progress goes to stderr, same as markdown mode), so
@@ -773,9 +825,10 @@ shelling out to the CLI:
 ```python
 from pathlib import Path
 
-from ccstory.recap import build_recap
+from ccstory.recap import build_recap, parse_window
 from ccstory.goal_history import collect_goal_activity_history
 from ccstory.goal_store import resolve_goal_context_source
+from ccstory.project_discovery import collect_observed_projects
 from ccstory.time_tracking import collect_sessions, rollup_by_category
 from ccstory.categorizer import classify, load_rules
 
@@ -784,6 +837,8 @@ goals    = resolve_goal_context_source(
     config_path=Path.home() / ".ccstory" / "config.toml"
 )
 history  = collect_goal_activity_history(goals)  # 4 completed weekly buckets
+since, until, _label = parse_window("all")
+observed = collect_observed_projects(since, until)  # canonical project IDs
 sessions = collect_sessions(since, until)        # any window, tz-aware
 rollups  = rollup_by_category(sessions)          # per-bucket hours/share
 bucket   = classify(project_dir)                 # folder-rule bucketing
@@ -806,6 +861,13 @@ returns the exact sanitized hour-denominated shape used by both
 `ccstory goal-history` and MCP `get_goal_activity_history`. It defaults to 4
 weeks, enforces a hard maximum of 24, never runs narrative generation, and
 raises a clear error for a missing context.
+
+`collect_observed_projects(since, until, agent="all", aliases=None)` is the
+read-only alternative behind `ccstory project list`. It scans one provider
+snapshot for the given window and returns `ObservedProject` rows
+(`project_id`, `last_seen`, `session_count`, `agents`) through the same
+canonical normalization + alias fold as recap and GoalContext — deterministic
+order, no transcript path or session id, no persistent registry.
 
 Semi-stable means: signatures may still change with minor versions, but
 renames and behavior changes are called out in the changelog instead of

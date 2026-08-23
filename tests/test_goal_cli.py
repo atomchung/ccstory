@@ -15,6 +15,7 @@ from rich.console import Console
 from ccstory import categorizer
 from ccstory import cli as cli_module
 from ccstory import goal_store
+from ccstory import session_summarizer
 from ccstory.cli import _run_goal
 from ccstory.goal_store import (
     GoalSourceOperation,
@@ -26,6 +27,8 @@ from ccstory.goal_store import (
     select_goal_source,
 )
 from ccstory.goals import GoalContextError
+
+from tests.conftest import _ts, make_user_msg
 
 
 def _console() -> tuple[Console, io.StringIO]:
@@ -274,6 +277,240 @@ class TestManagedGoalCLI:
         temp, destination = replace_paths[0]
         assert temp.parent == destination.parent == path.parent
         assert not temp.exists()
+
+
+def _engaged_messages(seed: str, day: int) -> list[dict]:
+    """Two real user turns — enough for `SessionStat.engaged` — on a fixed day."""
+
+    return [
+        make_user_msg(f"{seed} first engaging message here", _ts(2026, 3, day)),
+        make_user_msg(f"{seed} second engaging message here", _ts(2026, 3, day, 0, 5)),
+    ]
+
+
+class TestGoalSetObservedGuidance:
+    """Issue #222's goal-set guidance: observed/unobserved feedback only.
+
+    `_goal_set_project_feedback` scans the full local history through the
+    same read-only seam as `ccstory project list` — these tests write real
+    synthetic transcripts (via the `jsonl_factory`/`tmp_home` fixtures) so
+    the observed check exercises the real provider parse path, not a stub.
+    """
+
+    def test_observed_project_is_reported_and_json_matches(
+        self, jsonl_factory, capsys: pytest.CaptureFixture[str],
+    ):
+        jsonl_factory("demo-app", "s1", _engaged_messages("demo", 1))
+
+        console, stream = _console()
+        assert _run_goal(
+            ["set", "demo", "--title", "Demo goal", "--project", "demo-app"],
+            console,
+        ) == 0
+        rendered = stream.getvalue()
+        assert "Set goal `demo`" in rendered
+        assert "observed:" in rendered
+        assert "`demo-app`" in rendered
+        assert "unobserved" not in rendered
+
+        json_console, _ = _console()
+        assert _run_goal(
+            [
+                "set", "demo", "--title", "Demo goal",
+                "--project", "demo-app", "--json",
+            ],
+            json_console,
+        ) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True
+        assert payload["replaced"] is True  # second `set` for the same id
+        assert payload["goal"] == {
+            "id": "demo", "title": "Demo goal", "projects": ["demo-app"],
+        }
+        assert payload["projects"] == [{"project": "demo-app", "observed": True}]
+
+    def test_unobserved_future_project_preserves_value_and_is_labeled(
+        self, tmp_home: Path,
+    ):
+        console, stream = _console()
+        assert _run_goal(
+            [
+                "set", "future", "--title", "Future goal",
+                "--project", "not-yet-seen-xyz",
+            ],
+            console,
+        ) == 0
+        rendered = stream.getvalue()
+        assert "Set goal `future`" in rendered
+        assert "unobserved:" in rendered
+        assert "`not-yet-seen-xyz`" in rendered
+        assert "value unchanged" in rendered
+
+        path = managed_goal_context_path()
+        context = load_managed_goal_context(path, aliases={})
+        goal = next(g for g in context.goals if g.id == "future")
+        # A valid future project is preserved exactly, never rewritten —
+        # matches the pre-existing GoalContext contract (docstring in
+        # ccstory/goals.py, README "Goal activity").
+        assert goal.projects == ("not-yet-seen-xyz",)
+
+    def test_ambiguous_candidates_are_suggested_but_never_auto_correct(
+        self, jsonl_factory, capsys: pytest.CaptureFixture[str],
+    ):
+        jsonl_factory("borealis-app", "s1", _engaged_messages("app", 1))
+        jsonl_factory("borealis-api", "s2", _engaged_messages("api", 2))
+
+        json_console, _ = _console()
+        assert _run_goal(
+            [
+                "set", "typo-goal", "--title", "Typo goal",
+                "--project", "boreal-ap", "--json",
+            ],
+            json_console,
+        ) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["goal"]["projects"] == ["boreal-ap"]
+        assert payload["projects"] == [
+            {
+                "project": "boreal-ap",
+                "observed": False,
+                "candidates": ["borealis-app", "borealis-api"],
+            }
+        ]
+
+        # Guidance only: the stored value is exactly the caller's input,
+        # never silently corrected to one of the suggested candidates.
+        path = managed_goal_context_path()
+        context = load_managed_goal_context(path, aliases={})
+        goal = next(g for g in context.goals if g.id == "typo-goal")
+        assert goal.projects == ("boreal-ap",)
+
+    def test_alias_folded_project_is_reported_observed(
+        self, tmp_home: Path, jsonl_factory,
+    ):
+        config_path = tmp_home / ".ccstory" / "config.toml"
+        config_path.write_text(
+            '[projects]\n"borealis-legacy" = "borealis-app"\n',
+            encoding="utf-8",
+        )
+        jsonl_factory("borealis-legacy", "s1", _engaged_messages("legacy", 1))
+
+        console, stream = _console()
+        assert _run_goal(
+            [
+                "set", "aliased", "--title", "Aliased goal",
+                "--project", "borealis-app",
+            ],
+            console,
+        ) == 0
+        rendered = stream.getvalue()
+        assert "observed:" in rendered
+        assert "`borealis-app`" in rendered
+        assert "unobserved" not in rendered
+
+    def test_duplicate_alias_projects_collapse_to_one_feedback_row(
+        self, tmp_home: Path, jsonl_factory, capsys: pytest.CaptureFixture[str],
+    ):
+        config_path = tmp_home / ".ccstory" / "config.toml"
+        config_path.write_text(
+            '[projects]\n'
+            '"borealis-legacy" = "borealis-app"\n'
+            '"borealis-old" = "borealis-app"\n',
+            encoding="utf-8",
+        )
+        jsonl_factory("borealis-legacy", "s1", _engaged_messages("legacy", 1))
+
+        json_console, _ = _console()
+        assert _run_goal(
+            [
+                "set", "dup-goal", "--title", "Dup goal",
+                "--project", "borealis-legacy",
+                "--project", "borealis-old",
+                "--json",
+            ],
+            json_console,
+        ) == 0
+        payload = json.loads(capsys.readouterr().out)
+        # goals.py already folds both spellings to one canonical entry.
+        assert payload["goal"]["projects"] == ["borealis-app"]
+        assert payload["projects"] == [
+            {"project": "borealis-app", "observed": True},
+        ]
+
+    def test_mixed_observed_and_unobserved_projects_are_each_reported(
+        self, jsonl_factory, capsys: pytest.CaptureFixture[str],
+    ):
+        jsonl_factory("live-app", "s1", _engaged_messages("live", 1))
+
+        json_console, _ = _console()
+        assert _run_goal(
+            [
+                "set", "mixed-goal", "--title", "Mixed goal",
+                "--project", "live-app",
+                "--project", "not-yet-seen-xyz",
+                "--json",
+            ],
+            json_console,
+        ) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["goal"]["projects"] == ["live-app", "not-yet-seen-xyz"]
+        assert payload["projects"] == [
+            {"project": "live-app", "observed": True},
+            {"project": "not-yet-seen-xyz", "observed": False},
+        ]
+
+        console, stream = _console()
+        assert _run_goal(
+            [
+                "set", "mixed-goal", "--title", "Mixed goal",
+                "--project", "live-app",
+                "--project", "not-yet-seen-xyz",
+            ],
+            console,
+        ) == 0
+        rendered = stream.getvalue()
+        assert "observed:" in rendered and "`live-app`" in rendered
+        assert "unobserved:" in rendered and "`not-yet-seen-xyz`" in rendered
+
+    def test_never_calls_the_narrator(self, monkeypatch: pytest.MonkeyPatch):
+        def _forbidden() -> bool:
+            raise AssertionError("goal set must make zero model calls")
+
+        monkeypatch.setattr(session_summarizer, "llm_available", _forbidden)
+
+        console, _ = _console()
+        assert _run_goal(
+            ["set", "quiet", "--title", "Quiet", "--project", "quiet-app"],
+            console,
+        ) == 0
+
+    def test_observed_feedback_never_changes_stored_bytes_or_schema(
+        self, tmp_home: Path,
+    ):
+        """The new console/JSON feedback is purely additive output — the
+        managed store and the core `GoalContext` schema stay byte/field
+        compatible with the pre-#222 contract."""
+
+        console, _ = _console()
+        assert _run_goal(
+            [
+                "set", "byte-check", "--title", "Byte check",
+                "--project", "byte-app",
+            ],
+            console,
+        ) == 0
+        path = managed_goal_context_path()
+        context = load_managed_goal_context(path, aliases={})
+        assert context.to_schema_dict() == {
+            "schema_version": 1,
+            "goals": [
+                {
+                    "id": "byte-check",
+                    "title": "Byte check",
+                    "projects": ["byte-app"],
+                }
+            ],
+        }
 
 
 class TestGoalSourceSelection:

@@ -420,6 +420,25 @@ def test_goal_history_help_routes_to_the_read_only_json_parser():
     assert result.stderr == ""
 
 
+def test_project_help_routes_to_the_project_subcommand_parser():
+    result = _run(["-m", "ccstory", "project", "--help"])
+
+    assert result.returncode == 0
+    assert result.stdout.startswith("usage: ccstory project")
+    assert "list" in result.stdout
+    assert result.stderr == ""
+
+
+def test_project_list_help_routes_to_the_list_parser():
+    result = _run(["-m", "ccstory", "project", "list", "--help"])
+
+    assert result.returncode == 0
+    assert result.stdout.startswith("usage: ccstory project list")
+    assert "--window" in result.stdout
+    assert "--agent" in result.stdout
+    assert result.stderr == ""
+
+
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [
@@ -428,6 +447,7 @@ def test_goal_history_help_routes_to_the_read_only_json_parser():
         (["trend", "--help"], False),
         (["goal", "--help"], False),
         (["goal-history", "--help"], False),
+        (["project", "--help"], False),
         (["mcp", "--version"], False),
         (["--", "--help"], False),
         (["week", "--", "--help"], False),
