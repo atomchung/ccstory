@@ -35,6 +35,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, and `gemini-3.6-flash`.
   The table had been stale since 2026-07-26, so costs for those models were
   overstated — `gpt-5.6-luna` by 5x and `gemini-3.6-flash` by 2x.
+- `AntigravityProvider.collect_sessions()` now parses each candidate's cheap
+  transcript facts (`ParsedSessionCore`: identity, timestamps, message
+  counts, engagement) before resolving its working directory, and rejects
+  child, empty, out-of-window, and disengaged candidates on those facts
+  alone. Only a session that survives every filter opens the companion
+  `conversations/<session_id>.db` to resolve CWD/project — a transcript
+  record that already carries its own `cwd` skips that DB entirely. Rejected
+  candidates now trigger zero conversation-DB opens; previously every
+  candidate past the coarse per-file mtime filter paid for one regardless of
+  outcome. `SessionStat`, project/worktree attribution, native titles, and
+  usage for sessions that are ultimately included are unchanged. (#180)
 
 ### Fixed
 
