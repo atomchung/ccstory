@@ -63,6 +63,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   +41 sessions (+13.7%) as attended work when this marker was tried there
   while landing #240. No existing surface reads the new field, so recap,
   report, JSON, and MCP output is unchanged. (#136)
+- `ccstory.corrections`: durable local storage plus a pure resolution API for
+  user corrections to one physical session's summary or category — a local,
+  auditable "trust escape hatch" for a materially wrong generated/imported
+  value, not a session-management workflow. Adds cache schema version 7
+  (`session_corrections`, keyed by `(session_id, field)` on the *public*
+  physical-session id — old databases upgrade automatically, and a newer
+  schema is rejected with the existing safe-failure message). `field` is a
+  closed MVP enum (`summary`, `category`); a category value must match the
+  effective built-in/configured vocabulary unless the caller explicitly
+  opts in to a new one-off bucket, and a correction never mutates that
+  shared vocabulary or any other session. `set_session_correction` /
+  `get_session_corrections` / `unset_session_correction` never read or write
+  the existing generated/imported cache rows, and `resolve_summary` /
+  `resolve_category` are deterministic, zero-model-call functions where a
+  present correction always outranks the existing precedence chain — an
+  `evidence_changed` status is carried through for display but never
+  suppresses that authority. No renderer, CLI, or MCP surface calls any of
+  this yet; comparing a correction against live evidence, aggregate-cache
+  invalidation, the CLI, and provenance rendering are separate, later PRs
+  on the same issue. (#191)
 
 ### Changed
 
