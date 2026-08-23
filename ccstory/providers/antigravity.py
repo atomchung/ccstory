@@ -12,6 +12,7 @@ import glob
 import json
 import re
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import unquote
@@ -378,6 +379,51 @@ def _extract_session_id(jsonl_path: Path) -> str:
     return jsonl_path.stem
 
 
+@dataclass(frozen=True)
+class ParsedSessionCore:
+    """Transcript-only facts for one Antigravity session (issue #180).
+
+    Every field here comes from ``jsonl_path`` alone -- parsing this never
+    opens the companion ``conversations/<session_id>.db``. ``collect_sessions()``
+    uses these fields to reject child, empty, out-of-window, and disengaged
+    candidates before paying for a CWD lookup, which is the only remaining
+    part of session collection that needs that database. ``session_id`` and
+    ``path`` let a caller resolve CWD/project afterward for whatever survives
+    filtering.
+    """
+
+    session_id: str
+    path: Path
+    start: datetime
+    end: datetime
+    timestamps: list[datetime]
+    msg_count: int
+    user_msg_count: int
+    active_sec: int
+    first_user_text: str
+    native_title: str
+    # Populated only when a transcript record already carries its own
+    # ``cwd`` field (mirrors the Codex provider's payload-level ``cwd``).
+    # Antigravity step logs do not emit this today, so "" means "not present
+    # in the transcript" and callers fall back to the conversation DB, the
+    # same way ``AntigravityProvider._finalize_session_stat`` does.
+    transcript_cwd: str = ""
+
+    @property
+    def engaged(self) -> bool:
+        """Mirror of ``SessionStat.engaged`` for the non-scheduled branch.
+
+        Antigravity never sets ``is_scheduled=True``, so this intentionally
+        omits that branch rather than carrying dead code. Keep in sync with
+        ``ccstory.time_tracking.SessionStat.engaged``.
+        """
+        if self.user_msg_count >= 2:
+            return True
+        if self.user_msg_count == 1 and self.active_sec >= 60:
+            return True
+        return False
+
+
 class AntigravityProvider(BaseAgentProvider):
     """Session provider for Google Antigravity."""
 
@@ -663,10 +709,16 @@ class AntigravityProvider(BaseAgentProvider):
             child_ids = self._get_child_session_ids()
         return sid in child_ids
 
-    def parse_session(
+    def _parse_core(
         self, jsonl_path: Path, child_ids: set[str] | None = None
-    ) -> SessionStat | None:
-        """Parse one Antigravity transcript.jsonl into a SessionStat."""
+    ) -> ParsedSessionCore | None:
+        """Parse transcript-derived facts for one session without touching SQLite.
+
+        CWD/project resolution needs the companion conversation DB and is
+        deliberately left to ``_finalize_session_stat``, so
+        ``collect_sessions()`` can reject a candidate on these cheap facts
+        alone before ever opening that DB (issue #180).
+        """
         if self._is_child_session(jsonl_path, child_ids=child_ids):
             return None
 
@@ -674,9 +726,7 @@ class AntigravityProvider(BaseAgentProvider):
         msg_count = 0
         user_msg_count = 0
         first_user_text = ""
-
-        session_id = _extract_session_id(jsonl_path)
-        cwd = self._get_cwd(session_id)
+        transcript_cwd = ""
 
         try:
             with jsonl_path.open("r", encoding="utf-8", errors="ignore") as f:
@@ -696,6 +746,11 @@ class AntigravityProvider(BaseAgentProvider):
                     ts = _parse_ts(d.get("created_at"))
                     if ts:
                         timestamps.append(ts)
+
+                    if not transcript_cwd:
+                        record_cwd = d.get("cwd")
+                        if isinstance(record_cwd, str) and record_cwd:
+                            transcript_cwd = record_cwd
 
                     is_user = _is_user_step(stype, source)
                     is_assistant = _is_assistant_step(stype, source)
@@ -722,29 +777,65 @@ class AntigravityProvider(BaseAgentProvider):
             gap = (curr - prev).total_seconds()
             active_sec += min(gap, GAP_CAP_SEC)
 
-        project = (
-            encode_project_dir(worktree_origin(cwd)) if cwd else "antigravity"
+        session_id = _extract_session_id(jsonl_path)
+        native_title = self._get_title_map().get(session_id, "")
+
+        return ParsedSessionCore(
+            session_id=session_id,
+            path=jsonl_path,
+            start=timestamps[0],
+            end=timestamps[-1],
+            timestamps=timestamps,
+            msg_count=msg_count,
+            user_msg_count=user_msg_count,
+            active_sec=int(active_sec),
+            first_user_text=first_user_text,
+            native_title=native_title,
+            transcript_cwd=transcript_cwd,
         )
 
-        native_title = self._get_title_map().get(session_id, "")
+    def _finalize_session_stat(self, core: ParsedSessionCore) -> SessionStat:
+        """Resolve CWD/project for an accepted core and build its SessionStat.
+
+        Uses the transcript-supplied CWD when the transcript already carried
+        one; otherwise this is the one place PR A still opens the
+        conversation DB, and only for a core the caller already decided to
+        keep.
+        """
+        cwd = core.transcript_cwd or self._get_cwd(core.session_id)
+        project = encode_project_dir(worktree_origin(cwd)) if cwd else "antigravity"
 
         return SessionStat(
             project=project,
             category="",
-            session_id=session_id,
-            start=timestamps[0],
-            end=timestamps[-1],
-            active_sec=int(active_sec),
-            msg_count=msg_count,
-            user_msg_count=user_msg_count,
-            first_user_text=first_user_text,
-            native_title=native_title,
+            session_id=core.session_id,
+            start=core.start,
+            end=core.end,
+            active_sec=core.active_sec,
+            msg_count=core.msg_count,
+            user_msg_count=core.user_msg_count,
+            first_user_text=core.first_user_text,
+            native_title=core.native_title,
             is_scheduled=False,
             cwd=cwd,
-            timestamps=[t.timestamp() for t in timestamps],
+            timestamps=[t.timestamp() for t in core.timestamps],
             agent=self.agent_name,
-            path=jsonl_path,
+            path=core.path,
         )
+
+    def parse_session(
+        self, jsonl_path: Path, child_ids: set[str] | None = None
+    ) -> SessionStat | None:
+        """Parse one Antigravity transcript.jsonl into a SessionStat.
+
+        Always resolves CWD/project immediately: unlike ``collect_sessions()``,
+        a direct call has no window/engagement filter to apply first, so
+        there is no cheaper rejection to try before paying for that lookup.
+        """
+        core = self._parse_core(jsonl_path, child_ids=child_ids)
+        if core is None:
+            return None
+        return self._finalize_session_stat(core)
 
     def collect_usage(
         self,
@@ -917,7 +1008,13 @@ class AntigravityProvider(BaseAgentProvider):
         until: datetime | None = None,
         engaged_only: bool = True,
     ) -> list[SessionStat]:
-        """All Antigravity sessions overlapping [since, until)."""
+        """All Antigravity sessions overlapping [since, until).
+
+        Parses each candidate's cheap transcript facts first and rejects
+        child, empty, out-of-window, and disengaged sessions on those alone.
+        Only a session that survives every filter pays for a conversation-DB
+        CWD lookup (issue #180) -- rejected candidates never open that DB.
+        """
         if since.tzinfo is None:
             since = since.replace(tzinfo=timezone.utc)
         if until is not None and until.tzinfo is None:
@@ -935,16 +1032,17 @@ class AntigravityProvider(BaseAgentProvider):
             except OSError:
                 continue
 
-            s = self.parse_session(path, child_ids=child_ids)
-            if not s:
+            core = self._parse_core(path, child_ids=child_ids)
+            if core is None:
                 continue
-            if s.end < since:
+            if core.end < since:
                 continue
-            if until is not None and s.start >= until:
+            if until is not None and core.start >= until:
                 continue
-            if engaged_only and not s.engaged:
+            if engaged_only and not core.engaged:
                 continue
-            stats.append(s)
+
+            stats.append(self._finalize_session_stat(core))
         return stats
 
     def transcript_path(self, sess: SessionStat) -> Path | None:

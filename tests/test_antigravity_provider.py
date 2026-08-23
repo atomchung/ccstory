@@ -1423,3 +1423,261 @@ class TestDbPriorityAndDedup:
         assert mu.input_tokens == 700
         assert mu.output_tokens == 150
         assert mu.cache_read == 25
+
+
+class TestAntigravityLazyCwdCollection:
+    """Issue #180 PR A.
+
+    ``collect_sessions()`` must reject child, empty, out-of-window, and
+    disengaged candidates using only ``ParsedSessionCore`` (transcript-only
+    facts) and must not open a session's ``conversations/<id>.db`` until
+    that session survives every one of those filters.
+    """
+
+    def _write_malformed(self, tmp_home: Path, session_id: str) -> None:
+        """A transcript.jsonl whose every line fails json.loads."""
+        brain_dir = (
+            tmp_home
+            / ".gemini"
+            / "antigravity"
+            / "brain"
+            / session_id
+            / ".system_generated"
+            / "logs"
+        )
+        brain_dir.mkdir(parents=True, exist_ok=True)
+        (brain_dir / "transcript.jsonl").write_text(
+            "not valid json {{{\nalso not valid ]]]\n", encoding="utf-8"
+        )
+
+    def _build_mixed_population(self, antigravity_factory, tmp_home) -> dict[str, str]:
+        """One plain accepted session, one accepted parent+filtered child, and
+        one fixture per rejection category the brief calls out: old, future
+        (out-of-window), empty, disengaged, and malformed.
+        """
+        accepted_sid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        antigravity_factory(
+            accepted_sid,
+            [_user("Do the thing", 1), _planner("Done", 2), _user("Thanks", 3)],
+            cwd="/Users/x/accepted",
+        )
+
+        parent_sid = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        child_sid = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+        invoke_rec = {
+            "step_index": 2,
+            "source": "MODEL",
+            "type": "INVOKE_SUBAGENT",
+            "status": "DONE",
+            "created_at": _ts(2),
+            "content": f"Spawning subagent task conversation id: {child_sid}",
+        }
+        antigravity_factory(
+            parent_sid,
+            [_user("Delegate this", 1), invoke_rec, _user("More", 3)],
+            cwd="/Users/x/parent",
+        )
+        antigravity_factory(
+            child_sid,
+            [_user("Child task", 1), _planner("Child done", 2)],
+            cwd="/Users/x/child",
+        )
+
+        old_sid = "old-session-before-window"
+        rec_old1 = _user("Old work", 1)
+        rec_old1["created_at"] = datetime(2026, 6, 1, tzinfo=timezone.utc).isoformat()
+        rec_old2 = _planner("Old response", 2)
+        rec_old2["created_at"] = datetime(
+            2026, 6, 1, 0, 5, tzinfo=timezone.utc
+        ).isoformat()
+        antigravity_factory(old_sid, [rec_old1, rec_old2], cwd="/Users/x/old")
+
+        future_sid = "future-session-after-window"
+        rec_future1 = _user("Future work", 1)
+        rec_future1["created_at"] = datetime(
+            2026, 8, 15, tzinfo=timezone.utc
+        ).isoformat()
+        rec_future2 = _planner("Future response", 2)
+        rec_future2["created_at"] = datetime(
+            2026, 8, 15, 0, 5, tzinfo=timezone.utc
+        ).isoformat()
+        antigravity_factory(
+            future_sid, [rec_future1, rec_future2], cwd="/Users/x/future"
+        )
+
+        empty_sid = "empty-session-no-records"
+        antigravity_factory(empty_sid, [])
+
+        disengaged_sid = "disengaged-session-single-short"
+        antigravity_factory(
+            disengaged_sid,
+            [_user("hi", 0), _planner("ok", 0)],
+            cwd="/Users/x/disengaged",
+        )
+
+        malformed_sid = "malformed-session-bad-json"
+        self._write_malformed(tmp_home, malformed_sid)
+
+        return {
+            "accepted": accepted_sid,
+            "parent": parent_sid,
+            "child": child_sid,
+            "old": old_sid,
+            "future": future_sid,
+            "empty": empty_sid,
+            "disengaged": disengaged_sid,
+            "malformed": malformed_sid,
+        }
+
+    def test_rejected_candidates_never_open_cwd_db(
+        self, antigravity_factory, tmp_home, monkeypatch
+    ):
+        sids = self._build_mixed_population(antigravity_factory, tmp_home)
+
+        lookups: list[Path] = []
+
+        def fake_extract(db_path: Path) -> str:
+            lookups.append(db_path)
+            return f"/Users/x/{db_path.stem}"
+
+        monkeypatch.setattr(antigravity_module, "extract_cwd_from_db", fake_extract)
+
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
+        since = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        until = datetime(2026, 7, 30, tzinfo=timezone.utc)
+        stats = provider.collect_sessions(since, until)
+
+        # Only the two genuinely accepted sessions (plain accepted + the
+        # parent that invoked a child) come back.
+        result_ids = {s.session_id for s in stats}
+        assert result_ids == {sids["accepted"], sids["parent"]}
+
+        # DB opens scale with accepted sessions, not with every candidate:
+        # exactly the two accepted session ids, and only once apiece.
+        queried_ids = [p.stem for p in lookups]
+        assert sorted(queried_ids) == sorted([sids["accepted"], sids["parent"]])
+        assert len(lookups) == 2
+
+        for rejected_key in (
+            "child",
+            "old",
+            "future",
+            "empty",
+            "disengaged",
+            "malformed",
+        ):
+            assert sids[rejected_key] not in queried_ids, (
+                f"{rejected_key} candidate triggered a CWD DB open"
+            )
+
+    def test_cwd_open_count_independent_of_candidate_order(
+        self, antigravity_factory, tmp_home, monkeypatch
+    ):
+        sids = self._build_mixed_population(antigravity_factory, tmp_home)
+        since = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        until = datetime(2026, 7, 30, tzinfo=timezone.utc)
+        real_glob = antigravity_module.glob.glob
+
+        def run_once(reverse_glob: bool) -> tuple[set[str], int]:
+            lookups: list[Path] = []
+
+            def fake_extract(db_path: Path) -> str:
+                lookups.append(db_path)
+                return f"/Users/x/{db_path.stem}"
+
+            monkeypatch.setattr(
+                antigravity_module, "extract_cwd_from_db", fake_extract
+            )
+
+            def maybe_reversed_glob(pattern: str):
+                results = real_glob(pattern)
+                return list(reversed(results)) if reverse_glob else results
+
+            monkeypatch.setattr(antigravity_module.glob, "glob", maybe_reversed_glob)
+
+            # Fresh provider per run: no cross-run cache to mask an
+            # order-dependent regression.
+            provider = AntigravityProvider(
+                antigravity_dir=tmp_home / ".gemini" / "antigravity"
+            )
+            stats = provider.collect_sessions(since, until)
+            return {s.session_id for s in stats}, len(lookups)
+
+        forward_ids, forward_opens = run_once(reverse_glob=False)
+        reversed_ids, reversed_opens = run_once(reverse_glob=True)
+
+        expected_ids = {sids["accepted"], sids["parent"]}
+        assert forward_ids == expected_ids
+        assert reversed_ids == expected_ids
+        assert forward_opens == 2
+        assert reversed_opens == 2
+
+    def test_transcript_supplied_cwd_bypasses_conversation_db(
+        self, antigravity_factory, tmp_home, monkeypatch
+    ):
+        sid = "transcript-cwd-session"
+        rec_user = _user("Use the inline cwd", 1)
+        rec_user["cwd"] = "/Users/x/from-transcript"
+        antigravity_factory(sid, [rec_user, _planner("ok", 2), _user("more", 3)])
+
+        def fail_if_called(db_path: Path) -> str:
+            raise AssertionError(
+                f"conversation DB should not be opened, got {db_path}"
+            )
+
+        monkeypatch.setattr(antigravity_module, "extract_cwd_from_db", fail_if_called)
+
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
+        since = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        until = datetime(2026, 7, 30, tzinfo=timezone.utc)
+        stats = provider.collect_sessions(since, until)
+
+        assert len(stats) == 1
+        assert stats[0].cwd == "/Users/x/from-transcript"
+        assert stats[0].project == "-Users-x-from-transcript"
+
+        # parse_session() must honor the same bypass for a direct call.
+        stat = provider.parse_session(
+            tmp_home
+            / ".gemini"
+            / "antigravity"
+            / "brain"
+            / sid
+            / ".system_generated"
+            / "logs"
+            / "transcript.jsonl"
+        )
+        assert stat is not None
+        assert stat.cwd == "/Users/x/from-transcript"
+
+    def test_corrupt_conversation_db_degrades_but_keeps_timing(
+        self, antigravity_factory, tmp_home
+    ):
+        sid = "corrupt-db-session"
+        antigravity_factory(
+            sid,
+            [_user("Do the thing", 1), _planner("Done", 2), _user("Thanks", 3)],
+        )
+        conv_dir = tmp_home / ".gemini" / "antigravity" / "conversations"
+        conv_dir.mkdir(parents=True, exist_ok=True)
+        (conv_dir / f"{sid}.db").write_bytes(b"not a sqlite database")
+
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
+        since = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        until = datetime(2026, 7, 30, tzinfo=timezone.utc)
+        stats = provider.collect_sessions(since, until)
+
+        assert len(stats) == 1
+        stat = stats[0]
+        assert stat.session_id == sid
+        assert stat.cwd == ""
+        assert stat.project == "antigravity"
+        assert stat.start == datetime(2026, 7, 22, 12, 1, tzinfo=timezone.utc)
+        assert stat.end == datetime(2026, 7, 22, 12, 3, tzinfo=timezone.utc)
+        assert stat.user_msg_count == 2
