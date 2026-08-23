@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A deterministic project-attribution engine (`ccstory.project_attribution`)
+  that resolves an owner-initiated session to a canonical project through
+  inspectable rules, and either accepts, reports a conflict, or abstains.
+  It makes zero model calls. No recap, report, JSON, or MCP surface loads it
+  yet — profile loading is a separate product change gated on the held-out
+  evaluation in #223. (#224)
+- Maintainer-only evaluation tooling for that engine:
+  `scripts/project_attribution_sample.py` (stratified local sampling) and
+  `scripts/project_attribution_eval.py` (rule mining and scoring). Real
+  evaluation artifacts stay in the gitignored `.local-eval/`; the public
+  test suite uses synthetic projects and transcripts only.
+- `SessionStat.is_delegated` / `delegation_source`, carried through to
+  `SessionSlice`. The Codex provider now recognizes the `Claude Code`
+  originator, `<codex_delegation>`, and `<task>` wrappers. Owner-intent
+  workflows can exclude dispatched transcripts while usage and cost
+  accounting keep them. No existing surface reads these fields, so recap,
+  report, JSON, and MCP output is unchanged. (#136, #224)
+
 ### Changed
 
 - Refreshed the vendored LiteLLM pricing table. Adds `claude-mythos-5`,
