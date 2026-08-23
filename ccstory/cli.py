@@ -327,6 +327,11 @@ def _goal_set_project_feedback(
     Scans the full local history (``--window all``, every agent) through the
     same read-only provider seam `ccstory project list` uses — no persistent
     registry, no second transcript index, zero model calls.
+
+    Deliberately reads the *complete* observed population, never the
+    relevance-filtered view `project list` shows by default (#254): a user
+    who names an ephemeral or synthetic identity explicitly has still
+    observed it, and reporting it as unobserved would be false.
     """
     from .project_discovery import (
         collect_observed_projects,
@@ -336,7 +341,9 @@ def _goal_set_project_feedback(
     from .recap import parse_window
 
     since, until, _label = parse_window("all")
-    observed = collect_observed_projects(since, until, agent="all", aliases=aliases)
+    observed = collect_observed_projects(
+        since, until, agent="all", aliases=aliases, config_path=CONFIG_PATH,
+    )
     observed_ids = observed_project_ids(observed)
     observed_set = set(observed_ids)
 
@@ -598,6 +605,11 @@ def _run_project(argv: list[str], console: Console) -> int:
     already accepts as an observed match. Scans through the existing provider
     collection/snapshot seam for one bounded window; never writes a report,
     touches the narrator/cache, or exposes a transcript path or session id.
+
+    Defaults to the relevance view (#254): ephemeral and provider-synthesized
+    identities are hidden, and how many were hidden is always stated. `--all`
+    restores the complete population. Ordering, caps, and the alias fold are
+    unchanged by the filter — it only removes rows, never reorders them.
     """
     from rich.table import Table
 
@@ -607,6 +619,7 @@ def _run_project(argv: list[str], console: Console) -> int:
         JSON_HARD_MAX as PROJECT_LIST_JSON_HARD_MAX,
         bounded_observed_projects,
         collect_observed_projects,
+        partition_by_relevance,
     )
     from .providers import list_providers
     from .recap import parse_window
@@ -639,6 +652,15 @@ def _run_project(argv: list[str], console: Console) -> int:
         action="store_true",
         help="Print observed projects as bounded JSON",
     )
+    list_p.add_argument(
+        "--all",
+        action="store_true",
+        help=(
+            "Restore the complete listing, including ephemeral scratch "
+            "workspaces and provider-synthesized dated identities that the "
+            "default relevance view hides"
+        ),
+    )
     args = p.parse_args(argv)
 
     try:
@@ -649,12 +671,15 @@ def _run_project(argv: list[str], console: Console) -> int:
 
     aliases = load_project_aliases(CONFIG_PATH)
     observed = collect_observed_projects(
-        since, until, agent=args.agent, aliases=aliases,
+        since, until, agent=args.agent, aliases=aliases, config_path=CONFIG_PATH,
     )
+    relevant, hidden = partition_by_relevance(observed)
+    listed = observed if args.all else relevant
+    filtered_count = 0 if args.all else len(hidden)
 
     if args.json:
         capped, total = bounded_observed_projects(
-            observed, PROJECT_LIST_JSON_HARD_MAX,
+            listed, PROJECT_LIST_JSON_HARD_MAX,
         )
         payload = {
             "ok": True,
@@ -664,12 +689,24 @@ def _run_project(argv: list[str], console: Console) -> int:
             "total_count": total,
             "truncated": total > len(capped),
             "hard_max": PROJECT_LIST_JSON_HARD_MAX,
+            # Additive (#254): how many observed identities the default
+            # relevance view removed. Always 0 under `--all`, so a machine
+            # consumer never has to infer the mode from the row count.
+            "all": bool(args.all),
+            "filtered_count": filtered_count,
             "projects": [project.to_dict() for project in capped],
         }
         sys.stdout.write(_json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
         return 0
 
-    if not observed:
+    if not listed:
+        if filtered_count:
+            console.print(
+                "[dim]No configuration-relevant projects in this window — "
+                f"filtered {filtered_count} ephemeral/synthetic identities "
+                "(--all to show).[/dim]"
+            )
+            return 0
         console.print(
             "[dim]No observed projects in this window. Try "
             "`ccstory project list --window all` or a different "
@@ -677,18 +714,20 @@ def _run_project(argv: list[str], console: Console) -> int:
         )
         return 0
 
-    capped, total = bounded_observed_projects(observed, PROJECT_LIST_DISPLAY_CAP)
+    capped, total = bounded_observed_projects(listed, PROJECT_LIST_DISPLAY_CAP)
     table = Table(
         title=f"Observed projects · window={args.window} agent={args.agent}",
         title_style="bold",
     )
     table.add_column("Project ID", style="cyan", no_wrap=True)
+    table.add_column("Category", style="magenta", no_wrap=True)
     table.add_column("Last seen", style="dim", no_wrap=True)
     table.add_column("Sessions", justify="right")
     table.add_column("Agents", style="dim")
     for project in capped:
         table.add_row(
             project.project_id,
+            project.category,
             project.last_seen.date().isoformat(),
             str(project.session_count),
             ", ".join(project.agents),
@@ -699,6 +738,20 @@ def _run_project(argv: list[str], console: Console) -> int:
             f"[dim]Showing {len(capped)} of {total} — pass --json or narrow "
             "--window to see the rest.[/dim]"
         )
+    if filtered_count:
+        console.print(
+            f"[dim]Filtered {filtered_count} ephemeral/synthetic identities "
+            "(--all to show).[/dim]"
+        )
+    elif args.all and hidden:
+        console.print(
+            f"[dim]Showing all — {len(hidden)} ephemeral/synthetic "
+            "identities are hidden by default.[/dim]"
+        )
+    console.print(
+        "[dim]Category is the folder-rule result only "
+        "(user rule > built-in rule > fallback).[/dim]"
+    )
     console.print(
         "[dim]Use the Project ID column with "
         "`ccstory goal set <id> --title <title> --project <id>`.[/dim]"

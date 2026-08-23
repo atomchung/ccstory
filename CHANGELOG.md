@@ -34,6 +34,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   non-additive, the global buckets still count each contribution once, and
   the disclosure makes zero model calls. `ccstory goal-history`'s weekly
   bucket shape is unchanged.
+- `ccstory project list` is **configuration-relevant by default** (#254). On
+  a real store the command returned 91 identities and buried the ~10 actual
+  projects under noise, which defeats the point of discovery — you list
+  projects in order to configure a goal against one. Two identity classes
+  can never be that target, and both are now hidden by default, decided
+  deterministically with zero model calls:
+  - **Ephemeral roots** — every session for that project ran under a
+    temporary filesystem root (`/tmp`, `/private/tmp`, `/var/tmp`,
+    `/private/var/tmp`, or the macOS per-user `TMPDIR` under `/var/folders`).
+    Judged from the recorded working directory, matched component-wise, so a
+    real repository named `tmp-runner` or one living in `~/code/tmpdata` is
+    untouched. A single session outside scratch space keeps the whole
+    project visible.
+  - **Provider-synthesized dated identities** — the per-day placeholder
+    workspace a coding agent creates for a folderless chat, which normalizes
+    to `<agent>-YYYY-MM-DD-<leaf>` (for example `codex-2026-08-21-new-chat`).
+    The leading token must be a registered coding agent and the date must be
+    a real calendar date, so an ordinary `release-2026-08-21-notes` is
+    untouched.
+
+  `--all` restores the complete listing unchanged. Ordering, display caps,
+  the alias fold, and the no-path/no-session-id boundary are all exactly as
+  before — the filter only removes rows. The terminal states how many
+  identities it hid; `--json` gains additive `filtered_count` and `all`
+  fields plus a per-row `relevance`
+  (`relevant` / `ephemeral_root` / `synthetic_dated_id`). Every field the
+  command already emitted keeps its name, type, and meaning.
+
+  `ccstory goal set`'s observed check deliberately keeps judging against the
+  complete observed population: naming a filtered identity on purpose still
+  reports `observed: true`.
+- `ccstory project list` rows now carry a **resolved category** (#254),
+  answering how a project relates to your report categories without leaving
+  the command. Terminal output gains a `Category` column; `--json` gains
+  additive `category` and `category_source`. Resolution runs only the
+  deterministic folder layer — `user_rule > builtin_rule > fallback`, the
+  same chain `--classify folder` uses — so it never reads the per-session
+  content-classification cache and never calls a narrator. A project reached
+  through several folder variants resolves once, from the group's
+  lexicographically smallest folder, so the value is independent of provider
+  and filesystem iteration order.
 - Per-window **classification coverage** disclosure (#256): on a store
   where the content-classification tier rarely runs, `user_rule > llm
   cache/fresh > builtin_rule > fallback` used to read as one pipeline with

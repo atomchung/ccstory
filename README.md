@@ -106,7 +106,7 @@ flow after the live debug session on Wednesday.
 | `ccstory category list` | Show your custom bucket rules |
 | `ccstory category set <bucket> <keyword>…` | Pin a project to a bucket |
 | `ccstory category unset <bucket> <keyword>…` | Remove a keyword from a bucket |
-| `ccstory project list` | Discover observed project IDs for `goal set --project` |
+| `ccstory project list` | Discover observed project IDs for `goal set --project` (`--all` includes ephemeral/synthetic ones) |
 
 ### Advanced
 
@@ -286,23 +286,62 @@ name alone once aliases and worktrees are involved. `ccstory project list`
 answers that directly, read-only:
 
 ```bash
-ccstory project list                       # observed projects, entire history
+ccstory project list                       # configuration-relevant projects
+ccstory project list --all                 # every observed identity
 ccstory project list --window month        # this month only
 ccstory project list --agent codex --json
 ```
 
 Each row is `project_id` (the same canonical normalization + alias fold
-recap and GoalContext use), `last_seen`, `session_count`, and `agents[]` —
-never a transcript path or session id. A project touched by more than one
-coding agent, or reached through more than one folder alias, collapses onto
-one row. Output is bounded and deterministic: most-recently-observed project
-first, canonical id as the tie-break; the terminal shows a capped top set
-with an explicit count when there are more, and `--json` carries its own
-explicit hard maximum plus `total_count` / `truncated` rather than silently
-growing without bound. The window defaults to `all` (`week` / `month` /
-`YYYY-MM` also accepted) and the command scans through the same provider
-snapshot seam as everything else — no persistent project registry, no second
-transcript index, no model calls.
+recap and GoalContext use), `category` (see below), `last_seen`,
+`session_count`, and `agents[]` — never a transcript path or session id. A
+project touched by more than one coding agent, or reached through more than
+one folder alias, collapses onto one row. Output is bounded and
+deterministic: most-recently-observed project first, canonical id as the
+tie-break; the terminal shows a capped top set with an explicit count when
+there are more, and `--json` carries its own explicit hard maximum plus
+`total_count` / `truncated` rather than silently growing without bound. The
+window defaults to `all` (`week` / `month` / `YYYY-MM` also accepted) and the
+command scans through the same provider snapshot seam as everything else —
+no persistent project registry, no second transcript index, no model calls.
+
+### The default relevance view
+
+Discovery exists so you can configure a goal against a workspace you
+actually work in. Two identity classes can never be that workspace, so the
+default view hides them and always says how many it hid:
+
+- **Ephemeral roots** — every session for that project ran under a temporary
+  filesystem root (`/tmp`, `/private/tmp`, `/var/tmp`, `/private/var/tmp`, or
+  the macOS per-user `TMPDIR` under `/var/folders`). Decided from the
+  recorded working directory, matched component-wise: a real repository named
+  `tmp-runner`, or one living in `~/code/tmpdata`, is never affected. One
+  session outside scratch space is enough to keep the whole project visible.
+- **Provider-synthesized dated identities** — the per-day placeholder
+  workspace a coding agent creates for a chat you started without opening a
+  folder, which normalizes to `<agent>-YYYY-MM-DD-<leaf>` (for example
+  `codex-2026-08-21-new-chat`). The leading token must be a registered
+  coding agent and the date must be a real calendar date, so an ordinary
+  project named `release-2026-08-21-notes` is never affected.
+
+Both rules are deterministic and run zero model calls. `--all` restores the
+complete listing unchanged — same order, same caps, same alias fold. In
+`--json`, every row carries its own `relevance`
+(`relevant` / `ephemeral_root` / `synthetic_dated_id`), and the envelope
+gains `filtered_count` (how many identities the default view removed, always
+`0` under `--all`) and `all`. Both additions are additive: every field the
+command already emitted keeps its name, type, and meaning.
+
+### The resolved category column
+
+`category` / `category_source` answer how a project relates to your report
+categories, using only the deterministic folder layer — `user_rule >
+builtin_rule > fallback`, the same chain `--classify folder` uses. Discovery
+never reads the per-session content-classification cache and never calls a
+narrator, so the column costs nothing and is stable across runs. A project
+reached through several folder variants resolves once, from the group's
+lexicographically smallest folder, so the value never depends on provider or
+filesystem iteration order.
 
 ## Goal activity
 
@@ -332,8 +371,10 @@ future project can be declared before its first session), just labeled:
   unobserved: `future-app` has no session history yet — did you mean: future-ap? (value unchanged)
 ```
 
-A close-spelling suggestion is deterministic guidance only; it never rewrites
-the stored value. Add `--json` for a machine-readable envelope instead —
+The observed check judges against the complete observed population, not the
+relevance-filtered default view: naming an ephemeral or synthetic identity on
+purpose still counts as observed. A close-spelling suggestion is
+deterministic guidance only; it never rewrites the stored value. Add `--json` for a machine-readable envelope instead —
 `{"ok": true, "replaced": false, "goal": {...}, "projects": [{"project":
 "future-app", "observed": false, "candidates": ["future-ap"]}]}` — where
 `candidates` is present only when there is a close-spelling suggestion to
@@ -659,6 +700,7 @@ ccstory month --format json
 ccstory trend --weeks 8 --json
 ccstory goal-history         # dedicated sanitized weekly goal series
 ccstory project list --json  # observed project IDs, bounded and deterministic
+ccstory project list --json --all  # …including ephemeral/synthetic identities
 ccstory goal set my-goal --title "My goal" --project my-app --json
 ```
 
@@ -893,12 +935,16 @@ returns the exact sanitized hour-denominated shape used by both
 weeks, enforces a hard maximum of 24, never runs narrative generation, and
 raises a clear error for a missing context.
 
-`collect_observed_projects(since, until, agent="all", aliases=None)` is the
-read-only alternative behind `ccstory project list`. It scans one provider
-snapshot for the given window and returns `ObservedProject` rows
-(`project_id`, `last_seen`, `session_count`, `agents`) through the same
-canonical normalization + alias fold as recap and GoalContext — deterministic
-order, no transcript path or session id, no persistent registry.
+`collect_observed_projects(since, until, agent="all", aliases=None,
+config_path=None)` is the read-only alternative behind
+`ccstory project list`. It scans one provider snapshot for the given window
+and returns `ObservedProject` rows (`project_id`, `last_seen`,
+`session_count`, `agents`, `category`, `category_source`, `relevance`)
+through the same canonical normalization + alias fold as recap and
+GoalContext — deterministic order, no transcript path or session id, no
+persistent registry. It never drops a row; `partition_by_relevance(projects)`
+is the separate, pure, order-preserving split into
+`(relevant, filtered)` that the CLI's default view applies.
 
 Semi-stable means: signatures may still change with minor versions, but
 renames and behavior changes are called out in the changelog instead of
