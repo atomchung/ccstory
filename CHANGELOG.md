@@ -26,6 +26,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workflows can exclude dispatched transcripts while usage and cost
   accounting keep them. No existing surface reads these fields, so recap,
   report, JSON, and MCP output is unchanged. (#136, #224)
+- A shared `InteractionMode`/`InteractionProvenance` model
+  (`ccstory.provenance`) plus a pure, deterministic resolver that classifies
+  how a physical session was driven — interactive, delegated, scheduled,
+  system_review, or unknown — from the authoritative fields `SessionStat`/
+  `SessionSlice` already carry, never from prompt or transcript wording.
+  `UNKNOWN` is a first-class result when metadata is insufficient; a
+  conflicting signal combination lowers confidence instead of guessing.
+  Includes a labeled-fixture evaluation harness (`evaluate_fixtures`) that
+  scores precision/recall/confusion per mode. `resolve_session_provenance`
+  is a callable, session/window-pure entry point that recap, trend, MCP,
+  and library callers can adopt later; nothing calls it yet, and no
+  existing engagement or headline-time semantics changed. Provider signal
+  adapters (a `system_review` source in particular — no bundled provider
+  exposes one today) and any output wiring are separate, later slices.
+  (#136)
 
 ### Changed
 
