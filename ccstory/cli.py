@@ -1040,6 +1040,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
             agent=result.agent,
             goal_context=result.goal_context,
             goal_breakdown=result.goal_breakdown,
+            content_lane=result.content_lane,
             console=console,
         )
         console.print(f"[dim]Prices as of {get_snapshot_date()}[/dim]")

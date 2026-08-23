@@ -262,6 +262,22 @@ it still checks the built-in keyword table above before falling back, so a
 no-config, no-narrator install still reports across more than one area
 instead of collapsing everything into `coding`.
 
+**Classification coverage.** Every recap discloses which layer actually
+resolved each session — `user_rule` / `llm_cache` / `llm_fresh` /
+`builtin_rule` / `fallback` — as a `classification_coverage` block in
+`--json` (sessions + active hours per source, plus `content_lane`: whether
+fresh content classification could run *at all* this invocation). The
+Markdown report always includes the full breakdown as one line; the
+terminal card adds a compact version only when the content lane never had a
+chance to run this window, or the fallback share is at least 25%, e.g.
+`classification: rules 141 · content 0 (lane off) · fallback 10`. A lane
+that is "on" can still legitimately show `content 0` when every session
+resolved via a rule or a cache hit — that reads differently from a lane
+that never ran (`--minimal`, `--classify folder`, or no configured
+narrator), which always shows `(lane off)`. `ccstory trend` carries the
+same per-period breakdown (its own `content_lane` is always `"off"`: trend
+resolution is cache-only and never fires a fresh classification call).
+
 ## Project discovery
 
 `ccstory goal set --project <id>` needs the exact canonical project string a
@@ -636,7 +652,7 @@ stdout is pure JSON (progress goes to stderr, same as markdown mode), so
 commands, the envelope
 carries `schema_version` (currently 1): renames/removals bump it, additive
 fields don't — consumers should tolerate unknown keys. Covers window, totals
-(hours/tokens/cost/cache), buckets, per-session lines, model breakdown, unpriced models (`unpriced_models`), provider coverage (`usage_coverage`), narrative, optional `goals`, comparison, artifacts, and the pricing snapshot date. The markdown
+(hours/tokens/cost/cache), buckets, per-session lines, model breakdown, unpriced models (`unpriced_models`), provider coverage (`usage_coverage`), classification-source coverage (`classification_coverage`), narrative, optional `goals`, comparison, artifacts, and the pricing snapshot date. The markdown
 report file is still written either way; JSON is a view, not a replacement.
 `goal-history` is deliberately different: it returns only the sanitized series
 and writes no report.
@@ -921,9 +937,9 @@ Five read-only tools:
 
 | Tool | Returns |
 |---|---|
-| `get_recap(window, classify, allow_llm, agent)` | Totals, per-category active hours + narrative + a `children` per-project breakdown (name + hours), legacy overall narrative, additive deterministic `top_focus_projection`, optional current goal-activity projection, top 5 sessions with `summary_evidence.status`, cost, usage coverage, and unpriced models. |
+| `get_recap(window, classify, allow_llm, agent)` | Totals, per-category active hours + narrative + a `children` per-project breakdown (name + hours), legacy overall narrative, additive deterministic `top_focus_projection`, optional current goal-activity projection, top 5 sessions with `summary_evidence.status`, cost, usage coverage, unpriced models, and classification-source coverage. |
 | `compare_to_previous(window, classify, agent)` | Active-hours and cost deltas vs. the immediately preceding same-length window, with current/previous usage coverage and unpriced models. |
-| `get_trend(period, count, classify, agent)` | Per-period series over the last `count` weeks/months (oldest first): active hours, cost, per-category hours, usage coverage, and unpriced models. `count` clamped to 1..24. |
+| `get_trend(period, count, classify, agent)` | Per-period series over the last `count` weeks/months (oldest first): active hours, cost, per-category hours, usage coverage, unpriced models, and classification-source coverage. `count` clamped to 1..24. |
 | `get_goal_activity_history(weeks, agent)` | The same sanitized JSON object as `ccstory goal-history`: 4 completed local ISO weeks by default (max 24, invalid counts rejected), every effective goal including zero activity, exclusive/shared/unattributed hours, unavailable activity coverage, source fingerprint, and explicit accounting/disclaimer semantics. Requires configured or managed GoalContext. |
 | `list_categories()` | The bucket rules ccstory classifies sessions into (user + built-in defaults). |
 

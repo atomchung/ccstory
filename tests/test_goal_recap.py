@@ -21,7 +21,9 @@ def _recent_ts(hours_ago: float) -> str:
 
 def test_goal_result_fields_are_appended_for_positional_compatibility():
     fields = list(recap.RecapResult.__dataclass_fields__)
-    assert fields[-2:] == ["goal_context", "goal_breakdown"]
+    # content_lane (#256) is appended after goal_breakdown, preserving the
+    # same positional-construction guarantee this test protects.
+    assert fields[-3:] == ["goal_context", "goal_breakdown", "content_lane"]
 
 
 def test_recap_computes_one_goal_breakdown_and_projects_surfaces(

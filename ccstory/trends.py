@@ -14,7 +14,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from .categorizer import builtin_or_fallback, resolve_session_bucket
+from .categorizer import (
+    builtin_or_fallback,
+    classification_source_breakdown,
+    resolve_session_bucket,
+)
 from .local_time import system_local_timezone
 from .providers import collect_provider_snapshot
 from .session_identity import evidence_session_id, public_session_id
@@ -246,6 +250,15 @@ class PeriodPoint:
     cost_usd: float
     provider_coverage: dict[str, str] = field(default_factory=dict)
     unpriced_models: list[str] = field(default_factory=list)
+    # Additive (#256): this period's classification-source breakdown —
+    # {"sessions_total": N, "by_source": {...}, "content_lane": "off"}.
+    # `content_lane` is always "off" here, not computed per point: trend
+    # resolution is cache-only by construction
+    # (`_resolve_sessions_from_cache` never fires a fresh LLM call, for
+    # every `mode` value — see its own docstring), so fresh content
+    # classification never has a chance to run in this command, unlike
+    # `recap.build_recap()` where it depends on the actual invocation.
+    classification_coverage: dict = field(default_factory=dict)
 
     def quota_pct(self, monthly_quota_usd: float) -> float:
         """API-equiv cost as % of the prorated monthly quota (1.0 = 100%)."""
@@ -368,6 +381,10 @@ def collect_trend(
             cost_usd=usage.total_cost_usd,
             provider_coverage=usage.provider_coverage,
             unpriced_models=usage.unpriced_models,
+            classification_coverage={
+                **classification_source_breakdown(in_window),
+                "content_lane": "off",
+            },
         ))
     return points
 
