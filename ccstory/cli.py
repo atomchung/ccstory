@@ -30,74 +30,25 @@ import os
 import sys
 from pathlib import Path
 
-from rich.console import Console
-from rich.table import Table
-
 from .bootstrap import (
     VALID_OUTPUT_FORMATS,
     build_top_level_parser,
     parser_version_for_argv,
     prepare_information_streams,
 )
-from .providers import agent_label, list_providers
-from .categorizer import (
-    add_category_keywords,
-    colors_for,
-    ensure_default_config,
-    load_project_aliases,
-    list_user_categories,
-    load_settings,
-    normalize_project_name,
-    preview_classification,
-    remove_category_keywords,
-)
-from .goal_store import (
-    ManagedTomlGoalSource,
-    managed_goal_context_path,
-    resolve_goal_context_source,
-)
-from .goal_history import (
-    DEFAULT_GOAL_ACTIVITY_WEEKS,
-    MAX_GOAL_ACTIVITY_WEEKS,
-    collect_goal_activity_history,
-    public_goal_activity_error,
-    validate_goal_activity_weeks,
-)
-from .goals import GoalContextError
-from .project_discovery import (
-    DEFAULT_DISPLAY_CAP as PROJECT_LIST_DISPLAY_CAP,
-    JSON_HARD_MAX as PROJECT_LIST_JSON_HARD_MAX,
-    bounded_observed_projects,
-    collect_observed_projects,
-    find_close_project_candidates,
-    observed_project_ids,
-)
-from .recap import (
-    CONFIG_PATH,
-    REPORTS_DIR,
-    RecapUnavailable,
-    _agent_data_roots,
-    apply_lang_override,
-    build_recap,
-    parse_window,
-)
-from .report import (
-    VALID_FLAVORS,
-    build_trend_json,
-    print_terminal_card,
-    render_trend_card,
-    render_trend_markdown,
-)
-from .session_summarizer import (
-    CacheUnavailable,
-    invalidate_comparison_narratives,
-    invalidate_period_aggregates,
-)
+from .categorizer import CONFIG_PATH
 from .time_tracking import CLAUDE_PROJECTS
-from .token_usage import apply_prices, get_snapshot_date, load_prices_config
-from .trends import collect_trend
 
 LOG = logging.getLogger("ccstory.cli")
+
+# Mirrors `recap.REPORTS_DIR` (identical literal expression — see
+# categorizer.CONFIG_PATH above and init_categories.py for the same
+# pattern). Defined here instead of imported from `.recap` so loading this
+# module never pulls in the full recap/report/session_summarizer pipeline;
+# most subcommands (category, goal, init, mcp) never touch it. Every other
+# name a specific subcommand needs is imported inside that subcommand's own
+# handler function below, so `ccstory <cmd>` only pays for what it runs.
+REPORTS_DIR = Path.home() / ".ccstory" / "reports"
 
 def resolve_output_format(arg: str, *, env: dict | None = None, isatty: bool | None = None) -> str:
     """Resolve --format=auto to a concrete format.
@@ -125,6 +76,14 @@ def resolve_output_format(arg: str, *, env: dict | None = None, isatty: bool | N
 
 def _print_first_run_preview(console: Console) -> None:
     """If no config exists yet, show how default rules classified projects."""
+    from rich.table import Table
+
+    from .categorizer import (
+        ensure_default_config,
+        normalize_project_name,
+        preview_classification,
+    )
+
     created = ensure_default_config()
     if not created:
         return
@@ -222,6 +181,15 @@ def _run_category(argv: list[str], console: Console) -> int:
     keyed by session id, not by rule, and reusing them is correct. Use
     `ccstory <window> --refresh` if you want a full re-classify.
     """
+    from rich.table import Table
+
+    from .categorizer import (
+        add_category_keywords,
+        colors_for,
+        list_user_categories,
+        remove_category_keywords,
+    )
+
     p = argparse.ArgumentParser(
         prog="ccstory category",
         description="Edit project-bucket rules in ~/.ccstory/config.toml.",
@@ -274,6 +242,14 @@ def _run_category(argv: list[str], console: Console) -> int:
             )
         console.print(table)
         return 0
+
+    # Deferred until here (not at module/function top) so `category list`
+    # never imports the narrative cache — only set/unset mutate rules and
+    # need to invalidate what was cached against the old rule shape.
+    from .session_summarizer import (
+        invalidate_comparison_narratives,
+        invalidate_period_aggregates,
+    )
 
     try:
         if args.action == "set":
@@ -352,6 +328,12 @@ def _goal_set_project_feedback(
     same read-only provider seam `ccstory project list` uses — no persistent
     registry, no second transcript index, zero model calls.
     """
+    from .project_discovery import (
+        collect_observed_projects,
+        find_close_project_candidates,
+        observed_project_ids,
+    )
+    from .recap import parse_window
 
     since, until, _label = parse_window("all")
     observed = collect_observed_projects(since, until, agent="all", aliases=aliases)
@@ -372,6 +354,15 @@ def _goal_set_project_feedback(
 
 def _run_goal(argv: list[str], console: Console) -> int:
     """``ccstory goal {set,list,unset}`` — mutate only the managed store."""
+    from rich.table import Table
+
+    from .categorizer import load_project_aliases
+    from .goal_store import (
+        ManagedTomlGoalSource,
+        managed_goal_context_path,
+        resolve_goal_context_source,
+    )
+    from .goals import GoalContextError
 
     p = argparse.ArgumentParser(
         prog="ccstory goal",
@@ -526,6 +517,17 @@ def _run_goal(argv: list[str], console: Console) -> int:
 
 def _run_goal_history(argv: list[str]) -> int:
     """``ccstory goal-history`` — one read-only sanitized JSON series."""
+    from .categorizer import load_project_aliases
+    from .goal_history import (
+        DEFAULT_GOAL_ACTIVITY_WEEKS,
+        MAX_GOAL_ACTIVITY_WEEKS,
+        collect_goal_activity_history,
+        public_goal_activity_error,
+        validate_goal_activity_weeks,
+    )
+    from .goal_store import resolve_goal_context_source
+    from .goals import GoalContextError
+    from .providers import list_providers
 
     p = argparse.ArgumentParser(
         prog="ccstory goal-history",
@@ -597,6 +599,17 @@ def _run_project(argv: list[str], console: Console) -> int:
     collection/snapshot seam for one bounded window; never writes a report,
     touches the narrator/cache, or exposes a transcript path or session id.
     """
+    from rich.table import Table
+
+    from .categorizer import load_project_aliases
+    from .project_discovery import (
+        DEFAULT_DISPLAY_CAP as PROJECT_LIST_DISPLAY_CAP,
+        JSON_HARD_MAX as PROJECT_LIST_JSON_HARD_MAX,
+        bounded_observed_projects,
+        collect_observed_projects,
+    )
+    from .providers import list_providers
+    from .recap import parse_window
 
     p = argparse.ArgumentParser(
         prog="ccstory project",
@@ -694,6 +707,19 @@ def _run_project(argv: list[str], console: Console) -> int:
 
 
 def _run_trend(argv: list[str]) -> int:
+    from rich.console import Console
+
+    from .categorizer import load_settings
+    from .providers import agent_label, list_providers
+    from .recap import _agent_data_roots, apply_lang_override
+    from .report import (
+        build_trend_json,
+        render_trend_card,
+        render_trend_markdown,
+    )
+    from .token_usage import apply_prices, get_snapshot_date, load_prices_config
+    from .trends import collect_trend
+
     p = argparse.ArgumentParser(
         prog="ccstory trend",
         description="Show per-bucket sparklines over N periods.",
@@ -827,12 +853,24 @@ def main(argv: list[str] | None = None) -> int:
     the CLI contract (full message to stderr, exit 1) while letting library
     callers of `build_recap()` catch it as a normal exception instead of
     dying on a `SystemExit` they cannot intercept (#119).
+
+    The class itself is resolved via `sys.modules` instead of a top-level
+    import: a subcommand that never touches the cache (category, init, mcp
+    --help, …) should not pay to import `session_summarizer` just so this
+    handler can name the exception type. If `ccstory.session_summarizer` was
+    never loaded this process, no code path could have raised its
+    `CacheUnavailable`, so any other exception is re-raised unchanged.
     """
     try:
         return _dispatch(argv)
-    except CacheUnavailable as e:
-        print(str(e), file=sys.stderr)
-        return 1
+    except Exception as exc:
+        session_summarizer = sys.modules.get("ccstory.session_summarizer")
+        if session_summarizer is not None and isinstance(
+            exc, session_summarizer.CacheUnavailable,
+        ):
+            print(str(exc), file=sys.stderr)
+            return 1
+        raise
 
 
 def _dispatch(argv: list[str] | None = None) -> int:
@@ -849,23 +887,45 @@ def _dispatch(argv: list[str] | None = None) -> int:
         logging.basicConfig(level=logging.WARNING)
         return _run_trend(raw[1:])
     if raw and raw[0] == "init":
+        from rich.console import Console
+
         logging.basicConfig(level=logging.WARNING)
         return _run_init(raw[1:], Console())
     if raw and raw[0] == "category":
+        from rich.console import Console
+
         logging.basicConfig(level=logging.WARNING)
         return _run_category(raw[1:], Console())
     if raw and raw[0] == "goal":
+        from rich.console import Console
+
         logging.basicConfig(level=logging.WARNING)
         return _run_goal(raw[1:], Console())
     if raw and raw[0] == "goal-history":
         logging.basicConfig(level=logging.WARNING)
         return _run_goal_history(raw[1:])
     if raw and raw[0] == "project":
+        from rich.console import Console
+
         logging.basicConfig(level=logging.WARNING)
         return _run_project(raw[1:], Console())
     if raw and raw[0] == "mcp":
         logging.basicConfig(level=logging.WARNING)
         return _run_mcp(raw[1:])
+
+    # Default recap path (`ccstory week` / `month` / `2026-04` / …): the one
+    # command family that legitimately needs the full pipeline, so its
+    # imports are grouped here rather than scattered — this is the only
+    # branch that reaches them.
+    from rich.console import Console
+
+    from .categorizer import load_project_aliases
+    from .goal_store import resolve_goal_context_source
+    from .goals import GoalContextError
+    from .providers import agent_label, list_providers
+    from .recap import RecapUnavailable, _agent_data_roots, build_recap
+    from .report import VALID_FLAVORS, print_terminal_card
+    from .token_usage import get_snapshot_date
 
     version = parser_version_for_argv(raw)
     parser = build_top_level_parser(

@@ -16,7 +16,8 @@ import pytest
 
 from ccstory import session_summarizer as ss
 from ccstory import cli
-from ccstory.cli import apply_lang_override, resolve_output_format
+from ccstory.cli import resolve_output_format
+from ccstory.recap import apply_lang_override
 from tests.conftest import make_assistant_msg, make_user_msg
 
 

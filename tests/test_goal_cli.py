@@ -15,6 +15,7 @@ from rich.console import Console
 from ccstory import categorizer
 from ccstory import cli as cli_module
 from ccstory import goal_store
+from ccstory import recap
 from ccstory import session_summarizer
 from ccstory.cli import _run_goal
 from ccstory.goal_store import (
@@ -734,9 +735,13 @@ class TestGoalSourceSelection:
                 to_json=lambda: {"schema_version": 1, "kind": "recap"},
             )
 
-        monkeypatch.setattr(cli_module, "build_recap", fake_build_recap)
+        # `_dispatch` now imports `build_recap` / `_agent_data_roots` locally
+        # (inside the function, at call time) instead of once at module top,
+        # so the effective patch target is their true home (`ccstory.recap`)
+        # rather than `cli`'s former re-export of the same names.
+        monkeypatch.setattr(recap, "build_recap", fake_build_recap)
         monkeypatch.setattr(
-            cli_module,
+            recap,
             "_agent_data_roots",
             lambda agent: [
                 ("claude", tmp_home / ".claude" / "projects"),
