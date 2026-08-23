@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-07-26",
+  "generated_at": "2026-08-23",
   "source_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
-  "entry_count": 110,
+  "entry_count": 115,
   "prices": {
     "claude-haiku-4-5-20251001": {
       "inp": 1.0,
@@ -207,6 +207,12 @@
       "cw": 0.625,
       "cr": 0.05
     },
+    "gemini-3.1-flash-lite-image": {
+      "inp": 0.25,
+      "out": 1.5,
+      "cw": 0.3125,
+      "cr": 0.025
+    },
     "gemini-3.1-flash-lite-preview": {
       "inp": 0.25,
       "out": 1.5,
@@ -340,10 +346,16 @@
       "cr": 0.15
     },
     "gemini-3.6-flash": {
-      "inp": 1.5,
-      "out": 7.5,
-      "cw": 1.875,
-      "cr": 0.15
+      "inp": 0.75,
+      "out": 3.75,
+      "cw": 0.9375,
+      "cr": 0.075
+    },
+    "gemini-3.7-flash": {
+      "inp": 0.75,
+      "out": 3.75,
+      "cw": 0.9375,
+      "cr": 0.075
     },
     "gpt-5": {
       "inp": 1.25,
@@ -406,28 +418,34 @@
       "cr": 2.1
     },
     "gpt-5.6": {
-      "inp": 5.0,
-      "out": 30.0,
-      "cw": 6.25,
-      "cr": 0.5
+      "inp": 4.0,
+      "out": 20.0,
+      "cw": 5.0,
+      "cr": 0.4
     },
     "gpt-5.6-sol": {
-      "inp": 5.0,
-      "out": 30.0,
-      "cw": 6.25,
-      "cr": 0.5
+      "inp": 4.0,
+      "out": 20.0,
+      "cw": 5.0,
+      "cr": 0.4
     },
     "gpt-5.6-terra": {
-      "inp": 2.5,
-      "out": 15.0,
-      "cw": 3.125,
-      "cr": 0.25
+      "inp": 2.0,
+      "out": 12.0,
+      "cw": 2.5,
+      "cr": 0.2
     },
     "gpt-5.6-luna": {
-      "inp": 1.0,
-      "out": 6.0,
-      "cw": 1.25,
-      "cr": 0.1
+      "inp": 0.2,
+      "out": 1.2,
+      "cw": 0.25,
+      "cr": 0.02
+    },
+    "gpt-5.6-cyber": {
+      "inp": 12.5,
+      "out": 75.0,
+      "cw": 15.625,
+      "cr": 1.25
     },
     "gpt-5.5": {
       "inp": 5.0,
@@ -662,6 +680,18 @@
       "out": 2.5,
       "cw": 0.375,
       "cr": 0.03
+    },
+    "claude-mythos-5": {
+      "inp": 10.0,
+      "out": 50.0,
+      "cw": 12.5,
+      "cr": 1.0
+    },
+    "claude-mythos-preview": {
+      "inp": 10.0,
+      "out": 50.0,
+      "cw": 12.5,
+      "cr": 1.0
     }
   }
 }
