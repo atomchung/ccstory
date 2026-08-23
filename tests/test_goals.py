@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -13,7 +14,9 @@ from ccstory.categorizer import project_identity
 from ccstory.goals import (
     GOAL_CONTEXT_SCHEMA_VERSION,
     GoalAttributionInput,
+    GoalBreakdown,
     GoalContextError,
+    UnattributedProject,
     attribute_goals,
     build_goal_breakdown,
     load_goal_context,
@@ -434,6 +437,103 @@ class TestDeterministicAttribution:
         reverse = attribute_goals(reversed(items), context, aliases={})
 
         assert forward == reverse
+
+    def test_unattributed_projects_rank_by_hours_then_canonical_id(self):
+        context = _context()
+        items = [
+            GoalAttributionInput("alpha", date(2026, 7, 2), 100),
+            GoalAttributionInput("zeta", date(2026, 7, 2), 20),
+            GoalAttributionInput("beta", date(2026, 7, 2), 20),
+            GoalAttributionInput("gamma", date(2026, 7, 1), 30),
+            GoalAttributionInput("gamma", date(2026, 7, 2), 30),
+        ]
+
+        breakdown = attribute_goals(items, context, aliases={})
+
+        assert breakdown is not None
+        assert [
+            (item.project, item.contribution)
+            for item in breakdown.unattributed_projects
+        ] == [("gamma", 60.0), ("beta", 20.0), ("zeta", 20.0)]
+        assert (
+            math.fsum(
+                item.contribution for item in breakdown.unattributed_projects
+            )
+            == breakdown.unattributed_contribution
+            == 100
+        )
+        # Attributed projects never appear in the unmapped evidence.
+        assert "alpha" not in {
+            item.project for item in breakdown.unattributed_projects
+        }
+
+    def test_unattributed_projects_are_empty_when_every_project_is_mapped(self):
+        context = _context()
+
+        breakdown = attribute_goals(
+            [GoalAttributionInput("alpha", date(2026, 7, 2), 100)],
+            context,
+            aliases={},
+        )
+
+        assert breakdown is not None
+        assert breakdown.unattributed_contribution == 0
+        assert breakdown.unattributed_projects == ()
+
+    def test_expired_goal_leaves_its_project_in_unattributed_evidence(self):
+        context = _context(
+            goals=[
+                {
+                    "id": "goal-a",
+                    "title": "Goal A",
+                    "projects": ["alpha"],
+                    "valid_until": "2026-07-01",
+                }
+            ]
+        )
+
+        breakdown = attribute_goals(
+            [
+                GoalAttributionInput("alpha", date(2026, 7, 1), 10),
+                GoalAttributionInput("alpha", date(2026, 7, 2), 40),
+            ],
+            context,
+            aliases={},
+        )
+
+        assert breakdown is not None
+        assert breakdown.unattributed_contribution == 40
+        assert [
+            (item.project, item.contribution)
+            for item in breakdown.unattributed_projects
+        ] == [("alpha", 40.0)]
+
+    def test_unattributed_projects_reject_unreconciled_or_duplicate_evidence(
+        self,
+    ):
+        with pytest.raises(GoalContextError, match="must reconcile"):
+            GoalBreakdown(
+                goals=(),
+                covered_contribution=10,
+                exclusive_contribution=0,
+                shared_contribution=0,
+                unattributed_contribution=10,
+                unattributed_projects=(
+                    UnattributedProject(project="alpha", contribution=9),
+                ),
+            )
+        with pytest.raises(GoalContextError, match="must not repeat"):
+            GoalBreakdown(
+                goals=(),
+                covered_contribution=10,
+                exclusive_contribution=0,
+                shared_contribution=0,
+                unattributed_contribution=10,
+                unattributed_projects=(
+                    UnattributedProject(project="alpha", contribution=5),
+                    UnattributedProject(project="alpha", contribution=5),
+                ),
+            )
 
     def test_none_context_is_no_op_without_consuming_inputs(self):
         def should_not_run():

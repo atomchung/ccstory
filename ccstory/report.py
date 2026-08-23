@@ -61,6 +61,11 @@ _GOAL_ACTIVITY_DISCLAIMER = (
     "outcome, or acceptance."
 )
 _GLOBAL_GOAL_BUCKET_SEMANTICS = "additive_each_contribution_counted_once"
+# Bounded, deterministic hint behind the unattributed bucket (#255). Three is
+# what the terminal card's existing "By project" summary already shows, and
+# the same bound on every surface keeps terminal, Markdown, JSON, and MCP
+# saying exactly the same thing.
+GOAL_TOP_UNMAPPED_PROJECTS = 3
 
 
 def build_goal_projection(
@@ -123,6 +128,15 @@ def build_goal_projection(
                 if covered
                 else 0.0
             ),
+            "top_unmapped_projects": [
+                {
+                    "project_id": item.project,
+                    "active_hours": hours(item.contribution),
+                }
+                for item in breakdown.unattributed_projects[
+                    :GOAL_TOP_UNMAPPED_PROJECTS
+                ]
+            ],
         },
         "goals": goals,
     }
@@ -680,11 +694,27 @@ def _render_goal_projection_markdown(projection: dict) -> list[str]:
             f"{projects} | {goal['latest_activity'] or '—'} |"
         )
     coverage = projection["coverage"]
+    # Always shown, zero included (#255): a goal section that lists only the
+    # mapped goals cannot be told apart from one that lost hours, so silence
+    # here reads as an undercount.
     lines.extend(
         [
             "",
             f"**Unattributed:** {coverage['unattributed_hours']:.2f}h "
-            f"({coverage['unattributed_share']*100:.1f}% of covered activity).",
+            f"({coverage['unattributed_share']*100:.1f}% of covered activity)"
+            " — activity in projects mapped to no goal.",
+        ]
+    )
+    top_unmapped = coverage["top_unmapped_projects"]
+    if top_unmapped:
+        listed = " · ".join(
+            f"`{_md_cell(project['project_id'])}` "
+            f"{project['active_hours']:.2f}h"
+            for project in top_unmapped
+        )
+        lines.extend(["", f"**Top unmapped projects:** {listed}."])
+    lines.extend(
+        [
             "",
             "> Shared hours overlap across goals and are non-additive per goal. "
             "Global exclusive/shared/unattributed buckets count each "
@@ -1657,8 +1687,32 @@ def render_terminal_card(
             parts.append(
                 Text(f"+{hidden_count} more in full report", style="dim")
             )
-        unattributed = goal_projection["coverage"]["unattributed_hours"]
-        parts.append(Text(f"Unattributed  {unattributed:.2f}h", style="dim"))
+        # Always shown, zero included (#255). Without it the card lists only
+        # the mapped goals, and a window whose activity mostly sits in
+        # unmapped projects looks like a counting bug instead of a mapping
+        # gap. The bounded hint below names where that gap actually is.
+        coverage = goal_projection["coverage"]
+        parts.append(
+            Text(
+                f"unattributed: {coverage['unattributed_hours']:.2f}h "
+                f"({coverage['unattributed_share']*100:.0f}%) "
+                "— projects mapped to no goal",
+                style="dim",
+                overflow="fold",
+            )
+        )
+        top_unmapped = coverage["top_unmapped_projects"]
+        if top_unmapped:
+            # One decimal, like the card's own "By project" rows: the same
+            # project must not read as two different numbers three lines
+            # apart. Markdown and JSON keep the two-decimal hours.
+            listed = " · ".join(
+                f"{project['project_id']} {project['active_hours']:.1f}h"
+                for project in top_unmapped
+            )
+            parts.append(
+                Text(f"top unmapped: {listed}", style="dim", overflow="fold")
+            )
         parts.append(
             Text(
                 "* Shared non-additive · activity, not progress/completion.",

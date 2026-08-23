@@ -384,6 +384,21 @@ the current configured/default source on every call. `compare_to_previous` and
 **non-additive**; the global covered/exclusive/shared/unattributed buckets
 count each activity contribution once. Unattributed time remains visible.
 
+Every goal section also carries a coverage line — always, zero included — plus
+a bounded hint naming where the unattributed hours actually sit, so a mapping
+gap never reads as lost time:
+
+```
+unattributed: 189.25h (92%) — projects mapped to no goal
+top unmapped: investment-note 71.4h · kol-collector 60.0h · ccstory 24.9h
+```
+
+The hint lists the three highest-hour projects mapped to no goal (hours
+descending, canonical project id breaks ties), and JSON/MCP carry the same
+three under `goals.coverage.top_unmapped_projects` as `project_id` /
+`active_hours`. Add those projects with `ccstory goal set --project`, or leave
+the gap knowingly — either way the number stops being a mystery.
+
 These values are activity/contribution evidence, not goal progress,
 completion, outcome, or acceptance. Goal titles and source content never enter
 narrator prompts or narrator traces. Public output includes only a sanitized

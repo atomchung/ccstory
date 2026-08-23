@@ -313,6 +313,7 @@ class TestGetRecap:
         self, tmp_home, jsonl_factory,
     ):
         _seed_session(jsonl_factory, "-Users-me-proj", "sess-1", hours_ago=2)
+        _seed_session(jsonl_factory, "-Users-me-unmapped", "sess-2", hours_ago=5)
         source = tmp_home / ".ccstory" / "configured-goals.toml"
         config = recap.CONFIG_PATH
         config.write_text(
@@ -345,6 +346,14 @@ class TestGetRecap:
         assert second["goals"]["goals"][0]["total_hours"] > 0
         assert "path" not in second["goals"]
         assert str(source) not in repr(second["goals"])
+        # The coverage disclosure (#255) rides the shared projection, so MCP
+        # names the unmapped project without its own renderer.
+        coverage = second["goals"]["coverage"]
+        assert coverage["unattributed_hours"] > 0
+        assert [
+            project["project_id"]
+            for project in coverage["top_unmapped_projects"]
+        ] == ["unmapped"]
 
     def test_goal_projection_reloads_managed_default_on_each_call(
         self, tmp_home, jsonl_factory,
