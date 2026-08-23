@@ -109,6 +109,12 @@ class SessionSlice:
     native_title: str = ""
     category_source: str = ""
     physical_engaged: bool = False
+    # True when another agent or coding surface dispatched this transcript.
+    # Providers keep the session available for usage/accounting, while
+    # owner-intent workflows may exclude it to avoid treating delegated work
+    # as a separate human-authored task.
+    is_delegated: bool = False
+    delegation_source: str = ""
 
     @property
     def active_min(self) -> float:
@@ -150,6 +156,11 @@ class SessionStat:
     # file without re-deriving each agent's on-disk layout.
     path: Path | None = None
     native_title: str = ""
+    # Provider-authored provenance for sessions dispatched by another agent
+    # or coding surface. These remain available for usage/accounting, while
+    # owner-intent workflows can exclude them.
+    is_delegated: bool = False
+    delegation_source: str = ""
 
     @property
     def active_min(self) -> float:
@@ -433,6 +444,8 @@ def session_slice_for_window(
         native_title=session.native_title,
         category_source=session.category_source,
         physical_engaged=session.engaged,
+        is_delegated=session.is_delegated,
+        delegation_source=session.delegation_source,
     )
 
 

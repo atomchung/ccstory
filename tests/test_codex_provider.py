@@ -145,7 +145,7 @@ class TestCodexParsing:
         assert CodexProvider().parse_session(codex_factory(SID, records)) is None
 
     def test_task_wrapper_is_unwrapped_not_dropped(self, codex_factory):
-        """`/codex` dispatches wrap the request in <task>…</task> — a real turn."""
+        """`/codex` requests stay parseable but retain delegated provenance."""
         path = codex_factory(
             SID,
             [
@@ -157,6 +157,51 @@ class TestCodexParsing:
         stat = CodexProvider().parse_session(path)
         assert stat.first_user_text == "Review PR #169 in investment_note"
         assert stat.user_msg_count == 1
+        assert stat.is_delegated is True
+        assert stat.delegation_source == "claude_code"
+
+    def test_claude_code_originator_marks_delegated_session(self, codex_factory):
+        records = [
+            {
+                "timestamp": _ts(0),
+                "type": "session_meta",
+                "payload": {
+                    "id": SID,
+                    "cwd": "/Users/x/demo",
+                    "originator": "Claude Code",
+                },
+            },
+            _user("Review the plan", 1),
+            _assistant("Reviewed.", 5),
+        ]
+
+        stat = CodexProvider().parse_session(codex_factory(SID, records))
+
+        assert stat is not None
+        assert stat.is_delegated is True
+        assert stat.delegation_source == "claude_code"
+
+    def test_codex_delegation_wrapper_marks_delegated_session(
+        self, codex_factory
+    ):
+        path = codex_factory(
+            SID,
+            [
+                _meta(SID, "/Users/x/demo"),
+                _user(
+                    "<codex_delegation><input>Run QA</input>"
+                    "</codex_delegation>",
+                    1,
+                ),
+                _assistant("Done.", 5),
+            ],
+        )
+
+        stat = CodexProvider().parse_session(path)
+
+        assert stat is not None
+        assert stat.is_delegated is True
+        assert stat.delegation_source == "codex_delegation"
 
     def test_transcript_without_timestamps_is_skipped(self, codex_factory):
         path = codex_factory(SID, [{"type": "session_meta", "payload": {"cwd": "/x"}}])

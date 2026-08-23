@@ -316,6 +316,7 @@ class CodexProvider(BaseAgentProvider):
         first_user_text = ""
         cwd = ""
         session_id = ""
+        delegation_source = ""
 
         try:
             with jsonl_path.open("r", encoding="utf-8", errors="ignore") as f:
@@ -337,6 +338,8 @@ class CodexProvider(BaseAgentProvider):
                     if kind == "session_meta":
                         if is_subagent_meta(payload):
                             return None
+                        if payload.get("originator") == "Claude Code":
+                            delegation_source = "claude_code"
                         # `id` is this rollout; `session_id` is the *thread*
                         # root and is shared by every resumed/forked rollout of
                         # it — 313 of 532 real files collide on it, which as a
@@ -378,9 +381,16 @@ class CodexProvider(BaseAgentProvider):
                         continue
 
                     if ptype == "user_message":
-                        text = strip_task_wrapper(
-                            _codex_text(payload.get("message", ""))
-                        )
+                        raw_text = _codex_text(payload.get("message", ""))
+                        stripped = raw_text.strip()
+                        if stripped.startswith("<codex_delegation>"):
+                            delegation_source = "codex_delegation"
+                        elif (
+                            stripped.startswith("<task>")
+                            and not delegation_source
+                        ):
+                            delegation_source = "claude_code"
+                        text = strip_task_wrapper(raw_text)
                         if text and "tool_use_id" not in text:
                             user_msg_count += 1
                             if not first_user_text:
@@ -414,6 +424,8 @@ class CodexProvider(BaseAgentProvider):
             timestamps=[t.timestamp() for t in timestamps],
             agent=self.agent_name,
             path=jsonl_path,
+            is_delegated=bool(delegation_source),
+            delegation_source=delegation_source,
         )
 
     def collect_usage(

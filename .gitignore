@@ -13,6 +13,7 @@ venv/
 .ruff_cache/
 .mypy_cache/
 *.swp
+.local-eval/
 
 # Internal planning docs — competitive strategy + personal references, kept local
 docs/
