@@ -7,15 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-08-23
+
 ### Fixed
 
 - Pin the build backend to `hatchling<1.32`: 1.32.0 started emitting
   `Metadata-Version: 2.5`, which the pinned PyPI publish action's bundled
   twine rejects (`InvalidDistribution: '2.5' is not a valid metadata
-  version`), failing the v0.8.3 release workflow before any artifact was
-  published. Unpin once the publish toolchain accepts metadata 2.5.
-
-## [0.8.3] - 2026-08-23
+  version`), failing the first v0.8.3 release run before any artifact was
+  published; the tag was re-cut with this pin included. Unpin once the
+  publish toolchain accepts metadata 2.5.
 
 ### Added
 
