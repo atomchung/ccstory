@@ -64,6 +64,14 @@ from .goal_history import (
     validate_goal_activity_weeks,
 )
 from .goals import GoalContextError
+from .project_discovery import (
+    DEFAULT_DISPLAY_CAP as PROJECT_LIST_DISPLAY_CAP,
+    JSON_HARD_MAX as PROJECT_LIST_JSON_HARD_MAX,
+    bounded_observed_projects,
+    collect_observed_projects,
+    find_close_project_candidates,
+    observed_project_ids,
+)
 from .recap import (
     CONFIG_PATH,
     REPORTS_DIR,
@@ -71,6 +79,7 @@ from .recap import (
     _agent_data_roots,
     apply_lang_override,
     build_recap,
+    parse_window,
 )
 from .report import (
     VALID_FLAVORS,
@@ -327,6 +336,40 @@ def _run_category(argv: list[str], console: Console) -> int:
     return 0
 
 
+def _goal_set_project_feedback(
+    projects: tuple[str, ...], aliases: dict[str, str],
+) -> list[dict[str, object]]:
+    """Observed/unobserved guidance for each already-canonical linked project.
+
+    Issue #222's goal-set guidance: after `goal set` validates and stores the
+    supplied projects exactly as today, report whether each one matches a
+    workspace already observed in local session history. Unobserved close
+    spellings are surfaced only as a suggestion — this never rewrites the
+    goal's stored `projects` tuple, which is already committed by the time
+    this runs.
+
+    Scans the full local history (``--window all``, every agent) through the
+    same read-only provider seam `ccstory project list` uses — no persistent
+    registry, no second transcript index, zero model calls.
+    """
+
+    since, until, _label = parse_window("all")
+    observed = collect_observed_projects(since, until, agent="all", aliases=aliases)
+    observed_ids = observed_project_ids(observed)
+    observed_set = set(observed_ids)
+
+    feedback: list[dict[str, object]] = []
+    for project in projects:
+        is_observed = project in observed_set
+        item: dict[str, object] = {"project": project, "observed": is_observed}
+        if not is_observed:
+            candidates = find_close_project_candidates(project, observed_ids)
+            if candidates:
+                item["candidates"] = list(candidates)
+        feedback.append(item)
+    return feedback
+
+
 def _run_goal(argv: list[str], console: Console) -> int:
     """``ccstory goal {set,list,unset}`` — mutate only the managed store."""
 
@@ -351,6 +394,14 @@ def _run_goal(argv: list[str], console: Console) -> int:
     )
     set_p.add_argument("--valid-from", default=None, metavar="YYYY-MM-DD")
     set_p.add_argument("--valid-until", default=None, metavar="YYYY-MM-DD")
+    set_p.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "Print the goal plus per-project observed-workspace feedback "
+            "(`observed: true|false`, optional `candidates`) as JSON"
+        ),
+    )
 
     list_p = sub.add_parser("list", help="List managed goals")
     list_p.add_argument(
@@ -380,11 +431,42 @@ def _run_goal(argv: list[str], console: Console) -> int:
                 for goal in context.goals
                 if goal.id == args.goal_id.strip()
             )
+            feedback = _goal_set_project_feedback(goal.projects, aliases)
+
+            if args.json:
+                payload = {
+                    "ok": True,
+                    "replaced": replaced,
+                    "goal": goal.to_dict(),
+                    "projects": feedback,
+                }
+                sys.stdout.write(
+                    _json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+                )
+                return 0
+
             action = "Updated" if replaced else "Set"
             console.print(
                 f"[green]✓[/green] {action} goal `{goal.id}` · "
                 f"{goal.title} · {', '.join(goal.projects)}"
             )
+            for item in feedback:
+                if item["observed"]:
+                    console.print(
+                        f"  [dim]observed:[/dim] `{item['project']}`"
+                    )
+                    continue
+                candidates = item.get("candidates")
+                suggestion = (
+                    f" — did you mean: {', '.join(candidates)}?"
+                    if candidates
+                    else ""
+                )
+                console.print(
+                    f"  [yellow]unobserved:[/yellow] `{item['project']}` "
+                    f"has no session history yet{suggestion} "
+                    "(value unchanged)"
+                )
             return 0
 
         if args.command == "unset":
@@ -503,6 +585,110 @@ def _run_goal_history(argv: list[str]) -> int:
 
     sys.stdout.write(
         _json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    )
+    return 0
+
+
+def _run_project(argv: list[str], console: Console) -> int:
+    """``ccstory project list`` — read-only observed workspace discovery (#222).
+
+    Lists the exact canonical project identities `ccstory goal set --project`
+    already accepts as an observed match. Scans through the existing provider
+    collection/snapshot seam for one bounded window; never writes a report,
+    touches the narrator/cache, or exposes a transcript path or session id.
+    """
+
+    p = argparse.ArgumentParser(
+        prog="ccstory project",
+        description=(
+            "Discover the canonical project identities already observed in "
+            "local session history."
+        ),
+    )
+    sub = p.add_subparsers(dest="command", required=True)
+
+    list_p = sub.add_parser(
+        "list", help="List observed workspace/project identities"
+    )
+    list_p.add_argument(
+        "--window",
+        default="all",
+        help="week | month | all (default) | YYYY-MM",
+    )
+    list_p.add_argument(
+        "--agent",
+        choices=["all", *list_providers()],
+        default="all",
+        help="Which coding agent's sessions to include",
+    )
+    list_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print observed projects as bounded JSON",
+    )
+    args = p.parse_args(argv)
+
+    try:
+        since, until, _label = parse_window(args.window)
+    except ValueError as exc:
+        print(f"ccstory project: {exc}", file=sys.stderr)
+        return 1
+
+    aliases = load_project_aliases(CONFIG_PATH)
+    observed = collect_observed_projects(
+        since, until, agent=args.agent, aliases=aliases,
+    )
+
+    if args.json:
+        capped, total = bounded_observed_projects(
+            observed, PROJECT_LIST_JSON_HARD_MAX,
+        )
+        payload = {
+            "ok": True,
+            "window": args.window,
+            "agent": args.agent,
+            "count": len(capped),
+            "total_count": total,
+            "truncated": total > len(capped),
+            "hard_max": PROJECT_LIST_JSON_HARD_MAX,
+            "projects": [project.to_dict() for project in capped],
+        }
+        sys.stdout.write(_json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        return 0
+
+    if not observed:
+        console.print(
+            "[dim]No observed projects in this window. Try "
+            "`ccstory project list --window all` or a different "
+            "--agent.[/dim]"
+        )
+        return 0
+
+    capped, total = bounded_observed_projects(observed, PROJECT_LIST_DISPLAY_CAP)
+    table = Table(
+        title=f"Observed projects · window={args.window} agent={args.agent}",
+        title_style="bold",
+    )
+    table.add_column("Project ID", style="cyan", no_wrap=True)
+    table.add_column("Last seen", style="dim", no_wrap=True)
+    table.add_column("Sessions", justify="right")
+    table.add_column("Agents", style="dim")
+    for project in capped:
+        table.add_row(
+            project.project_id,
+            project.last_seen.date().isoformat(),
+            str(project.session_count),
+            ", ".join(project.agents),
+        )
+    console.print(table)
+    if total > len(capped):
+        console.print(
+            f"[dim]Showing {len(capped)} of {total} — pass --json or narrow "
+            "--window to see the rest.[/dim]"
+        )
+    console.print(
+        "[dim]Use the Project ID column with "
+        "`ccstory goal set <id> --title <title> --project <id>`.[/dim]"
     )
     return 0
 
@@ -653,11 +839,12 @@ def _dispatch(argv: list[str] | None = None) -> int:
     raw = list(argv) if argv is not None else sys.argv[1:]
 
     # Manual dispatch for subcommands — keeps default `ccstory week`
-    # / `ccstory month` flow simple positional. `init` / `category` / `goal` only
-    # emit progress lines, so a stdout Console is fine; `trend` and the
-    # default recap path resolve --format themselves and may switch to
-    # a stderr Console so the markdown report can own stdout. `goal-history`
-    # owns stdout as a single JSON object; `mcp` owns it as a protocol stream.
+    # / `ccstory month` flow simple positional. `init` / `category` / `goal` /
+    # `project` only emit progress lines (or a single JSON object on --json),
+    # so a stdout Console is fine; `trend` and the default recap path resolve
+    # --format themselves and may switch to a stderr Console so the markdown
+    # report can own stdout. `goal-history` owns stdout as a single JSON
+    # object; `mcp` owns it as a protocol stream.
     if raw and raw[0] == "trend":
         logging.basicConfig(level=logging.WARNING)
         return _run_trend(raw[1:])
@@ -673,6 +860,9 @@ def _dispatch(argv: list[str] | None = None) -> int:
     if raw and raw[0] == "goal-history":
         logging.basicConfig(level=logging.WARNING)
         return _run_goal_history(raw[1:])
+    if raw and raw[0] == "project":
+        logging.basicConfig(level=logging.WARNING)
+        return _run_project(raw[1:], Console())
     if raw and raw[0] == "mcp":
         logging.basicConfig(level=logging.WARNING)
         return _run_mcp(raw[1:])

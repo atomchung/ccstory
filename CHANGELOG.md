@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ccstory project list [--window all|week|month|YYYY-MM] [--agent AGENT]
+  [--json]` — read-only discovery of the canonical project identities already
+  observed in local session history (window defaults to `all`). Each row is
+  `project_id` / `last_seen` / `session_count` / `agents[]`; output is bounded
+  and deterministic (most-recently-observed first, canonical id tie-break),
+  with an explicit display cap in the terminal and a hard maximum in `--json`.
+  Never exposes a transcript path or session id, makes zero model calls, and
+  scans through the existing provider snapshot seam rather than building a
+  second transcript index. `ccstory goal set` now reports, per linked
+  project, whether it matches an observed workspace (`observed: true`) or is
+  currently unobserved (`observed: false`, with the value preserved
+  unchanged) — plus optional deterministic close-spelling `candidates` shown
+  only as a suggestion, never auto-applied. Add `--json` to `ccstory goal
+  set` to get this feedback as a machine-readable envelope. (#222)
 - A deterministic project-attribution engine (`ccstory.project_attribution`)
   that resolves an owner-initiated session to a canonical project through
   inspectable rules, and either accepts, reports a conflict, or abstains.
