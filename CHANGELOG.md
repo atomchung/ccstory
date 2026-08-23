@@ -38,6 +38,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The first-run classification preview no longer promises categories the
+  very next report fails to reproduce. `resolve_session_bucket()` (and its
+  cache-only counterpart used by `week`/`trend`/MCP) never consulted the
+  built-in `DEFAULT_RULES` folder keywords — only an explicit `[categories]`
+  config or a cached/fresh content classification could set a bucket, so a
+  brand-new user with no config and no configured narrator saw the default
+  recap's "First run — default bucket preview" table promise a multi-
+  category split (backed by the built-ins), immediately followed by a
+  report where every session collapsed into the single scalar
+  `default_bucket`. `folder` mode had the same gap:
+  `user_rule > scalar fallback`, skipping the built-ins entirely. A shared
+  deterministic built-in-folder tier (`categorizer.builtin_rule_match()` /
+  `builtin_or_fallback()`, reported as the new `category_source` value
+  `builtin_rule`) now sits between content classification and the scalar
+  fallback in every mode: `folder` is `user_rule > builtin_rule > fallback`;
+  `hybrid` applies the same built-in tier once a session's `needs_llm`
+  signal cannot be resolved by fresh content classification; `content`
+  is unchanged (`cached content > fresh content > scalar fallback`, no
+  built-in tier — it stays content-only by design). The first-run preview
+  now resolves through this same folder contract instead of a separate
+  merged-rules pass, so it can never diverge from the report again.
+  Built-in rules still never outrank an explicit user rule or a content
+  classification. (#214)
 - The `refresh-prices` workflow wrote its diff summary to the repository
   working tree, so `create-pull-request` swept `diff_summary.txt` into the
   pricing commit. It now writes to the runner temp directory.

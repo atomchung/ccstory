@@ -429,6 +429,32 @@ def colors_for(buckets: list[str]) -> dict[str, str]:
     return assigned
 
 
+def _match_rule_needles(leaf: str, rules: list[CategoryRule]) -> str | None:
+    """Token/multi-token needle match against a normalized leaf. First-match-wins.
+
+    The one matching algorithm shared by `classify()`, `builtin_rule_match()`,
+    and the token-needle tier of `user_rule_match()` (#214) — factored out so
+    those three tiers can never silently drift into different semantics. A
+    single-word needle must equal a whole token; a hyphenated needle must
+    appear as a contiguous span in the leaf. Returns ``None`` (never a
+    fallback bucket) when nothing matches — callers decide what "no match"
+    means.
+    """
+    if not leaf:
+        return None
+    tokens = leaf.split("-")
+    token_set = set(tokens)
+    joined = "-".join(tokens)
+    for rule in rules:
+        for needle in rule.needles:
+            if "-" in needle:
+                if needle in joined:
+                    return rule.name
+            elif needle in token_set:
+                return rule.name
+    return None
+
+
 def classify(
     project_dir: str,
     rules: list[CategoryRule] | None = None,
@@ -448,19 +474,7 @@ def classify(
     """
     rules = rules if rules is not None else load_rules()
     leaf = normalize_project_name(project_dir)
-    if not leaf:
-        return fallback
-    tokens = leaf.split("-")
-    token_set = set(tokens)
-    joined = "-".join(tokens)
-    for rule in rules:
-        for needle in rule.needles:
-            if "-" in needle:
-                if needle in joined:
-                    return rule.name
-            elif needle in token_set:
-                return rule.name
-    return fallback
+    return _match_rule_needles(leaf, rules) or fallback
 
 
 def _membership_index(
@@ -570,17 +584,58 @@ def user_rule_match(
             )
     if not user_rules:
         return None
-    tokens = leaf.split("-")
-    token_set = set(tokens)
-    joined = "-".join(tokens)
-    for rule in user_rules:
-        for needle in rule.needles:
-            if "-" in needle:
-                if needle in joined:
-                    return rule.name
-            elif needle in token_set:
-                return rule.name
-    return None
+    return _match_rule_needles(leaf, user_rules)
+
+
+# Built-in-only rule set, precomputed once: `DEFAULT_RULES` never changes at
+# runtime, so there is no per-call reason to rebuild this from the raw tuples.
+_BUILTIN_CATEGORY_RULES: list[CategoryRule] = [
+    CategoryRule(name=name, needles=[n.lower() for n in needles])
+    for name, needles in DEFAULT_RULES
+]
+
+
+def builtin_rule_match(project_dir: str) -> str | None:
+    """Folder leaf match against *only* the built-in ``DEFAULT_RULES``.
+
+    Same first-match-wins token/multi-token semantics as `classify()`, but
+    never merges a user's `[categories]` overrides — that separation is what
+    lets a resolver tell "the built-in default happened to match" apart from
+    "the user expressed an opinion" (`user_rule_match`). Returns ``None``,
+    not a scalar fallback, when nothing in `DEFAULT_RULES` matches; callers
+    (`resolve_session_bucket`'s folder-mode tail, `builtin_or_fallback` below)
+    decide what happens next (#214).
+    """
+    leaf = normalize_project_name(project_dir)
+    return _match_rule_needles(leaf, _BUILTIN_CATEGORY_RULES)
+
+
+def builtin_or_fallback(
+    project_dir: str,
+    *,
+    mode: str,
+    fallback: str | None,
+    config_path: Path | None = None,
+) -> tuple[str, str]:
+    """The one deterministic tail shared by every classify mode (#214).
+
+    Meant to run after explicit user rules and any available content
+    classification have already had their turn: a ``content``-mode caller
+    never consults the built-in folder tier — content mode stays
+    content-only end to end, matching its documented precedence
+    (cached content > fresh content > scalar fallback). Every other mode
+    tries `builtin_rule_match()` before the scalar `default_bucket`.
+
+    Used directly by `resolve_session_bucket()`'s folder-mode tail, and by
+    the hybrid-mode fallback path in `recap._resolve_all_sessions()` and
+    `trends._resolve_sessions_from_cache()` once those callers know fresh
+    content classification did not produce a bucket for a session.
+    """
+    if mode != "content":
+        builtin = builtin_rule_match(project_dir)
+        if builtin:
+            return builtin, "builtin_rule"
+    return _resolved_fallback(fallback, config_path), "fallback"
 
 
 def resolve_session_bucket(
@@ -593,24 +648,32 @@ def resolve_session_bucket(
     """Resolve a session's bucket using a priority chain.
 
     Returns ``(bucket, source)`` where source ∈
-    ``{"user_rule", "llm_cache", "needs_llm", "fallback"}``.
+    ``{"user_rule", "llm_cache", "needs_llm", "builtin_rule", "fallback"}``.
 
     Priority (high → low):
       1. user_rule    — folder leaf matches ``[categories]`` in config.toml
       2. llm_cache    — caller-supplied ``cached_llm_bucket`` (from
                         ``session_content_buckets``)
-      3. fallback     — config ``default_bucket`` or ``DEFAULT_FALLBACK_BUCKET``
+      3. builtin_rule — folder leaf matches a built-in ``DEFAULT_RULES``
+                        keyword (``builtin_rule_match``)
+      4. fallback     — config ``default_bucket`` or ``DEFAULT_FALLBACK_BUCKET``
 
     ``mode`` controls which layers participate:
-      - ``"hybrid"``  → 1 → 2 → 3  (default)
-      - ``"content"`` → 2 → 3      (skip folder rule, LLM-first)
-      - ``"folder"``  → 1 → 3      (skip LLM cache, deterministic only)
+      - ``"hybrid"``  → 1 → 2 → (``needs_llm`` signal; caller applies
+                        3 → 4 itself once it knows whether fresh content
+                        classification landed a bucket — see
+                        ``builtin_or_fallback``)  (default)
+      - ``"content"`` → 2 → 4      (skip folder rule *and* the built-in
+                        tier — content mode stays content-only end to end)
+      - ``"folder"``  → 1 → 3 → 4  (skip LLM cache, deterministic only)
 
     When mode permits LLM (``hybrid`` / ``content``) but ``cached_llm_bucket``
     is ``None``, returns ``(None, "needs_llm")`` so the caller can batch this
     session into a single ``classify_sessions_by_content`` call. Callers that
-    cannot afford fresh LLM work (e.g. ``compare_to_previous``) should treat
-    ``needs_llm`` as ``fallback`` to keep cost predictable.
+    cannot afford fresh LLM work (e.g. ``compare_to_previous``) should resolve
+    that ``needs_llm`` signal through ``builtin_or_fallback`` (hybrid) or a
+    plain scalar ``fallback`` (content) rather than firing a fresh LLM call —
+    see ``recap._resolve_all_sessions`` / ``trends._resolve_sessions_from_cache``.
     """
     if config_path is None:
         config_path = CONFIG_PATH
@@ -627,8 +690,13 @@ def resolve_session_bucket(
         # Mode wants LLM but cache miss — signal caller
         return None, "needs_llm"
 
-    # Layer 3: fallback (folder mode, or other resolved nothing)
-    return _resolved_fallback(fallback, config_path), "fallback"
+    # Layers 3-4: only folder mode reaches here (hybrid/content always
+    # returned above). Deterministic built-in folder match, then scalar
+    # fallback — hybrid/content callers apply this same helper themselves
+    # once their own ``needs_llm`` signal is resolved.
+    return builtin_or_fallback(
+        project_dir, mode=mode, fallback=fallback, config_path=config_path,
+    )
 
 
 def _resolved_fallback(explicit: str | None, config_path: Path | None) -> str:
@@ -641,13 +709,19 @@ def _resolved_fallback(explicit: str | None, config_path: Path | None) -> str:
 
 
 def preview_classification(projects: list[str]) -> dict[str, list[tuple[str, str]]]:
-    """Return {bucket: [(leaf, raw), ...]} for displaying first-run preview."""
-    rules = load_rules()
+    """Return {bucket: [(leaf, raw), ...]} for displaying first-run preview.
+
+    Resolves each project through the exact same deterministic folder
+    contract (``user_rule`` > ``builtin_rule`` > scalar ``fallback`` —
+    ``resolve_session_bucket(..., mode="folder")``) that a no-content hybrid
+    report falls back to, so the first-run preview can never promise a
+    categorization the very next report fails to reproduce (#214).
+    """
     out: dict[str, list[tuple[str, str]]] = {}
     for proj in projects:
-        cat = classify(proj, rules)
+        cat, _source = resolve_session_bucket(proj, None, mode="folder")
         leaf = normalize_project_name(proj) or proj
-        out.setdefault(cat, []).append((leaf, proj))
+        out.setdefault(cat or DEFAULT_FALLBACK_BUCKET, []).append((leaf, proj))
     return out
 
 

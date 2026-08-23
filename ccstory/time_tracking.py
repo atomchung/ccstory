@@ -144,7 +144,8 @@ class SessionStat:
     cwd: str = ""
     timestamps: list[float] = field(default_factory=list)
     # Which resolver layer set `.category`. One of:
-    #   "" (unresolved) | "user_rule" | "llm_cache" | "llm_fresh" | "fallback"
+    #   "" (unresolved) | "user_rule" | "llm_cache" | "llm_fresh"
+    #   | "builtin_rule" | "fallback"
     # parse_session() leaves this empty; the caller is expected to run
     # categorizer.resolve_session_bucket() before consuming `.category`.
     category_source: str = ""
