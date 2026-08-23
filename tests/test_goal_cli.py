@@ -473,6 +473,65 @@ class TestGoalSetObservedGuidance:
         assert "observed:" in rendered and "`live-app`" in rendered
         assert "unobserved:" in rendered and "`not-yet-seen-xyz`" in rendered
 
+    def test_relevance_filter_does_not_shrink_the_observed_set(
+        self, jsonl_factory, capsys: pytest.CaptureFixture[str],
+    ):
+        """`ccstory project list` hides ephemeral and provider-synthesized
+        identities by default (#254). The observed check must keep judging
+        against the *complete* population: a user who names one of those
+        identities explicitly has still observed it, and calling it
+        unobserved would be false.
+        """
+
+        jsonl_factory(
+            "-private-tmp-screen-20260817-axis2-audit-ppcpug",
+            "s1",
+            _engaged_messages("scratch", 1),
+        )
+        jsonl_factory(
+            "-Users-alice-Documents-Codex-2026-08-21-new-chat",
+            "s2",
+            _engaged_messages("dated", 2),
+        )
+
+        # Both identities are hidden from the default discovery view …
+        list_console, _ = _console()
+        assert cli_module._run_project(["list", "--json"], list_console) == 0
+        list_payload = json.loads(capsys.readouterr().out)
+        assert list_payload["projects"] == []
+        assert list_payload["filtered_count"] == 2
+
+        # … and both are still reported as observed by `goal set`.
+        json_console, _ = _console()
+        assert _run_goal(
+            [
+                "set", "scratch-goal", "--title", "Scratch goal",
+                "--project", "private-tmp-screen-20260817-axis2-audit-ppcpug",
+                "--project", "codex-2026-08-21-new-chat",
+                "--json",
+            ],
+            json_console,
+        ) == 0
+        payload = json.loads(capsys.readouterr().out)
+        # `goals.py` already normalizes/sorts the stored project tuple.
+        assert payload["projects"] == [
+            {"project": "codex-2026-08-21-new-chat", "observed": True},
+            {
+                "project": "private-tmp-screen-20260817-axis2-audit-ppcpug",
+                "observed": True,
+            },
+        ]
+
+        console, stream = _console()
+        assert _run_goal(
+            [
+                "set", "scratch-goal", "--title", "Scratch goal",
+                "--project", "private-tmp-screen-20260817-axis2-audit-ppcpug",
+            ],
+            console,
+        ) == 0
+        assert "unobserved" not in stream.getvalue()
+
     def test_never_calls_the_narrator(self, monkeypatch: pytest.MonkeyPatch):
         def _forbidden() -> bool:
             raise AssertionError("goal set must make zero model calls")
