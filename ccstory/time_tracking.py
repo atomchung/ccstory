@@ -115,6 +115,13 @@ class SessionSlice:
     # as a separate human-authored task.
     is_delegated: bool = False
     delegation_source: str = ""
+    # Provider-authored automation-trigger marker (for example Codex's
+    # session_meta.thread_source == "automation"). Deliberately not folded
+    # into is_scheduled: that field also relaxes SessionStat.engaged's
+    # admission threshold, and doing so for this marker was measured to
+    # admit +41 sessions (+13.7%) as attended work (#136, #240). Only
+    # ccstory/provenance.py reads this field today.
+    is_automation: bool = False
 
     @property
     def active_min(self) -> float:
@@ -162,6 +169,13 @@ class SessionStat:
     # owner-intent workflows can exclude them.
     is_delegated: bool = False
     delegation_source: str = ""
+    # Provider-authored automation-trigger marker (for example Codex's
+    # session_meta.thread_source == "automation"). Deliberately not folded
+    # into is_scheduled: that field also relaxes `engaged`'s admission
+    # threshold below, and doing so for this marker was measured to admit
+    # +41 sessions (+13.7%) as attended work (#136, #240). Only
+    # ccstory/provenance.py reads this field today.
+    is_automation: bool = False
 
     @property
     def active_min(self) -> float:
@@ -447,6 +461,7 @@ def session_slice_for_window(
         physical_engaged=session.engaged,
         is_delegated=session.is_delegated,
         delegation_source=session.delegation_source,
+        is_automation=session.is_automation,
     )
 
 

@@ -55,6 +55,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   adapters (a `system_review` source in particular — no bundled provider
   exposes one today) and any output wiring are separate, later slices.
   (#136)
+- `SessionStat.is_automation`, carried through to `SessionSlice`, set by
+  the Codex provider from `session_meta.thread_source == "automation"`.
+  `ccstory.provenance` wires it in as SCHEDULED-mode evidence independent
+  of `is_scheduled` — never into `is_scheduled` itself, which also relaxes
+  `SessionStat.engaged`'s admission threshold and was measured to admit
+  +41 sessions (+13.7%) as attended work when this marker was tried there
+  while landing #240. No existing surface reads the new field, so recap,
+  report, JSON, and MCP output is unchanged. (#136)
 
 ### Changed
 
