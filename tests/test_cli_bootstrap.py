@@ -737,8 +737,13 @@ def test_category_set_still_invalidates_narrative_cache_via_deferred_import():
     laziness in the case above is a real branch split, not a dropped
     feature.
     """
+    # PYTHONIOENCODING pins the subprocess to UTF-8: `category set`'s "✓"
+    # confirmation crashes on a legacy-encoding Windows pipe (pre-existing,
+    # tracked in #250), and this test's subject is the import split, not
+    # stream encoding.
     result = _run(
-        ["-c", _SUBCOMMAND_IMPORT_AUDIT, json.dumps(["category", "set", "x", "y"])]
+        ["-c", _SUBCOMMAND_IMPORT_AUDIT, json.dumps(["category", "set", "x", "y"])],
+        extra_env={"PYTHONIOENCODING": "utf-8"},
     )
 
     assert result.returncode == 0, result.stderr
