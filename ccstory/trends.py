@@ -14,7 +14,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from .categorizer import resolve_session_bucket
+from .categorizer import builtin_or_fallback, resolve_session_bucket
 from .local_time import system_local_timezone
 from .providers import collect_provider_snapshot
 from .session_identity import evidence_session_id, public_session_id
@@ -30,8 +30,12 @@ def _resolve_sessions_from_cache(
     """Mutate `sessions[*].category` + `.category_source` using cache only.
 
     Used by ``compare_to_previous`` and ``collect_trend``: these paths must not
-    fire fresh LLM calls (would surprise the user with cost). Cache miss →
-    treat as fallback so the resolver result is still complete.
+    fire fresh LLM calls (would surprise the user with cost). A ``needs_llm``
+    cache miss is resolved the same way ``recap._resolve_all_sessions`` does
+    once fresh content classification is off the table: hybrid mode still
+    owes the deterministic built-in folder tier (``builtin_or_fallback`` —
+    #214) before the scalar fallback; content mode collapses straight to
+    fallback, staying content-only.
 
     Reads cache once for all sessions to avoid N SQLite queries. Content
     classification is an automatic derivation, so it is keyed by evidence
@@ -52,8 +56,11 @@ def _resolve_sessions_from_cache(
             fallback=fallback,
         )
         if bucket is None:
-            # needs_llm path collapsed to fallback in cache-only mode
-            bucket, source = fallback, "fallback"
+            # needs_llm signal collapsed in cache-only mode: hybrid applies
+            # the built-in tier first, content goes straight to fallback.
+            bucket, source = builtin_or_fallback(
+                s.project, mode=mode, fallback=fallback,
+            )
         s.category = bucket
         s.category_source = source
 

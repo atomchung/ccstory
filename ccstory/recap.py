@@ -32,6 +32,7 @@ from rich.progress import (
 
 from .artifacts import ArtifactsReport, collect_artifacts
 from .categorizer import (
+    builtin_or_fallback,
     duplicate_memberships,
     load_project_aliases,
     load_settings,
@@ -433,9 +434,12 @@ def _resolve_all_sessions(
       Pass 2: one batched local narrator call for sessions marked ``needs_llm``,
               when summaries exist and mode allows LLM.
 
-    Sessions that still have no resolution (folder mode, or LLM unavailable,
-    or missing summary) collapse to ``fallback`` so ``.category`` is never
-    empty downstream.
+    Sessions a fresh content classification did not resolve fall through the
+    same deterministic built-in-or-fallback tail as folder mode in hybrid
+    mode (``builtin_or_fallback`` — #214): a folder-leaf match against the
+    built-in ``DEFAULT_RULES`` before the scalar ``fallback``. Content mode
+    stays content-only and always collapses straight to ``fallback``, so
+    ``.category`` is never empty downstream either way.
     """
     if not sessions:
         return
@@ -493,8 +497,15 @@ def _resolve_all_sessions(
             if new_bucket:
                 s.category = new_bucket
                 s.category_source = "llm_fresh"
+            elif mode == "hybrid":
+                # No summary, LLM unavailable, or parse failure — hybrid mode
+                # still owes the deterministic built-in folder tier before
+                # collapsing all the way to the scalar default (#214).
+                s.category, s.category_source = builtin_or_fallback(
+                    s.project, mode=mode, fallback=fallback,
+                )
             else:
-                # No summary, LLM unavailable, or parse failure → fallback.
+                # content mode stays content-only: straight to fallback.
                 s.category = fallback
                 s.category_source = "fallback"
         if mapping:

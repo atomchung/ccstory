@@ -149,9 +149,9 @@ for what the numbers mean once more than one agent is in the window.
 
 | Flag | What it does |
 |---|---|
-| `--classify folder` | Folder-name rules only |
-| `--classify content` | Configured narrator reads each session |
-| `--classify hybrid` | User rule wins, else content (default) |
+| `--classify folder` | Folder-name rules only: your `[categories]`, else the built-in keyword table |
+| `--classify content` | Configured narrator reads each session; no folder rules at all |
+| `--classify hybrid` | User rule wins, else content, else the built-in keyword table (default) |
 
 **Export**
 
@@ -254,6 +254,12 @@ re-buckets sessions by what they were actually about. An override changes a
 session's *area* only — its project is the physical fact of which folder the
 work happened in, never reassigned. Results cache in `~/.ccstory/cache.db` so
 reruns are free.
+
+In `hybrid` mode, a session with no user rule and no narrator configured (or
+no eligible content to classify) doesn't skip straight to `default_bucket` —
+it still checks the built-in keyword table above before falling back, so a
+no-config, no-narrator install still reports across more than one area
+instead of collapsing everything into `coding`.
 
 ## Goal activity
 
