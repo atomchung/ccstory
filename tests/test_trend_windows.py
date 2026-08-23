@@ -453,6 +453,8 @@ def test_period_point_and_trend_by_category_public_contract_unchanged():
     expected_fields = {
         "label", "since", "until", "rollups", "total_h",
         "output_tokens", "cost_usd", "provider_coverage", "unpriced_models",
+        # Additive (#256) — see PeriodPoint.classification_coverage.
+        "classification_coverage",
     }
     actual_fields = {f.name for f in dataclasses.fields(PeriodPoint)}
     assert actual_fields == expected_fields

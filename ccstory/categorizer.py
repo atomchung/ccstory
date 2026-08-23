@@ -708,6 +708,63 @@ def _resolved_fallback(explicit: str | None, config_path: Path | None) -> str:
     return load_settings(config_path).get("default_bucket", DEFAULT_FALLBACK_BUCKET)
 
 
+# ----- Classification-source coverage (#256) --------------------------------
+
+# Canonical `.category_source` vocabulary, in resolver-priority order.
+# Mirrors resolve_session_bucket()'s chain: user_rule > llm_cache/llm_fresh >
+# builtin_rule > fallback. "needs_llm" never appears here — it is a
+# transient Pass-1 signal (recap._resolve_all_sessions /
+# trends._resolve_sessions_from_cache) that always resolves to one of these
+# five before a session leaves that function.
+CLASSIFICATION_SOURCES: tuple[str, ...] = (
+    "user_rule", "llm_cache", "llm_fresh", "builtin_rule", "fallback",
+)
+
+# Catch-all bucket for a session whose `.category_source` is "" (never run
+# through resolve_session_bucket() — see time_tracking.SessionStat's own
+# docstring) or an unrecognized value. Every real recap has resolved every
+# session by the time a report renders (#214), so this should stay empty in
+# practice; the aggregator stays defensive rather than trusting that
+# invariant blindly, so a session is always counted, never silently dropped.
+UNRESOLVED_CLASSIFICATION_SOURCE = "unresolved"
+
+
+def classification_source_breakdown(sessions) -> dict:
+    """Aggregate `sessions` by `.category_source` for the coverage
+    disclosure (#256): how many sessions, and how many active hours, each
+    resolver layer actually produced for this window.
+
+    Returns ``{"sessions_total": N, "by_source": {source: {"sessions": n,
+    "active_hours": h}, ...}}``. Every `CLASSIFICATION_SOURCES` key is
+    always present (zero-filled when a layer produced nothing this window),
+    in fixed resolver-priority order; `UNRESOLVED_CLASSIFICATION_SOURCE` is
+    appended last, only when at least one session needed it. Deterministic
+    key order regardless of input order — safe to render directly without
+    sorting.
+
+    Pure function of `sessions[*].category_source` / `.active_min` — does
+    not know or care *why* a window's mix looks the way it does (e.g.
+    whether fresh content classification even had a chance to run this
+    invocation). Pair with the caller's own `content_lane` signal for that;
+    see `recap.build_recap()`.
+    """
+    totals: dict[str, list] = {src: [0, 0.0] for src in CLASSIFICATION_SOURCES}
+    unresolved = [0, 0.0]
+    for s in sessions:
+        slot = totals.get(s.category_source, unresolved)
+        slot[0] += 1
+        slot[1] += s.active_min / 60
+    by_source = {
+        src: {"sessions": n, "active_hours": round(h, 2)}
+        for src, (n, h) in totals.items()
+    }
+    if unresolved[0]:
+        by_source[UNRESOLVED_CLASSIFICATION_SOURCE] = {
+            "sessions": unresolved[0], "active_hours": round(unresolved[1], 2),
+        }
+    return {"sessions_total": len(sessions), "by_source": by_source}
+
+
 def preview_classification(projects: list[str]) -> dict[str, list[tuple[str, str]]]:
     """Return {bucket: [(leaf, raw), ...]} for displaying first-run preview.
 

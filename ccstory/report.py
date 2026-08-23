@@ -18,7 +18,13 @@ from rich.table import Table
 from rich.text import Text
 
 from .artifacts import ArtifactsReport, MARKDOWN_REPO_LIMIT
-from .categorizer import colors_for, load_settings, normalize_project_name
+from .categorizer import (
+    UNRESOLVED_CLASSIFICATION_SOURCE,
+    classification_source_breakdown,
+    colors_for,
+    load_settings,
+    normalize_project_name,
+)
 from .goals import GoalBreakdown, GoalContext
 from .providers import agent_label, list_providers
 from .session_identity import evidence_session_id, public_session_id
@@ -184,6 +190,64 @@ def _usage_coverage_message(provider_coverage: dict[str, str]) -> str | None:
     if not details:
         return None
     return "Token and cost totals are incomplete: " + "; ".join(details) + "."
+
+
+# Terminal-card disclosure threshold (#256): show the compact classification
+# line whenever the scalar-fallback share is at/above this, even when
+# content_lane is "on" — a high fallback share is worth surfacing on its
+# own, not only when fresh classification never had a chance to run this
+# window. Deterministic, not tuned per report.
+CLASSIFICATION_FALLBACK_DISCLOSURE_SHARE = 0.25
+
+
+def _classification_coverage_markdown_line(
+    sessions: list[SessionStat], content_lane: str,
+) -> str:
+    """Always-shown line: full per-source breakdown + content-lane state
+    (#256). Markdown is the detailed human-readable surface, so this
+    carries every resolver-priority `by_source` key — unlike the terminal
+    card's conditional, 3-bucket summary below."""
+    breakdown = classification_source_breakdown(sessions)
+    parts = " · ".join(
+        f"`{source}` {counts['sessions']}"
+        for source, counts in breakdown["by_source"].items()
+    )
+    return (
+        f"> Classification coverage ({breakdown['sessions_total']} sessions): "
+        f"{parts} — content lane: **{content_lane}**"
+    )
+
+
+def _classification_coverage_terminal_text(
+    sessions: list[SessionStat], content_lane: str,
+) -> Text | None:
+    """Compact one-line disclosure (#256), shown only when it earns its
+    place: the content lane never had a chance to run this window, or the
+    scalar-fallback share is materially high. Silent otherwise — every
+    window still carries the full breakdown in Markdown/JSON regardless."""
+    breakdown = classification_source_breakdown(sessions)
+    total = breakdown["sessions_total"]
+    if not total:
+        return None
+    by_source = breakdown["by_source"]
+    fallback = (
+        by_source["fallback"]["sessions"]
+        + by_source.get(UNRESOLVED_CLASSIFICATION_SOURCE, {}).get("sessions", 0)
+    )
+    if (
+        content_lane != "off"
+        and fallback / total < CLASSIFICATION_FALLBACK_DISCLOSURE_SHARE
+    ):
+        return None
+    rules = by_source["user_rule"]["sessions"] + by_source["builtin_rule"]["sessions"]
+    content = by_source["llm_cache"]["sessions"] + by_source["llm_fresh"]["sessions"]
+    content_str = f"{content} (lane off)" if content_lane == "off" else str(content)
+    return Text(
+        f"classification: rules {rules} · content {content_str} · "
+        f"fallback {fallback}",
+        style="yellow",
+        overflow="fold",
+    )
 
 
 def _trend_provider_coverage(points: list[PeriodPoint]) -> dict[str, str]:
@@ -817,6 +881,7 @@ def render_report(
     narrative_provenance: dict | None = None,
     goal_context: GoalContext | None = None,
     goal_breakdown: GoalBreakdown | None = None,
+    content_lane: str = "off",
 ) -> str:
     """Produce the full markdown report.
 
@@ -849,6 +914,7 @@ def render_report(
     lines.append(
         f"> **{total_h:.1f}h active** · {len(sessions)} sessions · {total_msgs:,} messages"
     )
+    lines.append(_classification_coverage_markdown_line(sessions, content_lane))
     lines.append("")
 
     top_focus = top_focus_narrative(rollups, summaries)
@@ -1149,6 +1215,7 @@ def build_report_json(
     sampling: object | None = None,
     goal_context: GoalContext | None = None,
     goal_breakdown: GoalBreakdown | None = None,
+    content_lane: str = "off",
 ) -> dict:
     """Machine-readable envelope mirroring the markdown report's content.
 
@@ -1193,6 +1260,15 @@ def build_report_json(
             "complete": usage.usage_complete,
             "incomplete_agents": usage.incomplete_agents,
             "providers": usage.provider_coverage,
+        },
+        # Additive (#256): which resolver layer (`by_source`) actually
+        # produced each session's bucket this window, plus whether fresh
+        # content classification could run at all (`content_lane`). See
+        # `categorizer.classification_source_breakdown()` /
+        # `recap.build_recap()` for how each half is derived.
+        "classification_coverage": {
+            **classification_source_breakdown(sessions),
+            "content_lane": content_lane,
         },
         "buckets": [
             {
@@ -1397,6 +1473,12 @@ def build_trend_json(
                 "cost_usd": round(p.cost_usd, 2),
                 "usage_coverage": _usage_coverage_payload(p.provider_coverage),
                 "unpriced_models": p.unpriced_models,
+                # Additive (#256). Always {} for a PeriodPoint built without
+                # collect_trend() (e.g. a hand-built test fixture) — real
+                # trend points always carry it, populated cache-only same
+                # as everything else in this command (see PeriodPoint's
+                # own docstring for why content_lane is always "off" here).
+                "classification_coverage": p.classification_coverage,
                 "buckets": [
                     {
                         "name": r.category,
@@ -1434,6 +1516,7 @@ def render_terminal_card(
     agent: str | None = None,
     goal_context: GoalContext | None = None,
     goal_breakdown: GoalBreakdown | None = None,
+    content_lane: str = "off",
 ) -> Panel:
     """Rich Panel summarizing the recap. Designed for screenshot sharing."""
     summaries = summaries or {}
@@ -1653,6 +1736,11 @@ def render_terminal_card(
 
     # Cost/coverage caveats are report-wide footnotes, not part of the
     # project or narrative story. Keep them at the bottom of the card.
+    classification_text = _classification_coverage_terminal_text(
+        sessions, content_lane,
+    )
+    if classification_text is not None:
+        parts.append(classification_text)
     if usage.unpriced_models:
         unpriced_str = ", ".join(usage.unpriced_models)
         parts.append(

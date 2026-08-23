@@ -48,6 +48,7 @@ from pydantic import StrictInt  # noqa: E402
 
 from . import recap  # noqa: E402 — module import so recap.CONFIG_PATH reads live (test monkeypatches target the attribute, not a copied value)
 from .categorizer import (  # noqa: E402
+    classification_source_breakdown,
     load_project_aliases,
     load_rules,
     load_settings,
@@ -253,6 +254,13 @@ def _compact_recap(result) -> dict:
             result.usage.provider_coverage
         ),
         "unpriced_models": result.usage.unpriced_models,
+        # Additive (#256). getattr defaults cover a hand-built test double
+        # that predates this field, same convention as goal_context/sampling
+        # above.
+        "classification_coverage": {
+            **classification_source_breakdown(result.sessions),
+            "content_lane": getattr(result, "content_lane", "off"),
+        },
         "report_path": str(result.report_path) if result.report_path else None,
     }
     goal_projection = build_goal_projection(
@@ -492,6 +500,9 @@ def get_trend(
                     p.provider_coverage
                 ),
                 "unpriced_models": p.unpriced_models,
+                # Additive (#256) — see PeriodPoint.classification_coverage
+                # for why content_lane is always "off" for a trend point.
+                "classification_coverage": p.classification_coverage,
                 "buckets": [
                     {
                         "name": r.category,

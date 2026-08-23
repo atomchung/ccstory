@@ -515,7 +515,8 @@ class TestGetTrend:
         for p in out["points"]:
             assert set(p) == {"label", "since", "until", "active_hours",
                               "cost_usd", "usage_coverage",
-                              "unpriced_models", "buckets"}
+                              "unpriced_models", "buckets",
+                              "classification_coverage"}
         assert out["usage_coverage"]["complete"] is True
         assert out["unpriced_models"] == []
         # Windows come back oldest first; the seeded sessions put activity

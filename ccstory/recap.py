@@ -208,6 +208,14 @@ class RecapResult:
     # appended only; #218 owns every rendered/JSON/MCP surface.
     goal_context: GoalContext | None = None
     goal_breakdown: GoalBreakdown | None = None
+    # Whether fresh content classification could run *at all* this
+    # invocation — "on" | "off", derived from `build_recap()`'s own
+    # `classify` / `minimal` arguments plus narrator availability, never
+    # from resolved counts (#256). Every render surface pairs this with
+    # `categorizer.classification_source_breakdown(self.sessions)` for the
+    # full per-source disclosure. Appended last for positional-construction
+    # compatibility.
+    content_lane: str = "off"
 
     def to_json(self) -> dict:
         """The machine-readable envelope (`schema_version: 1`), same shape
@@ -230,6 +238,7 @@ class RecapResult:
             sampling=self.sampling,
             goal_context=self.goal_context,
             goal_breakdown=self.goal_breakdown,
+            content_lane=self.content_lane,
         )
         if self.report_path is not None:
             payload["report_path"] = str(self.report_path)
@@ -795,6 +804,21 @@ def build_recap(
     # previous() so cross-window comparison stays symmetric (fixes #61).
     settings = load_settings(CONFIG_PATH)
     fallback_bucket = settings.get("default_bucket", "coding")
+    # Whether fresh content classification could run *at all* this
+    # invocation (#256) — checked from the same preconditions
+    # `_resolve_all_sessions()` itself relies on, before resolution runs,
+    # so this can never be inferred from a post-hoc "0 llm_fresh sessions"
+    # count (which is equally consistent with "lane off" and "lane on, 100%
+    # cache hit"). `classify == "folder"` skips the LLM cache layer
+    # entirely; `minimal` skips summary generation, so Pass 2 never has an
+    # eligible item to send; `llm_available()` is the same environment probe
+    # `classify_sessions_by_content()` itself gates on. Short-circuited so a
+    # folder-mode or --minimal run never pays for the availability probe.
+    content_lane = (
+        "on"
+        if classify != "folder" and not minimal and llm_available()
+        else "off"
+    )
     _resolve_all_sessions(
         sessions, summaries, classify, fallback_bucket, console,
         budget=narrative_budget,
@@ -942,6 +966,7 @@ def build_recap(
         narrative_provenance=narrative_provenance,
         goal_context=goal_context,
         goal_breakdown=goal_breakdown,
+        content_lane=content_lane,
     )
 
     report_path: Path | None = None
@@ -972,4 +997,5 @@ def build_recap(
         sampling=sampling_plan,
         goal_context=goal_context,
         goal_breakdown=goal_breakdown,
+        content_lane=content_lane,
     )

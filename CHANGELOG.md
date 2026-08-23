@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Per-window **classification coverage** disclosure (#256): on a store
+  where the content-classification tier rarely runs, `user_rule > llm
+  cache/fresh > builtin_rule > fallback` used to read as one pipeline with
+  no way to tell "content classification judged this window" apart from
+  "it never got the chance" — a session that fell through every rule
+  landed on the same scalar fallback bucket as one the LLM tier simply
+  never saw, and the collapse looked identical either way. Every recap
+  surface now discloses which resolver layer actually produced each
+  session's bucket:
+  - `--json` gains an additive `classification_coverage` block:
+    `sessions_total`, a `by_source` breakdown (sessions + active hours for
+    each of `user_rule` / `llm_cache` / `llm_fresh` / `builtin_rule` /
+    `fallback`, deterministic order), and `content_lane` (`"on"` / `"off"`)
+    — whether fresh content classification could run *at all* this
+    invocation, derived from `--minimal` / `--classify` / narrator
+    availability up front, never from how many sessions ended up
+    `llm_fresh` (a lane that is "on" can still legitimately resolve zero
+    fresh sessions when every session is a cache hit or a rule match —
+    that must not be misread as "off"). `ccstory trend` / `get_trend`
+    carry the same per-period breakdown for free (`content_lane` is always
+    `"off"` there: trend resolution is cache-only by construction and
+    never fires a fresh classification call, for any `--classify` value).
+  - The Markdown report always includes the full breakdown as one line
+    near the top of the report.
+  - The terminal card adds a compact one-line disclosure (e.g.
+    `classification: rules 141 · content 0 (lane off) · fallback 10`)
+    only when it earns its place: the content lane never had a chance to
+    run this window, or the scalar-fallback share is at or above 25%.
+  - `get_recap`'s compact MCP shape gains the same `classification_coverage`
+    block. Zero model calls, no change to bucket-resolution behavior
+    itself — purely additive disclosure of what already happened.
+
 ## [0.8.3] - 2026-08-23
 
 ### Fixed
