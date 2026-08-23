@@ -317,6 +317,7 @@ class CodexProvider(BaseAgentProvider):
         cwd = ""
         session_id = ""
         delegation_source = ""
+        is_automation = False
 
         try:
             with jsonl_path.open("r", encoding="utf-8", errors="ignore") as f:
@@ -340,6 +341,14 @@ class CodexProvider(BaseAgentProvider):
                             return None
                         if payload.get("originator") == "Claude Code":
                             delegation_source = "claude_code"
+                        if payload.get("thread_source") == "automation":
+                            # SCHEDULED-mode provenance only
+                            # (ccstory/provenance.py). Not is_scheduled:
+                            # that field relaxes SessionStat.engaged's
+                            # admission threshold and was measured to admit
+                            # +41 sessions (+13.7%) when this marker was
+                            # wired into it during #240 (see #136).
+                            is_automation = True
                         # `id` is this rollout; `session_id` is the *thread*
                         # root and is shared by every resumed/forked rollout of
                         # it — 313 of 532 real files collide on it, which as a
@@ -426,6 +435,7 @@ class CodexProvider(BaseAgentProvider):
             path=jsonl_path,
             is_delegated=bool(delegation_source),
             delegation_source=delegation_source,
+            is_automation=is_automation,
         )
 
     def collect_usage(

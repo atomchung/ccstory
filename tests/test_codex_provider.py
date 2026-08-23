@@ -203,6 +203,65 @@ class TestCodexParsing:
         assert stat.is_delegated is True
         assert stat.delegation_source == "codex_delegation"
 
+    def test_automation_thread_source_sets_the_automation_marker(
+        self, codex_factory
+    ):
+        """Codex's own automation-trigger marker becomes SCHEDULED-mode
+        provenance on a dedicated field — never on `is_scheduled`, which
+        relaxes `SessionStat.engaged`'s admission threshold and was
+        measured to admit +41 sessions (+13.7%) when this marker was wired
+        into it during #240 (see #136)."""
+        records = [
+            {
+                "timestamp": _ts(0),
+                "type": "session_meta",
+                "payload": {
+                    "id": SID,
+                    "cwd": "/Users/x/demo",
+                    "thread_source": "automation",
+                },
+            },
+            _user("run the nightly clip intake", 1),
+            _assistant("Done.", 5),
+        ]
+
+        stat = CodexProvider().parse_session(codex_factory(SID, records))
+
+        assert stat is not None
+        assert stat.is_automation is True
+        assert stat.is_scheduled is False
+        assert stat.is_delegated is False
+        assert stat.delegation_source == ""
+
+    def test_non_automation_thread_source_leaves_the_marker_unset(
+        self, codex_factory
+    ):
+        """Guards against a naive `"thread_source" in payload` check: only
+        the exact `"automation"` value counts."""
+        records = [
+            {
+                "timestamp": _ts(0),
+                "type": "session_meta",
+                "payload": {
+                    "id": SID,
+                    "cwd": "/Users/x/demo",
+                    "thread_source": "interactive",
+                },
+            },
+            _user("hi", 1),
+        ]
+
+        stat = CodexProvider().parse_session(codex_factory(SID, records))
+
+        assert stat is not None
+        assert stat.is_automation is False
+
+    def test_missing_thread_source_leaves_the_marker_unset(self, codex_factory):
+        path = codex_factory(SID, [_meta(SID, "/Users/x/demo"), _user("hi", 1)])
+        stat = CodexProvider().parse_session(path)
+        assert stat is not None
+        assert stat.is_automation is False
+
     def test_transcript_without_timestamps_is_skipped(self, codex_factory):
         path = codex_factory(SID, [{"type": "session_meta", "payload": {"cwd": "/x"}}])
         assert CodexProvider().parse_session(path) is None

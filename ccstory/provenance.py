@@ -43,9 +43,18 @@ answers *whether it clears an existing wall-clock-time threshold*.  Folding
 the two together is exactly the mistake flagged while landing #240: routing
 Codex's automation marker into ``is_scheduled`` would have silently relaxed
 that threshold for 41 real sessions instead of separating them out. This
-resolver only ever reads ``is_scheduled``/``is_delegated``/``delegation_source``/
-``is_system_review``/``user_msg_count`` and never touches engagement or
-active-time math.
+resolver only ever reads ``is_scheduled``/``is_automation``/``is_delegated``/
+``delegation_source``/``is_system_review``/``user_msg_count`` and never
+touches engagement or active-time math.
+
+Slice 2 (#136): the Codex provider now sets ``is_automation`` from
+``session_meta.thread_source == "automation"`` (see
+``ccstory/providers/codex.py``). Per the 2026-08-23 maintainer presentation
+decision, this is wired here as independent SCHEDULED-mode provenance, never
+into ``is_scheduled`` — see the paragraph above. ``is_automation`` and
+``is_scheduled`` are both structural SCHEDULED evidence; either alone, or
+both together, resolve to SCHEDULED without triggering the conflict path
+that two *different* modes would (see ``_positive_categories``).
 """
 
 from __future__ import annotations
@@ -121,9 +130,20 @@ class InteractionSignals:
     because its only meaningful states are "no source recorded" (``""``)
     and "recorded as this provider-specific tag," mirroring
     ``SessionStat.delegation_source``.
+
+    ``is_automation`` is a second, independent source of SCHEDULED-mode
+    evidence: Codex's own automation-trigger marker
+    (``session_meta.thread_source == "automation"``). It is deliberately
+    not merged into ``is_scheduled`` — that field also relaxes
+    ``SessionStat.engaged``'s admission threshold, and wiring this marker
+    into it was measured to admit +41 sessions (+13.7%) as attended work
+    (#136, #240). The resolver treats the two as independent structural
+    evidence for the same SCHEDULED mode: both present together is not a
+    cross-mode conflict, and both tokens survive in ``signals``.
     """
 
     is_scheduled: bool | None = None
+    is_automation: bool | None = None
     is_delegated: bool | None = None
     delegation_source: str = ""
     is_system_review: bool | None = None
@@ -147,6 +167,14 @@ def _positive_categories(
     that is what correctly surfaces a human resuming a delegated or
     scheduled session as a (lower-confidence) conflict instead of a silent
     misclassification.
+
+    ``is_scheduled`` and ``is_automation`` both feed SCHEDULED and are
+    merged into one ``structural`` entry (tokens concatenated, in that
+    order) rather than two, so that two structural signals for the *same*
+    mode never register as a cross-mode conflict below — ``by_mode`` in
+    ``resolve_interaction_provenance`` is keyed by mode, and a second entry
+    sharing a key already in use would silently overwrite the first instead
+    of merging with it.
     """
 
     structural: list[tuple[InteractionMode, bool, tuple[str, ...]]] = []
@@ -155,10 +183,13 @@ def _positive_categories(
         structural.append(
             (InteractionMode.SYSTEM_REVIEW, True, ("is_system_review=true",))
         )
+    scheduled_tokens: tuple[str, ...] = ()
     if signals.is_scheduled is True:
-        structural.append(
-            (InteractionMode.SCHEDULED, True, ("is_scheduled=true",))
-        )
+        scheduled_tokens += ("is_scheduled=true",)
+    if signals.is_automation is True:
+        scheduled_tokens += ("is_automation=true",)
+    if scheduled_tokens:
+        structural.append((InteractionMode.SCHEDULED, True, scheduled_tokens))
     if signals.is_delegated is True:
         source_known = bool(signals.delegation_source)
         tokens: tuple[str, ...] = ("is_delegated=true",)
@@ -193,6 +224,8 @@ def _unknown_provenance(signals: InteractionSignals) -> InteractionProvenance:
     reported: list[str] = []
     if signals.is_scheduled is not None:
         reported.append(f"is_scheduled={_bool_token(signals.is_scheduled)}")
+    if signals.is_automation is not None:
+        reported.append(f"is_automation={_bool_token(signals.is_automation)}")
     if signals.is_delegated is not None:
         reported.append(f"is_delegated={_bool_token(signals.is_delegated)}")
     if signals.is_system_review is not None:
@@ -271,15 +304,16 @@ def interaction_signals_from_session(
     marker on either dataclass (see the module docstring's field-coverage
     note).
 
-    ``SessionStat.is_scheduled`` / ``is_delegated`` are plain ``bool`` with
-    a ``False`` default, so "confirmed not scheduled/delegated" and "never
-    inspected by a parser for this" are indistinguishable at this layer.
-    That is an existing shape of those two fields, not something this
-    adapter introduces or works around.
+    ``SessionStat.is_scheduled`` / ``is_automation`` / ``is_delegated`` are
+    plain ``bool`` with a ``False`` default, so "confirmed not
+    scheduled/automation/delegated" and "never inspected by a parser for
+    this" are indistinguishable at this layer. That is an existing shape of
+    those fields, not something this adapter introduces or works around.
     """
 
     return InteractionSignals(
         is_scheduled=session.is_scheduled,
+        is_automation=session.is_automation,
         is_delegated=session.is_delegated,
         delegation_source=session.delegation_source,
         is_system_review=None,

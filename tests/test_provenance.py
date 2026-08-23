@@ -9,12 +9,15 @@ transcripts.
 from __future__ import annotations
 
 import dataclasses
+import json
 import random
 import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
+import ccstory
 from ccstory.provenance import (
     EvaluationReport,
     InteractionMode,
@@ -25,13 +28,16 @@ from ccstory.provenance import (
     resolve_interaction_provenance,
     resolve_session_provenance,
 )
+from ccstory.report import build_report_json, render_report
 from ccstory.time_tracking import (
+    CategoryRollup,
     SessionStat,
     active_intervals_for_timestamps,
     clip_active_intervals,
     make_window_evidence,
     session_slice_for_window,
 )
+from ccstory.token_usage import UsageReport
 
 UTC = timezone.utc
 BASE = datetime(2026, 8, 1, tzinfo=UTC)
@@ -43,6 +49,7 @@ def _stat(
     *,
     session_id: str = "physical-1",
     is_scheduled: bool = False,
+    is_automation: bool = False,
     is_delegated: bool = False,
     delegation_source: str = "",
     user_msg_count: int = 0,
@@ -61,6 +68,7 @@ def _stat(
         agent=agent,
         timestamps=timestamps,
         is_scheduled=is_scheduled,
+        is_automation=is_automation,
         is_delegated=is_delegated,
         delegation_source=delegation_source,
     )
@@ -115,6 +123,7 @@ class TestSignalTokenContract:
         field_names = {f.name for f in dataclasses.fields(InteractionSignals)}
         assert field_names == {
             "is_scheduled",
+            "is_automation",
             "is_delegated",
             "delegation_source",
             "is_system_review",
@@ -200,6 +209,53 @@ class TestResolverCoreModes:
         assert result.signals == ("is_system_review=true",)
 
 
+class TestResolverAutomationSignal:
+    """Codex's `session_meta.thread_source == "automation"` marker (#136
+    slice 2). Rejected route: routing it into `is_scheduled` was measured
+    to admit +41 sessions (+13.7%) as attended work while landing #240, so
+    it lands on its own field and is wired here as SCHEDULED-mode evidence
+    independent of `is_scheduled` instead."""
+
+    def test_automation_marker_alone_is_scheduled_high_confidence(self):
+        result = resolve_interaction_provenance(
+            InteractionSignals(is_automation=True, user_msg_count=1)
+        )
+        assert result.mode is InteractionMode.SCHEDULED
+        assert result.confidence == "high"
+        # The lone triggering message is the normal shape of an automation
+        # run and must not itself read as a second, competing signal.
+        assert result.signals == ("is_automation=true",)
+
+    def test_automation_marker_alone_high_confidence_at_zero_messages(self):
+        result = resolve_interaction_provenance(
+            InteractionSignals(is_automation=True, user_msg_count=0)
+        )
+        assert result.mode is InteractionMode.SCHEDULED
+        assert result.confidence == "high"
+
+    def test_is_automation_never_implies_is_scheduled(self):
+        """Regression lock for the #136 measured rejection: the automation
+        marker must never set `is_scheduled` — that field alone controls
+        `SessionStat.engaged`'s admission-threshold relaxation."""
+        signals = InteractionSignals(is_automation=True, user_msg_count=1)
+        assert signals.is_scheduled is None
+
+    def test_scheduled_and_automation_together_is_not_a_cross_mode_conflict(self):
+        """Both are SCHEDULED-mode evidence for the same session (a Claude
+        scheduled task cannot also be a Codex automation run today, but the
+        resolver must still be correct if that ever changes) — this must
+        not read as two different modes disagreeing."""
+        result = resolve_interaction_provenance(
+            InteractionSignals(
+                is_scheduled=True, is_automation=True, user_msg_count=1
+            )
+        )
+        assert result.mode is InteractionMode.SCHEDULED
+        assert result.confidence == "high"
+        assert result.signals == ("is_scheduled=true", "is_automation=true")
+        assert not any(token.startswith("conflict=") for token in result.signals)
+
+
 class TestResolverConflicts:
     def test_two_structural_markers_conflict_at_medium_confidence(self):
         """Not reachable in today's real data (Claude is the only source of
@@ -227,6 +283,22 @@ class TestResolverConflicts:
         assert result.signals == (
             "is_scheduled=true",
             "user_msg_count=5",
+            "conflict=scheduled+interactive",
+        )
+
+    def test_automation_session_resumed_interactively_is_mixed_conflict(self):
+        """Same shape as the `is_scheduled` case above: two or more user
+        turns is independent evidence of a real back-and-forth and always
+        competes with the automation marker, correctly dropping confidence
+        instead of silently reading as unattended."""
+        result = resolve_interaction_provenance(
+            InteractionSignals(is_automation=True, user_msg_count=2)
+        )
+        assert result.mode is InteractionMode.SCHEDULED
+        assert result.confidence == "medium"
+        assert result.signals == (
+            "is_automation=true",
+            "user_msg_count=2",
             "conflict=scheduled+interactive",
         )
 
@@ -302,6 +374,7 @@ class TestSessionAdapter:
         signals = interaction_signals_from_session(stat)
         assert signals == InteractionSignals(
             is_scheduled=True,
+            is_automation=False,
             is_delegated=False,
             delegation_source="",
             is_system_review=None,
@@ -318,12 +391,14 @@ class TestSessionAdapter:
         assert resolve_session_provenance(stat).mode is InteractionMode.DELEGATED
 
     def test_session_stat_defaults_are_concrete_not_missing(self):
-        """SessionStat.is_scheduled/is_delegated default to False, not None
-        — a session a parser never inspected and one confirmed negative are
-        indistinguishable at this layer. Documented gap, not a resolver bug."""
+        """SessionStat.is_scheduled/is_automation/is_delegated default to
+        False, not None — a session a parser never inspected and one
+        confirmed negative are indistinguishable at this layer. Documented
+        gap, not a resolver bug."""
         stat = _stat()
         signals = interaction_signals_from_session(stat)
         assert signals.is_scheduled is False
+        assert signals.is_automation is False
         assert signals.is_delegated is False
         assert resolve_session_provenance(stat).mode is InteractionMode.UNKNOWN
         assert resolve_session_provenance(stat).confidence == "medium"
@@ -332,6 +407,13 @@ class TestSessionAdapter:
         stat = _stat(is_scheduled=True, session_id="scheduled-1")
         slice_ = _slice_default_evidence(stat)
         assert slice_.is_scheduled is True
+        assert resolve_session_provenance(slice_).mode is InteractionMode.SCHEDULED
+        assert resolve_session_provenance(slice_) == resolve_session_provenance(stat)
+
+    def test_session_slice_carries_automation_through(self):
+        stat = _stat(is_automation=True, session_id="automation-1")
+        slice_ = _slice_default_evidence(stat)
+        assert slice_.is_automation is True
         assert resolve_session_provenance(slice_).mode is InteractionMode.SCHEDULED
         assert resolve_session_provenance(slice_) == resolve_session_provenance(stat)
 
@@ -407,8 +489,20 @@ CANONICAL_FIXTURES: tuple[LabeledFixture, ...] = (
         category="scheduled",
     ),
     LabeledFixture(
+        name="scheduled_automation_marker",
+        signals=InteractionSignals(is_automation=True, user_msg_count=1),
+        expected_mode=InteractionMode.SCHEDULED,
+        category="scheduled",
+    ),
+    LabeledFixture(
         name="mixed_resumed_scheduled_then_interactive",
         signals=InteractionSignals(is_scheduled=True, user_msg_count=6),
+        expected_mode=InteractionMode.SCHEDULED,
+        category="mixed_resumed",
+    ),
+    LabeledFixture(
+        name="mixed_resumed_automation_then_interactive",
+        signals=InteractionSignals(is_automation=True, user_msg_count=2),
         expected_mode=InteractionMode.SCHEDULED,
         category="mixed_resumed",
     ),
@@ -430,6 +524,17 @@ CANONICAL_FIXTURES: tuple[LabeledFixture, ...] = (
         name="missing_metadata_known_empty",
         signals=InteractionSignals(
             is_scheduled=False, is_delegated=False, user_msg_count=0
+        ),
+        expected_mode=InteractionMode.UNKNOWN,
+        category="missing_metadata",
+    ),
+    LabeledFixture(
+        name="missing_metadata_known_empty_including_automation",
+        signals=InteractionSignals(
+            is_scheduled=False,
+            is_automation=False,
+            is_delegated=False,
+            user_msg_count=0,
         ),
         expected_mode=InteractionMode.UNKNOWN,
         category="missing_metadata",
@@ -545,3 +650,88 @@ class TestEvaluationHarness:
         assert isinstance(report.confusion, tuple)
         assert isinstance(report.per_mode, tuple)
         assert isinstance(report.results, tuple)
+
+
+# ---------------------------------------------------------------------------
+# is_automation blast-radius invariant (#136 slice 2)
+#
+# The field must have exactly one reader (this module's resolver) and zero
+# effect on any existing output surface. Two complementary proofs: a static
+# scan that nothing outside the allowed definition/plumbing sites even
+# mentions the field name, and a dynamic run of the deterministic report
+# surfaces (JSON + Markdown) showing identical output whether it is set or
+# not. `recap`'s narrative lanes call an LLM and are not deterministic, but
+# they consume the same `SessionStat`/`CategoryRollup` inputs through this
+# same `report` module with no separate session-field access of their own,
+# so the static scan covers them too; so does MCP, which has no session
+# serialization path independent of `ccstory/report.py`.
+# ---------------------------------------------------------------------------
+
+# Files allowed to mention "is_automation": the field definitions
+# (time_tracking.py), the one provider adapter that sets it (codex.py), and
+# the one resolver that reads it (provenance.py, this module's own package).
+_AUTOMATION_FIELD_ALLOWED_FILES = {
+    "provenance.py",
+    "time_tracking.py",
+    str(Path("providers") / "codex.py"),
+}
+
+
+class TestAutomationFieldHasNoOtherReaders:
+    def test_no_other_ccstory_module_mentions_is_automation(self):
+        package_root = Path(ccstory.__file__).resolve().parent
+        offenders = sorted(
+            str(path.relative_to(package_root))
+            for path in package_root.rglob("*.py")
+            if str(path.relative_to(package_root))
+            not in _AUTOMATION_FIELD_ALLOWED_FILES
+            and "is_automation" in path.read_text(encoding="utf-8")
+        )
+        assert offenders == []
+
+    def _report_inputs(self, stat: SessionStat):
+        rollup = CategoryRollup(
+            category="coding",
+            active_min=stat.active_min,
+            sessions=1,
+            messages=stat.msg_count,
+            top_sessions=[stat],
+        )
+        usage = UsageReport(since=BASE, until=BASE + timedelta(days=1))
+        return dict(
+            label="2026-W34",
+            since=BASE,
+            until=BASE + timedelta(days=1),
+            sessions=[stat],
+            rollups=[rollup],
+            usage=usage,
+            summaries={},
+            overall_narrative="Synthetic overall summary.",
+        )
+
+    def test_report_json_is_byte_identical_regardless_of_automation_marker(self):
+        plain = _stat(session_id="s1", user_msg_count=2)
+        automation = dataclasses.replace(plain, is_automation=True)
+        # The two fixtures differ in exactly one field — otherwise this
+        # would not be testing what it claims to.
+        assert dataclasses.replace(automation, is_automation=False) == plain
+        assert plain != automation
+
+        json_plain = build_report_json(**self._report_inputs(plain))
+        json_automation = build_report_json(**self._report_inputs(automation))
+
+        assert json_plain == json_automation
+        assert json.dumps(json_plain, sort_keys=True, default=str) == json.dumps(
+            json_automation, sort_keys=True, default=str
+        )
+
+    def test_report_markdown_is_byte_identical_regardless_of_automation_marker(
+        self,
+    ):
+        plain = _stat(session_id="s1", user_msg_count=2)
+        automation = dataclasses.replace(plain, is_automation=True)
+
+        markdown_plain = render_report(**self._report_inputs(plain))
+        markdown_automation = render_report(**self._report_inputs(automation))
+
+        assert markdown_plain == markdown_automation
