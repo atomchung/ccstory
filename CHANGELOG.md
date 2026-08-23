@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Goal coverage disclosure** (#255): the goal section listed only the goals
+  that had activity, so a window whose hours mostly sit in projects mapped to
+  no goal was indistinguishable from one that lost hours. On a real month —
+  205.33h active, 16.08h attributed — the goal block showed the 16h and said
+  nothing about the other 189h, and the owner read it as an undercount. The
+  numbers were already in `goals.coverage`; nothing rendered them beyond a
+  bare hours figure. Every goal section now discloses the consequence of the
+  current mapping:
+  - The terminal card and the Markdown report always show one coverage line —
+    zero included, since a line that disappears at 0h is indistinguishable
+    from a renderer that forgot the bucket — with the unattributed hours and
+    their share of covered activity (e.g. `unattributed: 189.25h (92%) —
+    projects mapped to no goal`).
+  - Both surfaces then name where the gap is: the three highest-hour projects
+    mapped to no goal (hours descending, canonical project id breaks ties;
+    e.g. `top unmapped: investment-note 71.4h · kol-collector 60.0h ·
+    ccstory 24.9h`). Bounded and deterministic, project identities only —
+    never a path or a session id.
+  - `--json` and MCP `get_recap` gain an additive
+    `goals.coverage.top_unmapped_projects` (`project_id` / `active_hours`,
+    same three, same order) next to the unchanged existing coverage fields.
+  Attribution semantics are untouched: shared per-goal hours stay
+  non-additive, the global buckets still count each contribution once, and
+  the disclosure makes zero model calls. `ccstory goal-history`'s weekly
+  bucket shape is unchanged.
 - Per-window **classification coverage** disclosure (#256): on a store
   where the content-classification tier rarely runs, `user_rule > llm
   cache/fresh > builtin_rule > fallback` used to read as one pipeline with

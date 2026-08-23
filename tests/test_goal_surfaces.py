@@ -110,6 +110,9 @@ def test_public_projection_converts_once_sanitizes_and_preserves_semantics():
             "shared_hours": 1.0,
             "unattributed_hours": 0.5,
             "unattributed_share": 0.1429,
+            "top_unmapped_projects": [
+                {"project_id": "unmatched", "active_hours": 0.5},
+            ],
         },
         "goals": [
             {
@@ -227,13 +230,253 @@ def test_markdown_json_and_terminal_share_projection_and_order():
     ) < markdown.index("## What you did")
     assert "Shared (non-additive)" in markdown
     assert "Activity/contribution evidence only; not goal progress" in markdown
-    assert "Unattributed:** 0.50h" in markdown
+    assert (
+        "**Unattributed:** 0.50h (14.3% of covered activity) "
+        "— activity in projects mapped to no goal." in markdown
+    )
+    assert "**Top unmapped projects:** `unmatched` 0.50h." in markdown
     assert markdown.index("Alpha outcome") < markdown.index("Beta outcome")
     assert "Goal activity" in card
     assert "Shared*" in card
-    assert "Unattributed  0.50h" in card
+    assert "unattributed: 0.50h (14%) — projects mapped to no goal" in card
+    assert "top unmapped: unmatched 0.5h" in card
     assert "Shared non-additive · activity, not progress/completion" in card
     assert card.index("Alpha outcome") < card.index("Beta outcome")
+
+
+def _unwrapped_card(card: str) -> str:
+    """Panel text with the border column dropped and wrapped lines rejoined.
+
+    The card is a fixed 72-column panel, so a long disclosure line legitimately
+    folds. Assertions about *what* it says should not depend on where Rich
+    chose to wrap it.
+    """
+    return " ".join(card.replace("│", " ").split())
+
+
+def _mostly_unmapped_evidence(order=None):
+    """The shipped #255 shape: 205.22h covered, ~16h attributed.
+
+    Two mapped projects carry 6.56 exclusive + 9.47 shared hours; the other
+    189.19h sit in projects mapped to no goal. `ccstory` and `stock` are tied
+    at rank three, so the canonical-id tie-break decides which one is listed.
+    """
+    context = parse_goal_context(
+        {
+            "schema_version": 1,
+            "goals": [
+                {
+                    "id": "goal-os",
+                    "title": "Personal OS",
+                    "projects": ["personal-os", "job"],
+                },
+                {"id": "goal-job", "title": "Job", "projects": ["job"]},
+            ],
+        },
+        aliases={},
+        source_metadata={"source_kind": "managed"},
+        source_fingerprint="sha256:mostly-unmapped",
+    )
+    hours = {
+        "personal-os": 6.56,
+        "job": 9.47,
+        "investment-note": 71.43,
+        "kol-collector": 60.0,
+        "stock": 24.88,
+        "ccstory": 24.88,
+        "info-collector": 8.0,
+    }
+    items = [
+        GoalAttributionInput(project, date(2026, 8, 12), value * 3600)
+        for project, value in hours.items()
+    ]
+    if order is not None:
+        items = [items[index] for index in order]
+    breakdown = attribute_goals(items, context)
+    assert breakdown is not None
+    return context, breakdown
+
+
+def test_top_unmapped_hint_is_bounded_ranked_and_permutation_stable():
+    context, breakdown = _mostly_unmapped_evidence()
+    projection = build_goal_projection(context, breakdown)
+    assert projection is not None
+
+    coverage = projection["coverage"]
+    assert coverage["covered_hours"] == 205.22
+    assert coverage["exclusive_hours"] == 6.56
+    assert coverage["shared_hours"] == 9.47
+    assert coverage["unattributed_hours"] == 189.19
+    assert coverage["unattributed_share"] == 0.9219
+    # Bounded at three, hours descending, canonical id breaks the 24.88h tie
+    # so `ccstory` makes the cut and `stock` does not.
+    assert coverage["top_unmapped_projects"] == [
+        {"project_id": "investment-note", "active_hours": 71.43},
+        {"project_id": "kol-collector", "active_hours": 60.0},
+        {"project_id": "ccstory", "active_hours": 24.88},
+    ]
+
+    for order in ([6, 5, 4, 3, 2, 1, 0], [3, 0, 6, 2, 5, 1, 4]):
+        permuted_context, permuted = _mostly_unmapped_evidence(order)
+        assert build_goal_projection(permuted_context, permuted) == projection
+
+
+def test_every_surface_discloses_the_unattributed_majority():
+    context, breakdown = _mostly_unmapped_evidence()
+    kwargs = _render_kwargs()
+
+    markdown = render_report(
+        **kwargs, goal_context=context, goal_breakdown=breakdown
+    )
+    payload = build_report_json(
+        **kwargs, goal_context=context, goal_breakdown=breakdown
+    )
+    console = Console(width=72, record=True, color_system=None)
+    console.print(
+        render_terminal_card(
+            since=SINCE,
+            until=UNTIL,
+            sessions=[],
+            rollups=kwargs["rollups"],
+            usage=kwargs["usage"],
+            goal_context=context,
+            goal_breakdown=breakdown,
+        )
+    )
+    card = console.export_text()
+
+    assert (
+        "**Unattributed:** 189.19h (92.2% of covered activity) "
+        "— activity in projects mapped to no goal." in markdown
+    )
+    assert (
+        "**Top unmapped projects:** `investment-note` 71.43h · "
+        "`kol-collector` 60.00h · `ccstory` 24.88h." in markdown
+    )
+    # The coverage line fits the 72-column card without folding.
+    assert "unattributed: 189.19h (92%) — projects mapped to no goal" in card
+    assert (
+        "top unmapped: investment-note 71.4h · kol-collector 60.0h · "
+        "ccstory 24.9h" in _unwrapped_card(card)
+    )
+    assert (
+        payload["goals"]["coverage"]["top_unmapped_projects"]
+        == build_goal_projection(context, breakdown)["coverage"][
+            "top_unmapped_projects"
+        ]
+    )
+    # The hint is a ranking, not a listing: the fourth unmapped project stays
+    # out of every human-facing surface and out of JSON.
+    for surface in (markdown, card, json.dumps(payload)):
+        assert "stock" not in surface
+        assert "info-collector" not in surface
+
+
+def test_full_attribution_still_shows_a_zero_coverage_line_without_a_hint():
+    context = parse_goal_context(
+        {
+            "schema_version": 1,
+            "goals": [
+                {"id": "goal-alpha", "title": "Alpha", "projects": ["alpha"]}
+            ],
+        },
+        aliases={},
+        source_metadata={"source_kind": "managed"},
+    )
+    breakdown = attribute_goals(
+        [GoalAttributionInput("alpha", date(2026, 7, 29), 3600)], context
+    )
+    assert breakdown is not None
+    kwargs = _render_kwargs()
+
+    projection = build_goal_projection(context, breakdown)
+    markdown = render_report(
+        **kwargs, goal_context=context, goal_breakdown=breakdown
+    )
+    console = Console(width=72, record=True, color_system=None)
+    console.print(
+        render_terminal_card(
+            since=SINCE,
+            until=UNTIL,
+            sessions=[],
+            rollups=kwargs["rollups"],
+            usage=kwargs["usage"],
+            goal_context=context,
+            goal_breakdown=breakdown,
+        )
+    )
+    card = console.export_text()
+
+    assert projection is not None
+    assert projection["coverage"]["unattributed_hours"] == 0.0
+    assert projection["coverage"]["top_unmapped_projects"] == []
+    # Zero is a fact worth printing: a missing line would be indistinguishable
+    # from a renderer that forgot the bucket.
+    assert (
+        "**Unattributed:** 0.00h (0.0% of covered activity) "
+        "— activity in projects mapped to no goal." in markdown
+    )
+    assert "unattributed: 0.00h (0%) — projects mapped to no goal" in card
+    assert "Top unmapped projects" not in markdown
+    assert "top unmapped" not in card
+
+
+def test_unmapped_hint_carries_leaf_identity_without_paths_or_sessions():
+    context = parse_goal_context(
+        {
+            "schema_version": 1,
+            "goals": [
+                {"id": "goal-alpha", "title": "Alpha", "projects": ["alpha"]}
+            ],
+        },
+        aliases={},
+        source_metadata={
+            "source_kind": "managed",
+            "path": "/Users/private/goal-source.toml",
+        },
+        source_fingerprint="sha256:leaf-only",
+    )
+    breakdown = attribute_goals(
+        [
+            GoalAttributionInput("alpha", date(2026, 7, 29), 3600),
+            GoalAttributionInput(
+                "-Users-privateowner-Side-project-investment-note",
+                date(2026, 7, 29),
+                7200,
+            ),
+        ],
+        context,
+    )
+    assert breakdown is not None
+    kwargs = _render_kwargs()
+
+    markdown = render_report(
+        **kwargs, goal_context=context, goal_breakdown=breakdown
+    )
+    payload = build_report_json(
+        **kwargs, goal_context=context, goal_breakdown=breakdown
+    )
+    console = Console(width=72, record=True, color_system=None)
+    console.print(
+        render_terminal_card(
+            since=SINCE,
+            until=UNTIL,
+            sessions=[],
+            rollups=kwargs["rollups"],
+            usage=kwargs["usage"],
+            goal_context=context,
+            goal_breakdown=breakdown,
+        )
+    )
+    card = console.export_text()
+
+    assert payload["goals"]["coverage"]["top_unmapped_projects"] == [
+        {"project_id": "investment-note", "active_hours": 2.0}
+    ]
+    for surface in (markdown, card, json.dumps(payload)):
+        assert "investment-note" in surface
+        assert "privateowner" not in surface
+        assert "Side-project" not in surface
 
 
 def test_absent_or_zero_goal_context_adds_no_section_or_json_key():

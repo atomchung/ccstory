@@ -300,14 +300,41 @@ class GoalContribution:
 
 
 @dataclass(frozen=True)
+class UnattributedProject:
+    """Active seconds in one canonical project that no effective goal claimed."""
+
+    project: str
+    contribution: float
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "project", _project(self.project, {}, "unattributed project")
+        )
+        object.__setattr__(
+            self,
+            "contribution",
+            _contribution(
+                self.contribution, "unattributed project contribution"
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class GoalBreakdown:
-    """Per-goal active seconds and additive global coverage buckets."""
+    """Per-goal active seconds and additive global coverage buckets.
+
+    ``unattributed_projects`` is the optional per-project evidence behind the
+    ``unattributed_contribution`` bucket, ordered by contribution descending
+    with a canonical-id tie-break. Callers that keep no per-project evidence
+    may leave it empty; when supplied it must reconcile to the bucket.
+    """
 
     goals: tuple[GoalContribution, ...]
     covered_contribution: float
     exclusive_contribution: float
     shared_contribution: float
     unattributed_contribution: float
+    unattributed_projects: tuple[UnattributedProject, ...] = ()
     contribution_unit: str = field(
         default=GOAL_CONTRIBUTION_UNIT, init=False
     )
@@ -330,11 +357,48 @@ class GoalBreakdown:
                 "global exclusive/shared/unattributed contribution must "
                 "reconcile to covered_contribution"
             )
+        unattributed_projects = tuple(self.unattributed_projects)
+        if not all(
+            isinstance(item, UnattributedProject)
+            for item in unattributed_projects
+        ):
+            raise GoalContextError(
+                "unattributed_projects must contain UnattributedProject values"
+            )
+        names = [item.project for item in unattributed_projects]
+        if len(names) != len(set(names)):
+            raise GoalContextError(
+                "unattributed_projects must not repeat a project"
+            )
+        if unattributed_projects and not math.isclose(
+            math.fsum(item.contribution for item in unattributed_projects),
+            self.unattributed_contribution,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            raise GoalContextError(
+                "unattributed_projects must reconcile to "
+                "unattributed_contribution"
+            )
         object.__setattr__(
             self, "goals", tuple(sorted(self.goals, key=lambda g: g.goal_id))
         )
+        object.__setattr__(
+            self,
+            "unattributed_projects",
+            tuple(
+                sorted(
+                    unattributed_projects,
+                    key=lambda item: (-item.contribution, item.project),
+                )
+            ),
+        )
 
     def to_dict(self) -> dict[str, Any]:
+        # Deliberately unchanged by `unattributed_projects` (#255): this is
+        # the versioned weekly goal-activity bucket shape, and the bounded
+        # unmapped-project hint belongs to the recap projection in
+        # `report.build_goal_projection()` instead.
         return {
             "contribution_unit": self.contribution_unit,
             "goals": [goal.to_dict() for goal in self.goals],
@@ -809,6 +873,7 @@ def attribute_goals(
     global_exclusive: list[float] = []
     global_shared: list[float] = []
     global_unattributed: list[float] = []
+    unattributed_by_project: dict[str, list[float]] = {}
 
     for effective_date, project, contribution in normalized:
         matches = [
@@ -819,6 +884,7 @@ def attribute_goals(
         ]
         if not matches:
             global_unattributed.append(contribution)
+            unattributed_by_project.setdefault(project, []).append(contribution)
             continue
         target = exclusive if len(matches) == 1 else shared
         (global_exclusive if len(matches) == 1 else global_shared).append(
@@ -843,7 +909,17 @@ def attribute_goals(
     )
     exclusive_total = math.fsum(global_exclusive)
     shared_total = math.fsum(global_shared)
+    # Keep the bucket total a single fsum over the same values as before, so
+    # adding per-project evidence cannot move an already-published number.
     unattributed_total = math.fsum(global_unattributed)
+    unattributed_projects = tuple(
+        UnattributedProject(project=project, contribution=total)
+        for project, total in (
+            (project, math.fsum(values))
+            for project, values in sorted(unattributed_by_project.items())
+        )
+        if total > 0
+    )
     return GoalBreakdown(
         goals=per_goal,
         covered_contribution=math.fsum(
@@ -852,6 +928,7 @@ def attribute_goals(
         exclusive_contribution=exclusive_total,
         shared_contribution=shared_total,
         unattributed_contribution=unattributed_total,
+        unattributed_projects=unattributed_projects,
     )
 
 

@@ -519,12 +519,17 @@ def test_series_reuses_existing_attribute_goals_once_per_bucket(monkeypatch):
 
 
 def test_goal_breakdown_fields_and_behavior_remain_byte_shape_compatible():
+    # `unattributed_projects` (#255) is in-memory evidence for the recap
+    # projection's bounded unmapped hint. It defaults to empty and stays out
+    # of `to_dict()` below, so this versioned weekly bucket shape is byte
+    # identical to what shipped.
     assert [field.name for field in dataclasses.fields(GoalBreakdown)] == [
         "goals",
         "covered_contribution",
         "exclusive_contribution",
         "shared_contribution",
         "unattributed_contribution",
+        "unattributed_projects",
         "contribution_unit",
         "per_goal_shared_semantics",
     ]
