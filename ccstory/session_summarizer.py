@@ -66,7 +66,7 @@ _LANGUAGE_ALIASES = {
 # stale and regenerated on the next `--llm-narrative` run. Keep this an int so
 # the comparison `stored < PROMPT_VERSION` is monotonic.
 PROMPT_VERSION = 3
-CACHE_SCHEMA_VERSION = 6
+CACHE_SCHEMA_VERSION = 7
 
 # Evidence identity is intentionally separate from ``PROMPT_VERSION``.  The
 # latter describes how prose is requested; this version describes which
@@ -835,6 +835,44 @@ def _migration_6_source_vocabulary(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migration_7_session_corrections(conn: sqlite3.Connection) -> None:
+    """Add ``session_corrections`` — durable user overrides for one physical
+    session's summary/category (#191 PR A: storage + pure resolution API).
+
+    Keyed by ``(session_id, field)`` where ``session_id`` is the *public*
+    physical-session id (see ``session_identity.public_session_id`` — the
+    same id ``provided`` rows and public output already use), never a
+    window-slice evidence id. ``field`` is a closed MVP enum (``summary`` /
+    ``category``) enforced in Python by ``ccstory.corrections``, not by a
+    SQLite CHECK constraint, so this migration only shapes storage.
+
+    ``status`` defaults to the literal ``'current'`` (duplicated from
+    ``corrections.STATUS_CURRENT`` rather than imported, to avoid a circular
+    import: ``ccstory.corrections`` depends on this module for
+    ``cache_session()``, not the other way around). Comparing a correction's
+    ``base_evidence_fingerprint`` against live evidence and flipping this
+    column to ``'evidence_changed'`` is explicitly out of scope here — that
+    integration is issue #191 PR B, gated on this migration but not part of
+    it. ``ccstory.corrections`` never regresses this column silently.
+    """
+    _migration_6_source_vocabulary(conn)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS session_corrections (
+            session_id                 TEXT NOT NULL,
+            field                      TEXT NOT NULL,
+            value                      TEXT NOT NULL,
+            created_at                 REAL NOT NULL,
+            updated_at                 REAL NOT NULL,
+            base_evidence_fingerprint  TEXT NOT NULL DEFAULT '',
+            status                     TEXT NOT NULL DEFAULT 'current',
+            note                       TEXT,
+            PRIMARY KEY (session_id, field)
+        )
+        """
+    )
+
+
 _MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_1_baseline,
     _migration_2_cache_fingerprints,
@@ -842,6 +880,7 @@ _MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_4_narrator_provenance,
     _migration_5_summary_evidence_identity,
     _migration_6_source_vocabulary,
+    _migration_7_session_corrections,
 )
 assert len(_MIGRATIONS) == CACHE_SCHEMA_VERSION
 
