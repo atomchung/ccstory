@@ -274,6 +274,36 @@ def test_module_and_console_version_match_canonical_full_parser():
     assert module.stdout.startswith("ccstory ")
 
 
+def test_cli_version_output_exposes_dev_marker_while_unreleased():
+    """Regression for issue #78: ``ccstory --version`` invoked straight out
+    of a source checkout (no ``pip install`` step -- ``_run`` launches
+    ``python -m ccstory`` from ``REPO_ROOT``, which is exactly how a
+    worktree build gets exercised) must report the same version string as
+    ``pyproject.toml``, dev marker included, so it can't be mistaken for a
+    tagged PyPI release.
+
+    Conditional on the current version being unreleased, so this stays a
+    no-op -- not a failure -- once a release PR ships a clean version
+    number. A tagged release artifact reporting a clean version is not
+    covered here: that depends on the build/publish pipeline producing
+    frozen distribution metadata, which is out of reach for a local
+    subprocess test.
+    """
+    pyproject = REPO_ROOT / "pyproject.toml"
+    with pyproject.open("rb") as handle:
+        canonical = tomllib.load(handle)["project"]["version"]
+    if ".dev" not in canonical:
+        pytest.skip(
+            "pyproject.toml is on a clean release version; no dev marker "
+            "to assert here (see issue #78)."
+        )
+
+    result = _run(["-m", "ccstory", "--version"])
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == f"ccstory {canonical}"
+
+
 @pytest.mark.parametrize(
     ("argv", "version_loaded"),
     [

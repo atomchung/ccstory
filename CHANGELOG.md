@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `main` now carries the post-release development version
+  `0.8.3.dev0` instead of the just-shipped `0.8.2`, so `ccstory --version`
+  on a source checkout or worktree install can no longer read identically
+  to the tagged `v0.8.2` PyPI artifact. A release PR converts this to a
+  clean version immediately before publishing; a follow-up PR advances
+  `main` to the next `.dev0` right after. (#78)
 - Refreshed the vendored LiteLLM pricing table. Adds `claude-mythos-5`,
   `claude-mythos-preview`, `gpt-5.6-cyber`, `gemini-3.7-flash`, and
   `gemini-3.1-flash-lite-image`; picks up price cuts for `gpt-5.6`,
