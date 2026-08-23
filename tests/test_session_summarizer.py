@@ -9,9 +9,13 @@ Focuses on what can be tested without invoking `claude -p`:
 
 from __future__ import annotations
 
+import contextvars
 import json
 import re
 import sqlite3
+import subprocess
+import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -22,6 +26,7 @@ from ccstory.session_summarizer import (
     _compact_batch_excerpt,
     _fallback_narrative,
     OVERALL_KEY,
+    cache_session,
     get,
     get_many,
     get_overall_narrative,
@@ -34,6 +39,23 @@ from ccstory.session_summarizer import (
 from ccstory.providers.claude import ClaudeCodeProvider
 
 from tests.conftest import _ts, make_assistant_msg, make_user_msg, write_jsonl
+
+# A self-contained worker for the real-subprocess concurrency test below.
+# Deliberately only imports the installed `ccstory` package (never `tests.*`)
+# so it needs no pytest sys.path setup to run under a fresh interpreter --
+# `python -c <this>` is spawned directly via `sys.executable`, so it always
+# runs in the same environment/venv as the test itself.
+_CACHE_SESSION_WORKER_SCRIPT = """
+import sys
+from pathlib import Path
+
+from ccstory import session_summarizer as ss
+
+ss.DB_PATH = Path(sys.argv[1])
+session_id, summary = sys.argv[2], sys.argv[3]
+with ss.cache_session():
+    ss.upsert(session_id, summary, "generated")
+"""
 
 
 class TestSqliteRoundtrip:
@@ -1221,6 +1243,432 @@ class TestCacheSchemaMigrations:
             # must survive byte-for-byte.
             "c1": "cloud:mybranch",
         }
+
+
+@pytest.fixture
+def connect_counter(monkeypatch: pytest.MonkeyPatch):
+    """Counts real ``_connect()`` calls, i.e. actual ``sqlite3.connect()``
+    opens -- the cost #175 PR A's scoping is meant to reduce. Schema
+    verification itself was already deduped per-process by #185's stamp
+    check (see ``test_unchanged_cache_verifies_schema_once_per_process``
+    above); this isolates the separate, remaining cost of one OS-level file
+    open per cache call.
+    """
+    counter = [0]
+    original = ss._connect
+
+    def counting_connect():
+        counter[0] += 1
+        return original()
+
+    monkeypatch.setattr(ss, "_connect", counting_connect)
+    return counter
+
+
+class TestCacheSession:
+    """Tests for the scoped-connection API (#175 PR A).
+
+    ``cache_session()`` lets several cache calls in a row share one
+    verified/migrated connection instead of one open per call; a plain
+    direct call outside any ``with cache_session():`` block keeps opening
+    (and closing) its own, unchanged from before this API existed. See the
+    module comment above ``CacheSession`` in ``session_summarizer.py`` for
+    the full design rationale.
+    """
+
+    # --- the core reuse contract --------------------------------------
+
+    def test_standalone_calls_each_open_their_own_connection(
+        self, tmp_home: Path, connect_counter,
+    ):
+        """Baseline, unchanged from before #175: no surrounding scope means
+        every call still gets its own short-lived connection."""
+        upsert("a", "summary a", "generated")
+        upsert("b", "summary b", "generated")
+        get("a")
+        get_many(["a", "b"])
+        assert connect_counter[0] == 4
+
+    def test_nested_calls_inside_a_scope_share_one_connection(
+        self, tmp_home: Path, connect_counter,
+    ):
+        """The same four calls as above, now wrapped in one scope: the
+        defining before/after evidence for this PR's operation-count claim.
+        """
+        with cache_session():
+            upsert("a", "summary a", "generated")
+            upsert("b", "summary b", "generated")
+            get("a")
+            get_many(["a", "b"])
+        assert connect_counter[0] == 1
+        # And the data is identical either way -- fewer connections, same
+        # observable result.
+        assert get("a").summary == "summary a"
+        assert get("b").summary == "summary b"
+
+    def test_backfill_scale_nested_calls_share_one_connection(
+        self, tmp_home: Path, connect_counter,
+    ):
+        """A larger echo of #175's original motivating scenario -- a
+        100-session backfill loop, each session a separate `upsert()` call.
+        Before this API, that was 100 connection opens (one per call, as
+        the standalone-calls test above shows for N=4); wrapped in one
+        scope, it is 1 regardless of N. PR B (not this PR) is what will
+        wire this scope around the real `build_recap()` backfill loop --
+        this test proves the mechanism it will rely on.
+        """
+        with cache_session():
+            for i in range(100):
+                upsert(f"bulk-{i}", f"summary {i}", "generated")
+        assert connect_counter[0] == 1
+        assert get("bulk-0").summary == "summary 0"
+        assert get("bulk-99").summary == "summary 99"
+
+    def test_triple_nested_scopes_still_share_one_connection(
+        self, tmp_home: Path, connect_counter,
+    ):
+        with cache_session():
+            with cache_session():
+                with cache_session() as innermost:
+                    innermost.execute("SELECT 1")
+        assert connect_counter[0] == 1
+
+    def test_repeated_sequential_scopes_do_not_leak_between_calls(
+        self, tmp_home: Path, connect_counter,
+    ):
+        """Simulates the MCP server handling several tool calls in a row in
+        one process: each call's scope is independent -- nothing "active"
+        survives from one call into the next.
+        """
+        for i in range(3):
+            with cache_session():
+                upsert(f"req-{i}", f"summary {i}", "generated")
+            assert ss._active_session.get() is None
+        assert connect_counter[0] == 3
+        for i in range(3):
+            assert get(f"req-{i}").summary == f"summary {i}"
+
+    # --- reused across a real narrator-call boundary ---------------------
+
+    def test_write_leaves_no_open_transaction_for_a_subsequent_slow_call(
+        self, tmp_home: Path,
+    ):
+        """A shared connection may still be open while a narrator (LLM)
+        subprocess, `git`, or network call runs between two nested cache
+        calls in the same outer scope -- that alone never blocks another
+        process. What must never happen is a *write transaction* left open
+        across such a call. Every write in this module commits immediately
+        after its own `execute()`, so the connection is always
+        transaction-free the moment control returns to the caller, shared
+        or not.
+        """
+        with cache_session() as conn:
+            upsert("sess", "summary", "generated")
+            # The point, in real callers, right after a write returns and
+            # before a narrator subprocess call would run (see
+            # `synthesize_overall_for_period()`, which does exactly this).
+            assert conn.in_transaction is False
+
+    def test_synthesize_overall_reuses_the_outer_scope_across_the_narrator_call(
+        self, tmp_home: Path, monkeypatch: pytest.MonkeyPatch, connect_counter,
+    ):
+        """`synthesize_overall_for_period()` itself opens two cache scopes
+        with a narrator subprocess call in between (a read to check the
+        cache, then a write to store the result). Wrapped in one outer
+        scope, both nested calls reuse the same connection instead of each
+        opening their own -- proving the seam works through a real
+        production function, not just synthetic calls.
+        """
+        class Result:
+            returncode = 0
+            stdout = "generated narrative"
+            stderr = ""
+
+        monkeypatch.setattr(ss, "claude_bin_available", lambda: True)
+        monkeypatch.setattr(ss, "run_claude_p", lambda *_a: Result())
+
+        with cache_session():
+            narrative = synthesize_overall_for_period(
+                period_key="2026-05",
+                category_hours=[("coding", 2.0)],
+                sessions_by_category={"coding": [("sess-a", "did A")]},
+            )
+        assert narrative == "generated narrative"
+        assert connect_counter[0] == 1
+
+    # --- safety guards: DB_PATH / process / thread ----------------------
+
+    def test_db_path_change_mid_scope_never_reuses_the_old_connection(
+        self, tmp_home: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A host (or a test) that repoints DB_PATH between calls must
+        never keep writing through a session opened against the old path.
+        """
+        old_db = ss.DB_PATH
+        new_db = tmp_home / ".ccstory" / "cache2.db"
+        with cache_session():
+            upsert("old-path-sess", "before", "generated")
+            monkeypatch.setattr(ss, "DB_PATH", new_db)
+            upsert("new-path-sess", "after", "generated")
+            assert get("new-path-sess").summary == "after"
+
+        assert new_db.exists()
+        monkeypatch.setattr(ss, "DB_PATH", old_db)
+        assert get("old-path-sess") is not None
+        # The new-path row landed only in the new file.
+        assert get("new-path-sess") is None
+
+    def test_pid_mismatch_is_never_reused(
+        self, tmp_home: Path, monkeypatch: pytest.MonkeyPatch, connect_counter,
+    ):
+        """Drives the same guard a forked child process would hit: the
+        *same* CacheSession object (same connection) sitting in a copied
+        context-local, but created by a pid that is no longer the current
+        one. A real fork is POSIX-only (this suite also runs on Windows,
+        see .github/workflows/test.yml) and timing-dependent to exercise
+        deterministically, so this drives the guard condition directly
+        instead.
+        """
+        with cache_session():
+            upsert("parent-sess", "from parent pid", "generated")
+            real_getpid = ss.os.getpid()
+            monkeypatch.setattr(ss.os, "getpid", lambda: real_getpid + 1)
+            upsert("child-sess", "from other pid", "generated")
+        # Outer scope's own connect (1) + the pid-mismatched nested call's
+        # own fresh connect, since it correctly refused to reuse (1) = 2.
+        # (Verification reads below are standalone calls outside any scope
+        # and intentionally excluded from this count.)
+        assert connect_counter[0] == 2
+
+        assert get("parent-sess") is not None
+        assert get("child-sess") is not None
+
+    def test_plain_thread_never_sees_the_parent_threads_session(
+        self, tmp_home: Path, connect_counter,
+    ):
+        """A raw ``threading.Thread`` starts with a fresh context by
+        default (unlike an async task, which copies one) -- so this proves
+        the observable end-to-end behavior: a new thread transparently gets
+        its own connection and works correctly, never touching the parent
+        thread's.
+        """
+        with cache_session():
+            upsert("main-thread-sess", "from main", "generated")
+
+            def _in_thread():
+                upsert("other-thread-sess", "from thread", "generated")
+
+            t = threading.Thread(target=_in_thread)
+            t.start()
+            t.join(timeout=10)
+        # Outer scope's own connect (1) + the new thread's own fresh
+        # connect, since a plain Thread starts with no inherited context to
+        # reuse (1) = 2. (Verification reads below are standalone calls
+        # outside any scope and intentionally excluded from this count.)
+        assert connect_counter[0] == 2
+
+        assert get("main-thread-sess") is not None
+        other = get("other-thread-sess")
+        assert other is not None
+        assert other.summary == "from thread"
+
+    def test_context_copied_into_a_thread_still_refuses_cross_thread_reuse(
+        self, tmp_home: Path, connect_counter,
+    ):
+        """Some hosts (e.g. anyio's to-thread offloading, which an MCP
+        server may use to run a sync tool handler) explicitly copy the
+        calling context into a worker thread via ``contextvars.
+        copy_context().run(...)`` -- unlike a plain ``threading.Thread``
+        (see the sibling test above), the CacheSession reference itself
+        *does* cross into the new thread this way. The connection it wraps
+        must still never be touched there: sqlite3.Connection is not
+        thread-safe, and silently reusing it could corrupt the cache. This
+        is what the ``thread_id`` field on CacheSession specifically
+        guards against.
+        """
+        result = {}
+        with cache_session():
+            upsert("main-sess", "from main", "generated")
+            main_thread_id = threading.get_ident()
+            ctx = contextvars.copy_context()
+
+            def _in_copied_context_thread():
+                propagated = ss._active_session.get()
+                # Confirms the session *object* really did propagate into
+                # this thread (a plain Thread would not) -- otherwise the
+                # rest of this test would not be exercising the guard.
+                result["session_propagated"] = (
+                    propagated is not None
+                    and propagated.thread_id == main_thread_id
+                    and threading.get_ident() != main_thread_id
+                )
+                upsert("thread-sess", "from copied-context thread", "generated")
+
+            t = threading.Thread(target=lambda: ctx.run(_in_copied_context_thread))
+            t.start()
+            t.join(timeout=10)
+
+        assert result["session_propagated"] is True
+        # Main scope's upsert (1 connect) + the copied-context thread's own
+        # fresh connect (its threading.get_ident() differs from the one
+        # recorded on the propagated session, so it is never reused) = 2.
+        # (Verification read below is a standalone call outside any scope
+        # and intentionally excluded from this count.)
+        assert connect_counter[0] == 2
+
+        thread_row = get("thread-sess")
+        assert thread_row is not None
+        assert thread_row.summary == "from copied-context thread"
+
+    def test_two_concurrent_processes_each_get_their_own_connection(
+        self, tmp_home: Path,
+    ):
+        """A real second OS process (not a fork -- genuinely no shared
+        memory, no shared context-local) must never be blocked or
+        corrupted by the first. Pre-migrating isolates this to "two
+        processes writing through cache_session() at once"; first-run
+        migration-lock behavior is already covered by
+        ``test_locked_db_is_not_misreported_as_corruption``.
+        """
+        ss._connect().close()
+        db_path = ss.DB_PATH
+
+        procs = [
+            subprocess.Popen(
+                [
+                    sys.executable, "-c", _CACHE_SESSION_WORKER_SCRIPT,
+                    str(db_path), f"sess-{i}", f"summary {i}",
+                ],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            for i in range(2)
+        ]
+        for i, p in enumerate(procs):
+            _out, err = p.communicate(timeout=30)
+            assert p.returncode == 0, f"worker {i} failed:\n{err}"
+
+        assert get("sess-0") is not None
+        assert get("sess-0").summary == "summary 0"
+        assert get("sess-1") is not None
+        assert get("sess-1").summary == "summary 1"
+
+    # --- exception / rollback safety -------------------------------------
+
+    def test_exception_in_nested_scope_rolls_back_without_closing_shared_connection(
+        self, tmp_home: Path,
+    ):
+        with cache_session() as outer_conn:
+            upsert("committed-before", "should survive", "generated")
+
+            with pytest.raises(sqlite3.IntegrityError):
+                with cache_session() as inner_conn:
+                    # Two inserts under the same primary key: the second
+                    # raises mid-transaction, leaving a partial write that
+                    # the nested scope must roll back on its way out --
+                    # otherwise it would linger on the connection the outer
+                    # scope still owns and later reuses.
+                    inner_conn.execute(
+                        "INSERT INTO session_summaries "
+                        "(session_id, summary, source, project, created_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        ("dup", "first", "generated", None, 1.0),
+                    )
+                    inner_conn.execute(
+                        "INSERT INTO session_summaries "
+                        "(session_id, summary, source, project, created_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        ("dup", "second", "generated", None, 2.0),
+                    )
+
+            # The failed insert never landed (proving the rollback actually
+            # ran), and the shared connection is still usable afterward --
+            # the inner failure did not tear down the outer scope.
+            assert outer_conn.execute(
+                "SELECT COUNT(*) FROM session_summaries WHERE session_id = 'dup'"
+            ).fetchone()[0] == 0
+            upsert("committed-after", "also survives", "generated")
+
+        assert get("committed-before").summary == "should survive"
+        assert get("committed-after").summary == "also survives"
+        assert get("dup") is None
+
+    def test_migration_failure_rolls_back_and_leaves_no_active_session(
+        self, tmp_home: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        raw = sqlite3.connect(str(ss.DB_PATH))
+        raw.execute("BEGIN")
+        ss._migration_1_baseline(raw)
+        raw.execute("PRAGMA user_version = 1")
+        raw.commit()
+        raw.close()
+
+        def _broken(conn: sqlite3.Connection) -> None:
+            conn.execute("CREATE TABLE should_roll_back (id INTEGER)")
+            raise RuntimeError("migration failed")
+
+        monkeypatch.setattr(
+            ss, "_MIGRATIONS", (ss._migration_1_baseline, _broken),
+        )
+        with pytest.raises(RuntimeError, match="migration failed"):
+            with cache_session():
+                pass
+
+        # No broken session was left registered as "active" for the next
+        # caller to (unsafely) inherit.
+        assert ss._active_session.get() is None
+        check = sqlite3.connect(str(ss.DB_PATH))
+        try:
+            assert check.execute("PRAGMA user_version").fetchone()[0] == 1
+            tables = {
+                row[0] for row in check.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            assert "should_roll_back" not in tables
+        finally:
+            check.close()
+
+    # --- existing corruption/lock/newer-schema messages, unchanged -------
+
+    def test_corrupt_db_message_preserved_through_cache_session(
+        self, tmp_home: Path,
+    ):
+        ss.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ss.DB_PATH.write_bytes(b"definitely not a sqlite database" * 4)
+
+        with pytest.raises(ss.CacheUnavailable) as exc:
+            with cache_session():
+                pass
+        msg = str(exc.value)
+        assert "corrupted" in msg
+        assert f"rm {ss.DB_PATH}" in msg
+
+    def test_locked_db_message_preserved_through_cache_session(
+        self, tmp_home: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        def _locked(_conn: sqlite3.Connection) -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(ss, "_MIGRATIONS", (_locked,))
+        with pytest.raises(ss.CacheUnavailable) as exc:
+            with cache_session():
+                pass
+        msg = str(exc.value)
+        assert "locked" in msg
+        assert "retry" in msg
+        assert "rm " not in msg
+
+    def test_newer_schema_message_preserved_through_cache_session(
+        self, tmp_home: Path,
+    ):
+        raw = sqlite3.connect(str(ss.DB_PATH))
+        raw.execute(f"PRAGMA user_version = {ss.CACHE_SCHEMA_VERSION + 1}")
+        raw.commit()
+        raw.close()
+
+        with pytest.raises(ss.CacheUnavailable, match="newer ccstory"):
+            with cache_session():
+                pass
 
 
 class TestLanguageDirective:
