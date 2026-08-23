@@ -81,6 +81,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   candidate past the coarse per-file mtime filter paid for one regardless of
   outcome. `SessionStat`, project/worktree attribution, native titles, and
   usage for sessions that are ultimately included are unchanged. (#180)
+- Internal: `session_summarizer` cache calls can now share one verified/
+  migrated SQLite connection across a scope (`with cache_session():`)
+  instead of opening a fresh connection per call, cutting a 100-call
+  sequence (e.g. a backfill loop) from 100 connection opens to 1. A direct
+  call made outside any scope keeps opening its own short-lived connection,
+  unchanged from before. The scope is process/thread-bound and never
+  reused across a `DB_PATH` change, a fork, or another thread; an exception
+  rolls back before the scope's connection is reused or closed. Corrupt,
+  locked, and newer-schema recovery messages are unchanged. Not yet wired
+  into `build_recap()`'s pipeline — this lands the scoping primitive and
+  its safety guarantees; wiring it through recap's summary/classification/
+  aggregate/comparison phases is a separate follow-up. (#175)
 
 ### Fixed
 

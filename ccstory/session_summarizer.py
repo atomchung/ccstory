@@ -11,6 +11,7 @@ Extracted from ting/personal_os/core/session_summarizer.py. Simplified for v1:
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import logging
@@ -19,6 +20,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import threading
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -947,6 +949,126 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+# --- Scoped connection reuse (#175) ------------------------------------------
+#
+# `_connect()` above is the verified/migrated connection primitive: every
+# call opens a fresh `sqlite3.Connection` — cheap once #185's stamp check
+# skips re-verification, but still one OS-level file open per call. A caller
+# that makes several cache calls in a row (a batch backfill, or the whole
+# `build_recap()` pipeline) can instead open ONE scope and let every nested
+# call reuse it:
+#
+#     with cache_session() as cache:
+#         upsert(...)
+#         get_many(...)
+#
+# Every module-level cache function below already opens its own
+# `cache_session()` internally, so a plain direct call — `upsert(...)` with
+# no surrounding `with` — keeps working exactly as before this existed: its
+# own scope has nothing to reuse, so it opens and closes a short-lived
+# connection, one call in, one call out.
+#
+# This is deliberately NOT a process-global singleton — ccstory runs inside
+# long-lived MCP/library hosts, and a connection cached at module scope would
+# go stale the moment `cache.db` changes underneath it (tests routinely
+# monkeypatch `DB_PATH` between calls), or unsafely cross a thread/process
+# boundary a plain global cannot see. The active session instead lives in a
+# context-local, and every reuse attempt re-checks it is still safe: same
+# `DB_PATH`, same process, same thread. Any mismatch — including a forked
+# child process, which copies the parent's context-local verbatim but must
+# never share its open file descriptor — is treated as "no active session,"
+# and the caller transparently falls back to its own scope.
+@dataclass(frozen=True)
+class CacheSession:
+    """One verified/migrated connection, scoped to the process/thread/
+    `DB_PATH` that opened it.
+
+    Never obtained directly — `cache_session()` is the only supported way
+    to create or reuse one; nothing outside this module should construct
+    this class or read `.conn` off it.
+    """
+
+    conn: sqlite3.Connection
+    db_path: Path
+    pid: int
+    thread_id: int
+
+
+_active_session: "contextvars.ContextVar[CacheSession | None]" = (
+    contextvars.ContextVar("_ccstory_cache_session", default=None)
+)
+
+
+def _reusable_active_session() -> CacheSession | None:
+    """The active `CacheSession`, if one exists and is safe to reuse here.
+
+    "Safe" means all three of `DB_PATH`, process, and thread still match
+    what was true when the session was opened. `sqlite3.Connection` objects
+    are not safe to share across threads or processes, and a session bound
+    to a `DB_PATH` that has since changed would silently keep writing to
+    the wrong file — either mismatch means treat this as "no active
+    session" and let the caller open its own scope instead.
+    """
+    session = _active_session.get()
+    if session is None:
+        return None
+    if (
+        session.db_path != DB_PATH
+        or session.pid != os.getpid()
+        or session.thread_id != threading.get_ident()
+    ):
+        return None
+    return session
+
+
+@contextmanager
+def cache_session():
+    """Scope a block of cache calls to one shared verified/migrated
+    connection; see the module comment above for the full rationale.
+
+    Nesting is safe and cheap: an inner `cache_session()` call that matches
+    the outer one's `DB_PATH`/process/thread reuses its connection and never
+    closes it — only the outermost scope, on exit, actually does. An
+    exception inside any scope (inner or outer) rolls back the connection
+    first, so a partial statement from a failed nested call never lingers
+    for the next call to trip over; the outer scope alone also closes the
+    connection afterward.
+
+    A shared connection may legitimately still be open while a slow
+    narrator (LLM) subprocess, `git`, or network call runs between two
+    nested cache calls in the same flow — that alone never blocks another
+    process. What actually matters, and is unaffected by sharing the
+    connection, is that no *write transaction* is left open across such a
+    call: every write in this module commits immediately after its own
+    `execute()`, nested or not.
+    """
+    outer = _reusable_active_session()
+    if outer is not None:
+        try:
+            yield outer.conn
+        except BaseException:
+            outer.conn.rollback()
+            raise
+        return
+
+    conn = _connect()
+    session = CacheSession(
+        conn=conn,
+        db_path=DB_PATH,
+        pid=os.getpid(),
+        thread_id=threading.get_ident(),
+    )
+    token = _active_session.set(session)
+    try:
+        yield conn
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        _active_session.reset(token)
+        conn.close()
+
+
 def _cache_fingerprint(family: str, *parts: str) -> str:
     """Stable SHA-256 over the exact inputs that produced one cache family."""
     payload = json.dumps(
@@ -988,8 +1110,7 @@ def upsert(
         evidence_fingerprint = LEGACY_UNKNOWN_EVIDENCE
     if source == SOURCE_GENERATED and not observed_evidence_fingerprint:
         observed_evidence_fingerprint = evidence_fingerprint
-    conn = _connect()
-    try:
+    with cache_session() as conn:
         conn.execute(
             """INSERT INTO session_summaries
                (session_id, summary, source, project, created_at, prompt_version,
@@ -1016,13 +1137,10 @@ def upsert(
              observed_evidence_fingerprint, SOURCE_PROVIDED, SOURCE_PROVIDED),
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def get(session_id: str) -> SessionSummary | None:
-    conn = _connect()
-    try:
+    with cache_session() as conn:
         row = conn.execute(
             """SELECT session_id, summary, source, project, created_at,
                       prompt_version, narrator_provider, narrator_model,
@@ -1032,15 +1150,12 @@ def get(session_id: str) -> SessionSummary | None:
             (session_id,),
         ).fetchone()
         return SessionSummary(*row) if row else None
-    finally:
-        conn.close()
 
 
 def get_many(session_ids: list[str]) -> dict[str, SessionSummary]:
     if not session_ids:
         return {}
-    conn = _connect()
-    try:
+    with cache_session() as conn:
         placeholders = ",".join("?" for _ in session_ids)
         rows = conn.execute(
             f"""SELECT session_id, summary, source, project, created_at,
@@ -1051,8 +1166,6 @@ def get_many(session_ids: list[str]) -> dict[str, SessionSummary]:
             session_ids,
         ).fetchall()
         return {r[0]: SessionSummary(*r) for r in rows}
-    finally:
-        conn.close()
 
 
 def recent_auto_timestamps(limit: int = 60) -> list[float]:
@@ -1061,16 +1174,13 @@ def recent_auto_timestamps(limit: int = 60) -> list[float]:
     Retained as a cache-inspection helper for callers; batch writes mean these
     row timestamps are not a reliable measure of narrator-call latency.
     """
-    conn = _connect()
-    try:
+    with cache_session() as conn:
         rows = conn.execute(
             """SELECT created_at FROM session_summaries
                WHERE source = ?
                ORDER BY created_at DESC LIMIT ?""",
             (SOURCE_GENERATED, limit),
         ).fetchall()
-    finally:
-        conn.close()
     return sorted(r[0] for r in rows)
 
 
@@ -1091,8 +1201,7 @@ def _record_observed_evidence(observations: dict[str, str]) -> None:
     """
     if not observations:
         return
-    conn = _connect()
-    try:
+    with cache_session() as conn:
         conn.executemany(
             """UPDATE session_summaries
                SET observed_evidence_fingerprint = ?
@@ -1103,8 +1212,6 @@ def _record_observed_evidence(observations: dict[str, str]) -> None:
             ],
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def resolve_transcript_path(sess) -> Path | None:
@@ -2383,8 +2490,7 @@ def synthesize_overall_for_period(
         _sampling_policy_fingerprint(plan),
     )
 
-    conn = _connect()
-    try:
+    with cache_session() as conn:
         cur = conn.execute(
             "SELECT summary, session_ids, input_fingerprint "
             "FROM period_aggregates "
@@ -2399,8 +2505,6 @@ def synthesize_overall_for_period(
             and cur[2] == input_fingerprint
         ):
             return cur[0]
-    finally:
-        conn.close()
 
     if not llm_available():
         return None
@@ -2412,8 +2516,7 @@ def synthesize_overall_for_period(
     if len(narrative) < 10:
         return None
 
-    conn = _connect()
-    try:
+    with cache_session() as conn:
         conn.execute(
             """INSERT OR REPLACE INTO period_aggregates
                (period_key, category, summary, session_ids, created_at,
@@ -2424,8 +2527,6 @@ def synthesize_overall_for_period(
              call.provider, call.model),
         )
         conn.commit()
-    finally:
-        conn.close()
     return narrative
 
 
@@ -2505,8 +2606,7 @@ def synthesize_category_for_period(
         _sampling_policy_fingerprint(plan),
     )
 
-    conn = _connect()
-    try:
+    with cache_session() as conn:
         cur = conn.execute(
             "SELECT summary, session_ids, input_fingerprint "
             "FROM period_aggregates "
@@ -2521,8 +2621,6 @@ def synthesize_category_for_period(
             and cur[2] == input_fingerprint
         ):
             return cur[0]
-    finally:
-        conn.close()
 
     if not llm_available():
         return None
@@ -2534,8 +2632,7 @@ def synthesize_category_for_period(
     if len(narrative) < 10:
         return None
 
-    conn = _connect()
-    try:
+    with cache_session() as conn:
         conn.execute(
             """INSERT OR REPLACE INTO period_aggregates
                (period_key, category, summary, session_ids, created_at,
@@ -2546,31 +2643,25 @@ def synthesize_category_for_period(
              call.provider, call.model),
         )
         conn.commit()
-    finally:
-        conn.close()
     return narrative
 
 
 def get_overall_narrative(period_key: str) -> str | None:
     """Return cached overall narrative for a period, if any."""
-    conn = _connect()
-    try:
+    with cache_session() as conn:
         row = conn.execute(
             "SELECT summary FROM period_aggregates "
             "WHERE period_key = ? AND category = ?",
             (period_key, OVERALL_KEY),
         ).fetchone()
         return row[0] if row else None
-    finally:
-        conn.close()
 
 
 def get_period_narrative_provenance(
     period_key: str, category: str = OVERALL_KEY,
 ) -> dict[str, str] | None:
     """Return recorded provider/model for one cached period narrative."""
-    conn = _connect()
-    try:
+    with cache_session() as conn:
         row = conn.execute(
             "SELECT narrator_provider, narrator_model FROM period_aggregates "
             "WHERE period_key = ? AND category = ?",
@@ -2579,16 +2670,13 @@ def get_period_narrative_provenance(
         if not row or not row[0] or not row[1]:
             return None
         return {"provider": row[0], "model": row[1]}
-    finally:
-        conn.close()
 
 
 def get_comparison_narrative_provenance(
     current_key: str, previous_key: str,
 ) -> dict[str, str] | None:
     """Return recorded provider/model for one cached comparison narrative."""
-    conn = _connect()
-    try:
+    with cache_session() as conn:
         row = conn.execute(
             "SELECT narrator_provider, narrator_model FROM comparison_narratives "
             "WHERE current_key = ? AND previous_key = ?",
@@ -2597,8 +2685,6 @@ def get_comparison_narrative_provenance(
         if not row or not row[0] or not row[1]:
             return None
         return {"provider": row[0], "model": row[1]}
-    finally:
-        conn.close()
 
 
 def invalidate_period_aggregates(period_key: str | None = None) -> int:
@@ -2608,8 +2694,7 @@ def invalidate_period_aggregates(period_key: str | None = None) -> int:
     the number of rows deleted. Callers: rule changes (any bucket assignment
     shift invalidates the prior aggregate prose), `--refresh`.
     """
-    conn = _connect()
-    try:
+    with cache_session() as conn:
         if period_key is None:
             cur = conn.execute("DELETE FROM period_aggregates")
         else:
@@ -2620,8 +2705,6 @@ def invalidate_period_aggregates(period_key: str | None = None) -> int:
         deleted = cur.rowcount or 0
         conn.commit()
         return deleted
-    finally:
-        conn.close()
 
 
 def invalidate_content_buckets(session_ids: list[str] | None = None) -> int:
@@ -2631,8 +2714,7 @@ def invalidate_content_buckets(session_ids: list[str] | None = None) -> int:
     Returns the number of rows deleted. Callers: `--refresh` (scoped to the
     sessions in the current window) and `--refresh-all`.
     """
-    conn = _connect()
-    try:
+    with cache_session() as conn:
         if session_ids is None:
             cur = conn.execute("DELETE FROM session_content_buckets")
         elif not session_ids:
@@ -2647,8 +2729,6 @@ def invalidate_content_buckets(session_ids: list[str] | None = None) -> int:
         deleted = cur.rowcount or 0
         conn.commit()
         return deleted
-    finally:
-        conn.close()
 
 
 def invalidate_comparison_narratives() -> int:
@@ -2656,14 +2736,11 @@ def invalidate_comparison_narratives() -> int:
     written against the old bucket assignment, so a rule change makes it
     stale even if the underlying session ids didn't move.
     """
-    conn = _connect()
-    try:
+    with cache_session() as conn:
         cur = conn.execute("DELETE FROM comparison_narratives")
         deleted = cur.rowcount or 0
         conn.commit()
         return deleted
-    finally:
-        conn.close()
 
 
 _COMPARISON_PROMPT = """{language_directive}
@@ -2807,8 +2884,7 @@ def synthesize_comparison(
         _sampling_policy_fingerprint(previous_plan),
     )
 
-    conn = _connect()
-    try:
+    with cache_session() as conn:
         cur = conn.execute(
             "SELECT narrative, signature, input_fingerprint "
             "FROM comparison_narratives "
@@ -2822,8 +2898,6 @@ def synthesize_comparison(
             and cur[2] == input_fingerprint
         ):
             return cur[0]
-    finally:
-        conn.close()
 
     if not llm_available():
         return None
@@ -2835,8 +2909,7 @@ def synthesize_comparison(
     if len(narrative) < 10:
         return None
 
-    conn = _connect()
-    try:
+    with cache_session() as conn:
         conn.execute(
             """INSERT OR REPLACE INTO comparison_narratives
                (current_key, previous_key, signature, narrative, created_at,
@@ -2846,8 +2919,6 @@ def synthesize_comparison(
              input_fingerprint, call.provider, call.model),
         )
         conn.commit()
-    finally:
-        conn.close()
     return narrative
 
 
@@ -2961,8 +3032,7 @@ def _classify_cache_get_many(
     if not session_ids:
         return {}
     fingerprint = input_fingerprint or _content_classification_fingerprint()
-    conn = _connect()
-    try:
+    with cache_session() as conn:
         placeholders = ",".join("?" for _ in session_ids)
         rows = conn.execute(
             f"SELECT session_id, bucket FROM session_content_buckets "
@@ -2971,8 +3041,6 @@ def _classify_cache_get_many(
             [*session_ids, fingerprint],
         ).fetchall()
         return {sid: bucket for sid, bucket in rows}
-    finally:
-        conn.close()
 
 
 def _classify_cache_upsert_many(
@@ -2982,8 +3050,7 @@ def _classify_cache_upsert_many(
     if not items:
         return
     fingerprint = input_fingerprint or _content_classification_fingerprint()
-    conn = _connect()
-    try:
+    with cache_session() as conn:
         now = time.time()
         conn.executemany(
             """INSERT OR REPLACE INTO session_content_buckets
@@ -2992,8 +3059,6 @@ def _classify_cache_upsert_many(
             [(sid, b, now, fingerprint) for sid, b in items.items()],
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def _parse_classification_lines(text: str) -> dict[str, str]:
