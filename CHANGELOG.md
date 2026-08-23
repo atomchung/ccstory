@@ -121,6 +121,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   into `build_recap()`'s pipeline — this lands the scoping primitive and
   its safety guarantees; wiring it through recap's summary/classification/
   aggregate/comparison phases is a separate follow-up. (#175)
+- Internal: `ccstory/cli.py` no longer imports every subcommand's
+  dependencies at module load. Each handler (`category`, `goal`,
+  `goal-history`, `project`, `init`, `mcp`, and the default recap flow) now
+  imports only the modules it actually runs. Previously, dispatching to any
+  subcommand — including light ones — imported the narrator cache
+  (`session_summarizer`), the full recap/report pipeline, and the provider
+  registry regardless of need. `ccstory category list` and `ccstory mcp
+  --help` no longer import `session_summarizer`, `mcp_server`, `providers`,
+  `recap`, or `report` at all; `goal list`, `goal-history`, and `init
+  --skip` see similar, narrower reductions. No command's output, exit code,
+  or argument parsing changed. (#177)
 
 ### Fixed
 

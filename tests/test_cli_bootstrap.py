@@ -82,6 +82,32 @@ print(
 raise SystemExit(code)
 """
 
+_SUBCOMMAND_IMPORT_AUDIT = r"""
+import json
+import sys
+
+from ccstory.bootstrap import main
+
+argv = json.loads(sys.argv[1])
+
+try:
+    result = main(argv)
+except SystemExit as exc:
+    code = exc.code
+else:
+    code = result
+
+loaded = sorted(
+    name for name in sys.modules
+    if name == "ccstory" or name.startswith("ccstory.")
+)
+print(
+    "__CCSTORY_SUBCOMMAND_AUDIT__"
+    + json.dumps({"code": code, "loaded": loaded}),
+    file=sys.stderr,
+)
+"""
+
 _LAZY_PROVIDER_AUDIT = r"""
 import json
 import sys
@@ -571,3 +597,159 @@ def test_one_metadata_definition_drives_bootstrap_and_full_registry():
     assert audit["label"] == "Future Agent"
     assert audit["coverage"] == "partial"
     assert audit["help_has_choice"] is True
+
+
+# PR B (#177): `ccstory/cli.py` module-level imports used to be the union of
+# every subcommand's dependencies, so dispatching to any one of them —
+# including light ones like `category` or `mcp --help` — paid to import the
+# narrator cache (`session_summarizer`), the full recap/report pipeline, and
+# the provider registry regardless of whether that subcommand touches them.
+# Each handler now imports only what it actually executes. `forbidden` names
+# the heavy modules a given invocation must NOT import; `required` is a
+# positive control so the audit can't pass trivially (e.g. a crash before
+# dispatch). Both sets are exact matches against a fresh subprocess's
+# `sys.modules`, measured empirically per invocation — see the PR
+# description for the full before/after module-count table.
+@pytest.mark.parametrize(
+    ("argv", "forbidden", "required"),
+    [
+        pytest.param(
+            ["category", "list"],
+            {
+                "ccstory.session_summarizer",
+                "ccstory.mcp_server",
+                "ccstory.recap",
+                "ccstory.report",
+                "ccstory.providers",
+                "ccstory.trends",
+                "ccstory.token_usage",
+                "ccstory.goal_store",
+                "ccstory.goal_history",
+                "ccstory.goals",
+                "ccstory.project_discovery",
+                "ccstory.init_categories",
+                "ccstory.artifacts",
+            },
+            {"ccstory.cli", "ccstory.categorizer"},
+            id="category-list-avoids-narrator-and-mcp",
+        ),
+        pytest.param(
+            ["mcp", "--help"],
+            {
+                "ccstory.providers",
+                "ccstory.providers.claude",
+                "ccstory.providers.codex",
+                "ccstory.providers.antigravity",
+                "ccstory.session_summarizer",
+                "ccstory.recap",
+                "ccstory.report",
+                "ccstory.trends",
+                "ccstory.token_usage",
+                "ccstory.mcp_server",
+                "ccstory.goal_store",
+                "ccstory.goal_history",
+                "ccstory.goals",
+                "ccstory.project_discovery",
+                "ccstory.init_categories",
+                "ccstory.artifacts",
+            },
+            {"ccstory.cli"},
+            id="mcp-help-avoids-providers-and-narrator",
+        ),
+        pytest.param(
+            ["goal", "list"],
+            {
+                "ccstory.session_summarizer",
+                "ccstory.mcp_server",
+                "ccstory.recap",
+                "ccstory.report",
+                "ccstory.providers",
+                "ccstory.trends",
+                "ccstory.token_usage",
+                "ccstory.goal_history",
+                "ccstory.project_discovery",
+                "ccstory.init_categories",
+                "ccstory.artifacts",
+            },
+            {"ccstory.cli", "ccstory.goal_store", "ccstory.goals"},
+            id="goal-list-avoids-narrator-and-mcp",
+        ),
+        pytest.param(
+            ["goal-history"],
+            {
+                "ccstory.session_summarizer",
+                "ccstory.mcp_server",
+                "ccstory.recap",
+                "ccstory.report",
+                "ccstory.trends",
+                "ccstory.providers.claude",
+                "ccstory.providers.codex",
+                "ccstory.providers.antigravity",
+                "ccstory.project_discovery",
+                "ccstory.init_categories",
+                "ccstory.artifacts",
+            },
+            {"ccstory.cli", "ccstory.goal_history", "ccstory.providers"},
+            id="goal-history-avoids-narrator-mcp-and-recap",
+        ),
+        pytest.param(
+            ["init", "--skip", "--dry-run"],
+            {
+                "ccstory.recap",
+                "ccstory.report",
+                "ccstory.trends",
+                "ccstory.mcp_server",
+                "ccstory.providers.claude",
+                "ccstory.providers.codex",
+                "ccstory.providers.antigravity",
+                "ccstory.goal_store",
+                "ccstory.goal_history",
+                "ccstory.goals",
+                "ccstory.project_discovery",
+                "ccstory.artifacts",
+            },
+            {"ccstory.cli", "ccstory.init_categories", "ccstory.session_summarizer"},
+            id="init-skip-avoids-recap-report-and-mcp",
+        ),
+    ],
+)
+def test_subcommand_imports_only_what_it_executes(argv, forbidden, required):
+    result = _run(["-c", _SUBCOMMAND_IMPORT_AUDIT, json.dumps(argv)])
+
+    assert result.returncode == 0, result.stderr
+    marker = "__CCSTORY_SUBCOMMAND_AUDIT__"
+    audit_line = next(
+        line for line in result.stderr.splitlines() if line.startswith(marker)
+    )
+    audit = json.loads(audit_line.removeprefix(marker))
+    loaded = set(audit["loaded"])
+
+    blocked = loaded & forbidden
+    assert blocked == set(), f"{argv} unexpectedly imported {sorted(blocked)}"
+    missing = required - loaded
+    assert missing == set(), f"{argv} unexpectedly did not import {sorted(missing)}"
+
+
+def test_category_set_still_invalidates_narrative_cache_via_deferred_import():
+    """The `category list` mutex above only holds because the narrator-cache
+    import moved past the `list` branch's early return — confirm `set` (the
+    branch that still needs it) still imports and exercises it, so the
+    laziness in the case above is a real branch split, not a dropped
+    feature.
+    """
+    # PYTHONIOENCODING pins the subprocess to UTF-8: `category set`'s "✓"
+    # confirmation crashes on a legacy-encoding Windows pipe (pre-existing,
+    # tracked in #250), and this test's subject is the import split, not
+    # stream encoding.
+    result = _run(
+        ["-c", _SUBCOMMAND_IMPORT_AUDIT, json.dumps(["category", "set", "x", "y"])],
+        extra_env={"PYTHONIOENCODING": "utf-8"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    marker = "__CCSTORY_SUBCOMMAND_AUDIT__"
+    audit_line = next(
+        line for line in result.stderr.splitlines() if line.startswith(marker)
+    )
+    audit = json.loads(audit_line.removeprefix(marker))
+    assert "ccstory.session_summarizer" in audit["loaded"]
