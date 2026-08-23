@@ -20,13 +20,13 @@ jobs:
           python-version: "3.11"
       - name: Refresh prices table
         run: |
-          python scripts/refresh_prices.py > diff_summary.txt
-          cat diff_summary.txt
+          python scripts/refresh_prices.py > "$RUNNER_TEMP/diff_summary.txt"
+          cat "$RUNNER_TEMP/diff_summary.txt"
       - name: Create Pull Request if changed
         uses: peter-evans/create-pull-request@v6
         with:
           commit-message: "chore(pricing): refresh vendored LiteLLM model prices"
           title: "chore(pricing): refresh vendored LiteLLM model prices"
-          body-path: diff_summary.txt
+          body-path: ${{ runner.temp }}/diff_summary.txt
           branch: chore/refresh-prices
           delete-branch: true

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Refreshed the vendored LiteLLM pricing table. Adds `claude-mythos-5`,
+  `claude-mythos-preview`, `gpt-5.6-cyber`, `gemini-3.7-flash`, and
+  `gemini-3.1-flash-lite-image`; picks up price cuts for `gpt-5.6`,
+  `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, and `gemini-3.6-flash`.
+  The table had been stale since 2026-07-26, so costs for those models were
+  overstated — `gpt-5.6-luna` by 5x and `gemini-3.6-flash` by 2x.
+
+### Fixed
+
+- The `refresh-prices` workflow wrote its diff summary to the repository
+  working tree, so `create-pull-request` swept `diff_summary.txt` into the
+  pricing commit. It now writes to the runner temp directory.
+
 ## [0.8.2] - 2026-08-09
 
 ### Changed
