@@ -14,7 +14,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from ccstory.categorizer import (
+    CategoryRule,
     alias_fold,
     classify,
     duplicate_memberships,
@@ -261,3 +264,78 @@ class TestClassifyAgreesWithResolver:
     def test_reads_the_module_config_path_when_none_is_passed(self, tmp_home: Path):
         _cfg(tmp_home, self.PINNED_CONFIG)
         assert classify(self.NESTED, fallback="other") == "building"
+
+    def test_user_keyword_outranks_a_built_in_exact_member(self, tmp_home: Path):
+        # `load_rules()` appends DEFAULT_RULES, whose "test-bed" needle is
+        # hyphenated and therefore an exact member of this leaf. Membership
+        # must stay a user-rule tier: the user's fuzzy "test" keyword wins,
+        # the same way builtin_rule_match() only runs after user_rule_match().
+        p = _cfg(tmp_home, '[categories]\n"custom" = ["test"]\n')
+        assert classify("-Users-a-code-test-bed", config_path=p) == "custom"
+
+    def test_aliases_do_not_leak_into_the_built_in_tier(self, tmp_home: Path):
+        # The alias canonicalizes into the user's vocabulary only. The leaf
+        # itself is still "alias", which matches no built-in needle, so both
+        # entry points fall through instead of resolving the canonical name's
+        # built-in keyword.
+        p = _cfg(
+            tmp_home,
+            '[projects]\n"alias" = "stock"\n'
+            '[categories]\n"custom" = ["nothing"]\n',
+        )
+        assert classify("-Users-a-code-alias", config_path=p) == "coding"
+
+    def test_hand_built_rules_keep_pre_membership_behavior(self, tmp_home: Path):
+        # A caller that constructs CategoryRule itself gets no membership
+        # tier unless it opts in, so no existing consumer changes silently.
+        rules = [
+            CategoryRule(name="first", needles=["test"]),
+            CategoryRule(name="second", needles=["test-bed"]),
+        ]
+        assert classify("-Users-a-code-test-bed", rules=rules) == "first"
+        opted_in = [
+            CategoryRule(name="first", needles=["test"], user_defined=True),
+            CategoryRule(name="second", needles=["test-bed"], user_defined=True),
+        ]
+        assert classify("-Users-a-code-test-bed", rules=opted_in) == "second"
+
+
+@pytest.mark.parametrize(
+    "config,project",
+    [
+        # exact pin under a later bucket vs an earlier bucket's keyword
+        ('[categories]\n"investing" = ["kol-collector"]\n'
+         '"building" = ["kol-collector-fomo-kernel"]\n',
+         "-Users-a-Side-project-kol-collector-fomo-kernel"),
+        # parent folder, no pin
+        ('[categories]\n"investing" = ["kol-collector"]\n'
+         '"building" = ["kol-collector-fomo-kernel"]\n',
+         "-Users-a-Side-project-kol-collector"),
+        # user keyword vs a hyphenated built-in needle
+        ('[categories]\n"custom" = ["test"]\n', "-Users-a-code-test-bed"),
+        # alias folding, canonical name carries a built-in needle
+        ('[projects]\n"alias" = "stock"\n[categories]\n"custom" = ["x"]\n',
+         "-Users-a-code-alias"),
+        # alias folding onto a real user membership
+        ('[projects]\n"cc-story" = "ccstory"\n'
+         '[categories]\n"building" = ["ccstory"]\n',
+         "-Users-a-Side-project-cc-story"),
+        # nothing matches anywhere
+        ('[categories]\n"custom" = ["x"]\n', "-Users-a-code-unruled-thing"),
+        # built-in tier only
+        ('[categories]\n"custom" = ["x"]\n', "-Users-a-code-playground"),
+    ],
+)
+def test_classify_matches_the_folder_resolver(config, project, tmp_home: Path):
+    """One config, two documented entry points, one answer.
+
+    The regression this pins is not any single case but the drift itself:
+    classify() sat on an older matcher for two releases because no internal
+    caller exercised it (#262).
+    """
+    p = _cfg(tmp_home, config)
+    resolved, _source = resolve_session_bucket(
+        project, None, mode="folder", config_path=p,
+    )
+    assert classify(project, rules=load_rules(p), config_path=p) == resolved
+    assert classify(project, config_path=p) == resolved

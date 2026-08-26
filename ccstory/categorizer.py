@@ -162,8 +162,21 @@ DEFAULT_RULES: list[tuple[str, list[str]]] = [
 
 @dataclass
 class CategoryRule:
+    """One bucket's needles, plus whether the user wrote them.
+
+    ``user_defined`` marks a rule that came from ``[categories]`` in
+    config.toml rather than ``DEFAULT_RULES``. Only user rules take part in
+    the exact-membership tier: membership exists so a `ccstory category set`
+    pin can beat an earlier bucket's fuzzy keyword, and a built-in keyword is
+    never a pin. It also keeps built-ins strictly below every user-rule tier,
+    the precedence `resolve_session_bucket(..., mode="folder")` applies
+    (#262). Defaults to False so a hand-built rule list behaves exactly as it
+    did before the flag existed.
+    """
+
     name: str
     needles: list[str]
+    user_defined: bool = False
 
 
 def _load_toml(path: Path) -> dict | None:
@@ -245,7 +258,11 @@ def load_rules(config_path: Path | None = None) -> list[CategoryRule]:
     if cfg and isinstance(cfg.get("categories"), dict):
         for name, needles in cfg["categories"].items():
             if isinstance(needles, list) and all(isinstance(n, str) for n in needles):
-                rules.append(CategoryRule(name=str(name), needles=[n.lower() for n in needles]))
+                rules.append(CategoryRule(
+                    name=str(name),
+                    needles=[n.lower() for n in needles],
+                    user_defined=True,
+                ))
             else:
                 LOG.warning("ignoring malformed rule %r (needles must be list[str])", name)
     # Default rules append after user rules so user wins on overlap
@@ -505,7 +522,12 @@ def classify(
          leaf contains both tokens as a contiguous span.
 
     `[projects]` aliases are folded before both tiers, so a variant folder
-    name resolves under its canonical project.
+    name resolves under its canonical project. Built-in `DEFAULT_RULES` run
+    only after both user tiers and match the unfolded leaf — the same
+    boundary `builtin_rule_match()` keeps downstream of `user_rule_match()`.
+    A caller-supplied `rules` list is treated as built-in unless its entries
+    set `CategoryRule.user_defined`, which `load_rules()` does for every rule
+    it reads from `[categories]`.
 
     Fallback is `coding` by default — per 2026 dev survey, ~46% of Claude
     Code use is software development, so an unmatched project is most likely
@@ -515,11 +537,18 @@ def classify(
     omitted, so test monkeypatches take effect.
     """
     rules = rules if rules is not None else load_rules(config_path)
-    leaf = alias_fold(
-        normalize_project_name(project_dir),
-        load_project_aliases(config_path),
+    leaf = normalize_project_name(project_dir)
+    # Aliases canonicalize a project for the *user's* vocabulary only — the
+    # built-in tier matches the raw leaf, exactly as `builtin_rule_match()`
+    # does downstream of `user_rule_match()` in the resolver (#262).
+    folded = alias_fold(leaf, load_project_aliases(config_path))
+    user_rules = [rule for rule in rules if rule.user_defined]
+    builtin_rules = [rule for rule in rules if not rule.user_defined]
+    return (
+        _match_rule_tiers(folded, user_rules)
+        or _match_rule_needles(leaf, builtin_rules)
+        or fallback
     )
-    return _match_rule_tiers(leaf, rules) or fallback
 
 
 def _membership_index(
@@ -617,9 +646,11 @@ def user_rule_match(
     user_rules: list[CategoryRule] = []
     for name, needles in cats.items():
         if isinstance(needles, list) and all(isinstance(n, str) for n in needles):
-            user_rules.append(
-                CategoryRule(name=str(name), needles=[n.lower() for n in needles])
-            )
+            user_rules.append(CategoryRule(
+                name=str(name),
+                needles=[n.lower() for n in needles],
+                user_defined=True,
+            ))
     if not user_rules:
         return None
     # Both tiers run through the shared matcher so this entry point and
