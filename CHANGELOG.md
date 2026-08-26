@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`classify()` now honors the pins `ccstory category set` writes** (#262).
+  The exact-membership tier (#69) and `[projects]` alias folding reached
+  `user_rule_match()` and every internal caller through
+  `resolve_session_bucket()` (#214), but `classify()` — one of the five
+  functions README declares as the semi-stable integration API — was left on
+  the old single-tier needle matcher. Because nothing inside the package
+  still calls it, the divergence was invisible from the CLI and only surfaced
+  in external consumers: the same config told a dashboard a project was
+  `investing` while ccstory's own `--classify folder` recap called it
+  `building`. A nested repo whose leaf contains its parent's keyword was the
+  common case, and section ordering could not work around it since
+  `_render_config()` writes `[categories]` in sorted order. `classify()` now
+  applies the same two tiers as `user_rule_match()` — exact membership, then
+  token/multi-token needles, aliases folded before both — through one shared
+  `_match_rule_tiers()` helper so the two entry points cannot drift again.
+  It also gained an optional `config_path` argument, matching `load_rules()`.
+  Configs with no verbatim leaf membership and no `[projects]` table classify
+  byte-identically to before.
+
 ## [0.8.4] - 2026-08-23
 
 ### Added

@@ -946,6 +946,9 @@ persistent registry. It never drops a row; `partition_by_relevance(projects)`
 is the separate, pure, order-preserving split into
 `(relevant, filtered)` that the CLI's default view applies.
 
+`classify()` applies the same folder rules the CLI does — a project pinned
+with `ccstory category set <bucket> <leaf>` resolves identically in both.
+
 Semi-stable means: signatures may still change with minor versions, but
 renames and behavior changes are called out in the changelog instead of
 happening silently. Everything else in the package is internal. The JSON

@@ -455,26 +455,71 @@ def _match_rule_needles(leaf: str, rules: list[CategoryRule]) -> str | None:
     return None
 
 
+def _match_rule_membership(leaf: str, rules: list[CategoryRule]) -> str | None:
+    """Exact-membership match: the leaf is listed verbatim under a rule (#69).
+
+    Unambiguous by construction, so it outranks the fuzzy needle tier below
+    and lets a config drop the section-ordering hacks token matching forces.
+    First rule wins when the same leaf is listed twice — the same
+    "first area in the file keeps the needle" rule `_membership_index`
+    applies. Returns ``None`` when no rule lists the leaf.
+    """
+    if not leaf:
+        return None
+    for rule in rules:
+        if leaf in rule.needles:
+            return rule.name
+    return None
+
+
+def _match_rule_tiers(leaf: str, rules: list[CategoryRule]) -> str | None:
+    """The full user-rule contract: exact membership, then needle match.
+
+    Shared by `classify()` and `user_rule_match()` (#262) for the same reason
+    `_match_rule_needles` is shared — two entry points resolving one config
+    must not be able to disagree about it. Returns ``None`` when neither tier
+    matches; callers decide what "no match" means.
+    """
+    return _match_rule_membership(leaf, rules) or _match_rule_needles(leaf, rules)
+
+
 def classify(
     project_dir: str,
     rules: list[CategoryRule] | None = None,
     fallback: str = DEFAULT_FALLBACK_BUCKET,
+    config_path: Path | None = None,
 ) -> str:
-    """Token-level match on normalized project leaf. First-match-wins.
+    """Resolve a normalized project leaf to a bucket. First-match-wins.
 
     Integration API (semi-stable, #110) — see README "Library usage".
 
-    Splits the leaf by `-` and compares each token to rule needles. A multi-
-    token needle like `deep-dive` matches if the leaf contains both tokens
-    as a contiguous span.
+    Two tiers, the same ones `user_rule_match()` applies, so a project pinned
+    with `ccstory category set <bucket> <leaf>` binds here exactly as it does
+    for the CLI's folder classification (#262):
+
+      1. **exact membership** — the (alias-folded) leaf is listed verbatim
+         under a bucket. Wins over an earlier bucket's fuzzy keyword, which
+         is what lets a nested repo beat its parent folder's keyword.
+      2. **token-needle match** — each `-`-separated token is compared to the
+         rule needles; a hyphenated needle like `deep-dive` matches when the
+         leaf contains both tokens as a contiguous span.
+
+    `[projects]` aliases are folded before both tiers, so a variant folder
+    name resolves under its canonical project.
 
     Fallback is `coding` by default — per 2026 dev survey, ~46% of Claude
     Code use is software development, so an unmatched project is most likely
-    a code repo. Override via config.toml `default_bucket = "..."`.
+    a code repo. Pass config.toml's `default_bucket` explicitly to use it.
+
+    ``config_path`` resolves to module-level ``CONFIG_PATH`` at call time when
+    omitted, so test monkeypatches take effect.
     """
-    rules = rules if rules is not None else load_rules()
-    leaf = normalize_project_name(project_dir)
-    return _match_rule_needles(leaf, rules) or fallback
+    rules = rules if rules is not None else load_rules(config_path)
+    leaf = alias_fold(
+        normalize_project_name(project_dir),
+        load_project_aliases(config_path),
+    )
+    return _match_rule_tiers(leaf, rules) or fallback
 
 
 def _membership_index(
@@ -569,13 +614,6 @@ def user_rule_match(
     if not leaf:
         return None
 
-    # Tier 1: exact membership across all areas (first area in config wins).
-    index, _ = _membership_index(cats)
-    exact = index.get(leaf)
-    if exact:
-        return exact
-
-    # Tier 2: token-needle fuzzy match (compat).
     user_rules: list[CategoryRule] = []
     for name, needles in cats.items():
         if isinstance(needles, list) and all(isinstance(n, str) for n in needles):
@@ -584,7 +622,9 @@ def user_rule_match(
             )
     if not user_rules:
         return None
-    return _match_rule_needles(leaf, user_rules)
+    # Both tiers run through the shared matcher so this entry point and
+    # `classify()` cannot answer the same config differently (#262).
+    return _match_rule_tiers(leaf, user_rules)
 
 
 # Built-in-only rule set, precomputed once: `DEFAULT_RULES` never changes at

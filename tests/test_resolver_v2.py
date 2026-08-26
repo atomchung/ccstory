@@ -6,6 +6,8 @@ Covers the additions layered on top of the unified resolver (test_resolver.py):
     configs that have no such shadowing;
   - the optional ``[projects]`` alias table + ``alias_fold`` / ``project_identity``;
   - the duplicate-membership load-time detection (first wins).
+  - `classify()`, the declared integration API, resolving a config the same
+    way the resolver does (#262).
 """
 
 from __future__ import annotations
@@ -14,8 +16,10 @@ from pathlib import Path
 
 from ccstory.categorizer import (
     alias_fold,
+    classify,
     duplicate_memberships,
     load_project_aliases,
+    load_rules,
     project_identity,
     resolve_session_bucket,
     user_rule_match,
@@ -188,3 +192,72 @@ class TestAliasPreservation:
         )
         remove_category_keywords("learning", ["app"], path=p)
         assert load_project_aliases(p) == {"infocollector": "info-collector"}
+
+
+class TestClassifyAgreesWithResolver:
+    """`classify()` is the entry point external consumers are told to call.
+
+    It ran the pre-#69 single-tier matcher until #262, so a project pinned
+    with `ccstory category set` bound for the CLI and silently did not bind
+    for a library consumer reading the same config.
+    """
+
+    NESTED = "-Users-a-Side-project-kol-collector-fomo-kernel"
+    PARENT = "-Users-a-Side-project-kol-collector"
+    PINNED_CONFIG = (
+        'default_bucket = "other"\n'
+        '[categories]\n'
+        '"investing" = ["kol-collector"]\n'
+        '"building" = ["kol-collector-fomo-kernel"]\n'
+    )
+
+    def test_pin_beats_an_earlier_buckets_fuzzy_keyword(self, tmp_home: Path):
+        p = _cfg(tmp_home, self.PINNED_CONFIG)
+        assert classify(self.NESTED, fallback="other", config_path=p) == "building"
+
+    def test_parent_folder_keeps_its_own_keyword(self, tmp_home: Path):
+        p = _cfg(tmp_home, self.PINNED_CONFIG)
+        assert classify(self.PARENT, fallback="other", config_path=p) == "investing"
+
+    def test_worktree_suffix_still_resolves_to_the_pin(self, tmp_home: Path):
+        p = _cfg(tmp_home, self.PINNED_CONFIG)
+        worktree = self.NESTED + "--claude-worktrees-bold-khorana-138046"
+        assert classify(worktree, fallback="other", config_path=p) == "building"
+
+    def test_matches_the_resolver_for_every_tier(self, tmp_home: Path):
+        p = _cfg(tmp_home, self.PINNED_CONFIG)
+        for project in (self.NESTED, self.PARENT, "-Users-a-Side-project-unruled"):
+            resolved, _source = resolve_session_bucket(
+                project, None, mode="folder", fallback="other", config_path=p,
+            )
+            assert classify(
+                project,
+                rules=load_rules(p),
+                fallback="other",
+                config_path=p,
+            ) == resolved, project
+
+    def test_folds_project_aliases_before_matching(self, tmp_home: Path):
+        p = _cfg(
+            tmp_home,
+            'default_bucket = "other"\n'
+            '[projects]\n'
+            '"cc-story" = "ccstory"\n'
+            '[categories]\n'
+            '"building" = ["ccstory"]\n',
+        )
+        assert classify(
+            "-Users-a-Side-project-cc-story", fallback="other", config_path=p,
+        ) == "building"
+
+    def test_token_needle_config_is_unchanged(self, tmp_home: Path):
+        # No leaf is listed verbatim, so tier 1 never fires and every
+        # pre-#262 config keeps its exact behavior.
+        p = _cfg(tmp_home, '[categories]\n"investing" = ["stock"]\n')
+        assert classify(
+            "-Users-a-code-stock-dashboard", fallback="other", config_path=p,
+        ) == "investing"
+
+    def test_reads_the_module_config_path_when_none_is_passed(self, tmp_home: Path):
+        _cfg(tmp_home, self.PINNED_CONFIG)
+        assert classify(self.NESTED, fallback="other") == "building"
