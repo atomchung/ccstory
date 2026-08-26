@@ -162,8 +162,21 @@ DEFAULT_RULES: list[tuple[str, list[str]]] = [
 
 @dataclass
 class CategoryRule:
+    """One bucket's needles, plus whether the user wrote them.
+
+    ``user_defined`` marks a rule that came from ``[categories]`` in
+    config.toml rather than ``DEFAULT_RULES``. Only user rules take part in
+    the exact-membership tier: membership exists so a `ccstory category set`
+    pin can beat an earlier bucket's fuzzy keyword, and a built-in keyword is
+    never a pin. It also keeps built-ins strictly below every user-rule tier,
+    the precedence `resolve_session_bucket(..., mode="folder")` applies
+    (#262). Defaults to False so a hand-built rule list behaves exactly as it
+    did before the flag existed.
+    """
+
     name: str
     needles: list[str]
+    user_defined: bool = False
 
 
 def _load_toml(path: Path) -> dict | None:
@@ -245,7 +258,11 @@ def load_rules(config_path: Path | None = None) -> list[CategoryRule]:
     if cfg and isinstance(cfg.get("categories"), dict):
         for name, needles in cfg["categories"].items():
             if isinstance(needles, list) and all(isinstance(n, str) for n in needles):
-                rules.append(CategoryRule(name=str(name), needles=[n.lower() for n in needles]))
+                rules.append(CategoryRule(
+                    name=str(name),
+                    needles=[n.lower() for n in needles],
+                    user_defined=True,
+                ))
             else:
                 LOG.warning("ignoring malformed rule %r (needles must be list[str])", name)
     # Default rules append after user rules so user wins on overlap
@@ -455,26 +472,83 @@ def _match_rule_needles(leaf: str, rules: list[CategoryRule]) -> str | None:
     return None
 
 
+def _match_rule_membership(leaf: str, rules: list[CategoryRule]) -> str | None:
+    """Exact-membership match: the leaf is listed verbatim under a rule (#69).
+
+    Unambiguous by construction, so it outranks the fuzzy needle tier below
+    and lets a config drop the section-ordering hacks token matching forces.
+    First rule wins when the same leaf is listed twice — the same
+    "first area in the file keeps the needle" rule `_membership_index`
+    applies. Returns ``None`` when no rule lists the leaf.
+    """
+    if not leaf:
+        return None
+    for rule in rules:
+        if leaf in rule.needles:
+            return rule.name
+    return None
+
+
+def _match_rule_tiers(leaf: str, rules: list[CategoryRule]) -> str | None:
+    """The full user-rule contract: exact membership, then needle match.
+
+    Shared by `classify()` and `user_rule_match()` (#262) for the same reason
+    `_match_rule_needles` is shared — two entry points resolving one config
+    must not be able to disagree about it. Returns ``None`` when neither tier
+    matches; callers decide what "no match" means.
+    """
+    return _match_rule_membership(leaf, rules) or _match_rule_needles(leaf, rules)
+
+
 def classify(
     project_dir: str,
     rules: list[CategoryRule] | None = None,
     fallback: str = DEFAULT_FALLBACK_BUCKET,
+    config_path: Path | None = None,
 ) -> str:
-    """Token-level match on normalized project leaf. First-match-wins.
+    """Resolve a normalized project leaf to a bucket. First-match-wins.
 
     Integration API (semi-stable, #110) — see README "Library usage".
 
-    Splits the leaf by `-` and compares each token to rule needles. A multi-
-    token needle like `deep-dive` matches if the leaf contains both tokens
-    as a contiguous span.
+    Two tiers, the same ones `user_rule_match()` applies, so a project pinned
+    with `ccstory category set <bucket> <leaf>` binds here exactly as it does
+    for the CLI's folder classification (#262):
+
+      1. **exact membership** — the (alias-folded) leaf is listed verbatim
+         under a bucket. Wins over an earlier bucket's fuzzy keyword, which
+         is what lets a nested repo beat its parent folder's keyword.
+      2. **token-needle match** — each `-`-separated token is compared to the
+         rule needles; a hyphenated needle like `deep-dive` matches when the
+         leaf contains both tokens as a contiguous span.
+
+    `[projects]` aliases are folded before both tiers, so a variant folder
+    name resolves under its canonical project. Built-in `DEFAULT_RULES` run
+    only after both user tiers and match the unfolded leaf — the same
+    boundary `builtin_rule_match()` keeps downstream of `user_rule_match()`.
+    A caller-supplied `rules` list is treated as built-in unless its entries
+    set `CategoryRule.user_defined`, which `load_rules()` does for every rule
+    it reads from `[categories]`.
 
     Fallback is `coding` by default — per 2026 dev survey, ~46% of Claude
     Code use is software development, so an unmatched project is most likely
-    a code repo. Override via config.toml `default_bucket = "..."`.
+    a code repo. Pass config.toml's `default_bucket` explicitly to use it.
+
+    ``config_path`` resolves to module-level ``CONFIG_PATH`` at call time when
+    omitted, so test monkeypatches take effect.
     """
-    rules = rules if rules is not None else load_rules()
+    rules = rules if rules is not None else load_rules(config_path)
     leaf = normalize_project_name(project_dir)
-    return _match_rule_needles(leaf, rules) or fallback
+    # Aliases canonicalize a project for the *user's* vocabulary only — the
+    # built-in tier matches the raw leaf, exactly as `builtin_rule_match()`
+    # does downstream of `user_rule_match()` in the resolver (#262).
+    folded = alias_fold(leaf, load_project_aliases(config_path))
+    user_rules = [rule for rule in rules if rule.user_defined]
+    builtin_rules = [rule for rule in rules if not rule.user_defined]
+    return (
+        _match_rule_tiers(folded, user_rules)
+        or _match_rule_needles(leaf, builtin_rules)
+        or fallback
+    )
 
 
 def _membership_index(
@@ -569,22 +643,19 @@ def user_rule_match(
     if not leaf:
         return None
 
-    # Tier 1: exact membership across all areas (first area in config wins).
-    index, _ = _membership_index(cats)
-    exact = index.get(leaf)
-    if exact:
-        return exact
-
-    # Tier 2: token-needle fuzzy match (compat).
     user_rules: list[CategoryRule] = []
     for name, needles in cats.items():
         if isinstance(needles, list) and all(isinstance(n, str) for n in needles):
-            user_rules.append(
-                CategoryRule(name=str(name), needles=[n.lower() for n in needles])
-            )
+            user_rules.append(CategoryRule(
+                name=str(name),
+                needles=[n.lower() for n in needles],
+                user_defined=True,
+            ))
     if not user_rules:
         return None
-    return _match_rule_needles(leaf, user_rules)
+    # Both tiers run through the shared matcher so this entry point and
+    # `classify()` cannot answer the same config differently (#262).
+    return _match_rule_tiers(leaf, user_rules)
 
 
 # Built-in-only rule set, precomputed once: `DEFAULT_RULES` never changes at
