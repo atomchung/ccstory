@@ -34,6 +34,7 @@ from .bootstrap import (
     VALID_OUTPUT_FORMATS,
     build_top_level_parser,
     parser_version_for_argv,
+    prepare_command_streams,
     prepare_information_streams,
 )
 from .categorizer import CONFIG_PATH
@@ -928,6 +929,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _dispatch(argv: list[str] | None = None) -> int:
     raw = list(argv) if argv is not None else sys.argv[1:]
+    prepare_command_streams()
 
     # Manual dispatch for subcommands — keeps default `ccstory week`
     # / `ccstory month` flow simple positional. `init` / `category` / `goal` /

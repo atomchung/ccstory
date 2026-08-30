@@ -416,6 +416,25 @@ def test_help_reconfigures_narrow_windows_pipe_to_utf8(command):
     assert result.stderr == ""
 
 
+@pytest.mark.parametrize(
+    "entry",
+    [
+        ["-m", "ccstory"],
+        ["-c", _DIRECT_FULL_CLI],
+    ],
+)
+def test_mutation_confirmation_survives_narrow_windows_pipe(entry):
+    """`category set`'s ✓ confirmation must not crash a cp1252 pipe (#250)."""
+    result = _run(
+        [*entry, "category", "set", "coding", "my-project"],
+        extra_env={"PYTHONIOENCODING": "cp1252"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "✓" in result.stdout
+    assert result.stderr == ""
+
+
 def test_unknown_option_keeps_full_cli_argparse_contract():
     argv = ["--definitely-not-a-ccstory-option"]
     module = _run(["-m", "ccstory", *argv])
@@ -737,13 +756,8 @@ def test_category_set_still_invalidates_narrative_cache_via_deferred_import():
     laziness in the case above is a real branch split, not a dropped
     feature.
     """
-    # PYTHONIOENCODING pins the subprocess to UTF-8: `category set`'s "✓"
-    # confirmation crashes on a legacy-encoding Windows pipe (pre-existing,
-    # tracked in #250), and this test's subject is the import split, not
-    # stream encoding.
     result = _run(
         ["-c", _SUBCOMMAND_IMPORT_AUDIT, json.dumps(["category", "set", "x", "y"])],
-        extra_env={"PYTHONIOENCODING": "utf-8"},
     )
 
     assert result.returncode == 0, result.stderr
