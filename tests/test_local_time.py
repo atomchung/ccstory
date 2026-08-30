@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from ccstory.local_time import system_local_timezone
+from ccstory.local_time import SystemLocalTimezone, system_local_timezone
 
 UTC = timezone.utc
 
@@ -46,3 +46,19 @@ def test_posix_tz_fallback_distinguishes_repeated_hour_folds():
         "2026-11-01T01:30:00-05:00",
         1,
     )
+
+
+def test_dangling_absolute_tz_path_falls_back_to_system_local(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A broken explicit TZ must not be silently replaced by host autodetection.
+
+    Mirrors the non-absolute branch: an unusable explicit choice falls back to
+    ``SystemLocalTimezone()``, not a re-guess from /etc/timezone or
+    /etc/localtime.
+    """
+    monkeypatch.setenv("TZ", "/nonexistent/tzdata/for-ccstory-tests")
+
+    result = system_local_timezone()
+
+    assert isinstance(result, SystemLocalTimezone)
