@@ -249,6 +249,35 @@ class TestCollectUsage:
         assert rep.assistant_turns == 1
         assert rep.total_input == 42
 
+    def test_invalid_utf8_byte_skips_the_file_not_the_run(
+        self, tmp_home, jsonl_factory,
+    ):
+        # A transcript holding one raw invalid byte must be skipped like
+        # any unreadable file — not escape as UnicodeDecodeError through
+        # the library/MCP entry points. collect_snapshot already treats
+        # it that way; parse_session/collect_usage must agree.
+        good = jsonl_factory(
+            "-Users-alice-code-app", "session-good",
+            [
+                make_user_msg("hi", _ts(2026, 5, 10, 10, 0, 0)),
+                make_assistant_msg(
+                    "ok", _ts(2026, 5, 10, 10, 0, 5), "msg_1",
+                    input_tokens=42,
+                ),
+            ],
+        )
+        corrupt = good.parent / "session-corrupt.jsonl"
+        corrupt.write_bytes(b'{"type": "user"\xff}\n')
+
+        assert ClaudeCodeProvider().parse_session(corrupt) is None
+
+        rep = collect_usage(
+            datetime(2026, 5, 1, tzinfo=timezone.utc),
+            datetime(2026, 5, 31, tzinfo=timezone.utc),
+        )
+        assert rep.assistant_turns == 1
+        assert rep.total_input == 42
+
     def test_cache_hit_ratio(self, jsonl_factory):
         # 9000 cache_read out of 10000 total input-side = 0.9
         records = [

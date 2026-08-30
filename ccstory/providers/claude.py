@@ -426,7 +426,9 @@ class ClaudeCodeProvider(BaseAgentProvider):
                     if not isinstance(d, dict):
                         continue
                     accumulator.add(d)
-        except OSError:
+        except (OSError, UnicodeError):
+            # A raw invalid byte (truncated write, corruption) skips the
+            # file exactly like collect_snapshot's inline loop does.
             return None
 
         return accumulator.finish(
@@ -479,7 +481,10 @@ class ClaudeCodeProvider(BaseAgentProvider):
         for path_str in matching_paths:
             fp = Path(path_str)
             try:
-                with fp.open() as f:
+                # Explicit UTF-8: transcripts are UTF-8 regardless of the
+                # platform locale (a cp932/cp1252 default would mis-decode
+                # or raise on CJK content).
+                with fp.open("r", encoding="utf-8") as f:
                     for line in f:
                         try:
                             d = json.loads(line)
@@ -494,7 +499,7 @@ class ClaudeCodeProvider(BaseAgentProvider):
                             seen_ids,
                             assistant_turns,
                         )
-            except OSError:
+            except (OSError, UnicodeError):
                 continue
 
         return assistant_turns
