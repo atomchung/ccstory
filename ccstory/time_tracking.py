@@ -690,12 +690,6 @@ def wall_clock_active_sec(
     return int(active)
 
 
-def wall_clock_active_min(
-    stats: Sequence[SessionStat | SessionSlice],
-) -> float:
-    return round(wall_clock_active_sec(stats) / 60, 1)
-
-
 @dataclass
 class ProjectRollup:
     """Layer-2 (#69): one project's slice within an area.
