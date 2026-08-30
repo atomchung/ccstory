@@ -847,10 +847,10 @@ def attribute_goals(
         return None
     project_aliases = _alias_map(aliases)
     goals = context.goals
-    # Fold both sides of the comparison the same number of times. `alias_fold`
-    # is idempotent only while no alias target is itself an alias key, so a
-    # chained `[projects]` table folds an already-canonical `session.project`
-    # once more than the goal side and matches nothing (#229).
+    # Fold both sides of the comparison here. `alias_fold` resolves chains to
+    # a fixed point, so the goal side (already folded once at parse time) and
+    # an item side arriving either raw from a provider or pre-canonicalized
+    # converge on the same identity no matter how many folds each saw (#229).
     goal_projects = {
         goal.id: frozenset(
             _project(project, project_aliases, f"goal {goal.id!r} projects")

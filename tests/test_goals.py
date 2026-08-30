@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 
 import ccstory.goals as goals_module
-from ccstory.categorizer import project_identity
 from ccstory.goals import (
     GOAL_CONTEXT_SCHEMA_VERSION,
     GoalAttributionInput,
@@ -419,11 +418,70 @@ class TestDeterministicAttribution:
             aliases=aliases,
         )
 
-        assert context.goals[0].projects == ("stock",)
+        # Chains resolve to their terminal name at parse time already.
+        assert context.goals[0].projects == ("investing",)
         assert breakdown is not None
         assert breakdown.exclusive_contribution == 3600
         assert breakdown.unattributed_contribution == 0
         assert breakdown.goals[0].projects_touched == ("investing",)
+
+    def test_chained_aliases_attribute_raw_provider_projects(self):
+        # Production callers (recap / goal-history) hand attribute_goals the
+        # provider's raw session project, never a pre-canonicalized identity.
+        # With a chained table the raw side used to fold one hop short of the
+        # goal side and strand the whole contribution in `unattributed`.
+        aliases = {"stockdash": "stock", "stock": "investing"}
+        context = parse_goal_context(
+            {
+                "schema_version": 1,
+                "goals": [
+                    {
+                        "id": "chained",
+                        "title": "Chained",
+                        "projects": ["stock"],
+                    }
+                ],
+            },
+            aliases=aliases,
+        )
+
+        breakdown = attribute_goals(
+            [
+                GoalAttributionInput(
+                    "-Users-me-Side-project-stockdash", date(2026, 8, 5), 60,
+                )
+            ],
+            context,
+            aliases=aliases,
+        )
+
+        assert breakdown is not None
+        assert breakdown.exclusive_contribution == 60
+        assert breakdown.unattributed_contribution == 0
+
+    def test_cyclic_alias_table_stays_deterministic(self):
+        # A miswritten cycle must not hang or split identities: every entry
+        # point resolves to one member, so attribution still lines up.
+        aliases = {"a": "b", "b": "a"}
+        context = parse_goal_context(
+            {
+                "schema_version": 1,
+                "goals": [
+                    {"id": "cyc", "title": "Cyc", "projects": ["a"]}
+                ],
+            },
+            aliases=aliases,
+        )
+
+        breakdown = attribute_goals(
+            [GoalAttributionInput("b", date(2026, 8, 5), 60)],
+            context,
+            aliases=aliases,
+        )
+
+        assert breakdown is not None
+        assert breakdown.exclusive_contribution == 60
+        assert breakdown.unattributed_contribution == 0
 
     def test_input_order_does_not_change_breakdown(self):
         context = _context()
@@ -678,13 +736,15 @@ class TestSessionBreakdown:
 
     def test_chained_aliases_attribute_real_sessions(self):
         # End-to-end guard for #229: `session.project` reaches the attribution
-        # core already folded once, so a chained `[projects]` table must not
-        # fold it a second time and strand the whole recap in `unattributed`.
+        # core exactly as the provider recorded it (recap/goal-history never
+        # pre-canonicalize), so a chained `[projects]` table must fold it all
+        # the way to the goal side's terminal name, not strand the recap in
+        # `unattributed`.
         aliases = {"stockdash": "stock", "stock": "investing"}
         start = datetime(2026, 8, 5, 10, tzinfo=timezone.utc)
         end = start + timedelta(minutes=1)
         session = self._session(
-            project_identity("-Users-me-Side-project-stockdash", aliases),
+            "-Users-me-Side-project-stockdash",
             "chained-session",
             start,
             end,
