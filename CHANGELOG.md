@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-08-30
+
 ### Fixed
 
 - **Chained `[projects]` aliases no longer strand goal hours in
@@ -1072,6 +1074,7 @@ Initial tagged release.
   classification failures.
 
 [Unreleased]: https://github.com/atomchung/ccstory/compare/v0.8.5...HEAD
+[0.8.6]: https://github.com/atomchung/ccstory/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/atomchung/ccstory/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/atomchung/ccstory/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/atomchung/ccstory/compare/v0.8.2...v0.8.3
