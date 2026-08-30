@@ -13,17 +13,25 @@ jobs:
   refresh-prices:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
       - name: Refresh prices table
         run: |
           python scripts/refresh_prices.py > "$RUNNER_TEMP/diff_summary.txt"
           cat "$RUNNER_TEMP/diff_summary.txt"
+      # A PR opened with the default GITHUB_TOKEN never triggers the
+      # `pull_request` tests workflow, so the refreshed table must be
+      # validated here, before the PR exists.
+      - name: Validate refreshed table against the test suite
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test,mcp]"
+          pytest
       - name: Create Pull Request if changed
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@c5a7806660adbe173f04e3e038b0ccdcd758773c # v6.1.0
         with:
           commit-message: "chore(pricing): refresh vendored LiteLLM model prices"
           title: "chore(pricing): refresh vendored LiteLLM model prices"
