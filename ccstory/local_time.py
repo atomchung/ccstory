@@ -141,6 +141,10 @@ def system_local_timezone() -> tzinfo:
             from_file = _zoneinfo_from_file(candidate)
             if from_file is not None:
                 return from_file
+            # A dangling/corrupt tzfile is still an explicit choice. Do not
+            # silently replace it with /etc/timezone or /etc/localtime
+            # autodetection below — mirror the non-absolute branch instead.
+            return SystemLocalTimezone()
         else:
             try:
                 return ZoneInfo(configured)

@@ -6,6 +6,9 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
+from ccstory import session_summarizer as ss
 from ccstory.categorizer import user_rule_match
 from ccstory.session_summarizer import (
     _build_category_context,
@@ -100,6 +103,41 @@ class TestCacheOps:
 
     def test_get_empty(self, tmp_home: Path):
         assert _classify_cache_get_many([]) == {}
+
+    def test_get_many_chunks_ids_beyond_sqlite_placeholder_limit(
+        self, tmp_home: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        # SQLite builds with the pre-2020 default SQLITE_MAX_VARIABLE_NUMBER=999
+        # reject a single `IN (?,?,...)` query with this many placeholders; a
+        # real store can reach ~1.4k session ids. Results must match the
+        # unchunked semantics regardless. The dev machine's SQLite build
+        # tolerates 1200 placeholders in one query, so a crash cannot prove
+        # chunking happened -- trace the literal SQL sqlite3 executes instead
+        # and check no single statement's IN (...) list exceeds 500 ids.
+        _classify_cache_upsert_many({"a": "coding", "b": "writing"})
+
+        ids = [f"missing-{i}" for i in range(1198)] + ["a", "b"]
+        assert len(ids) == 1200
+
+        traced: list[str] = []
+        original_connect = ss._connect
+
+        def traced_connect():
+            conn = original_connect()
+            conn.set_trace_callback(traced.append)
+            return conn
+
+        monkeypatch.setattr(ss, "_connect", traced_connect)
+
+        assert _classify_cache_get_many(ids) == {"a": "coding", "b": "writing"}
+
+        in_clause_queries = [
+            s for s in traced if "session_content_buckets" in s and " IN (" in s
+        ]
+        assert len(in_clause_queries) == 3  # 1200 ids chunked at <=500 => 3 queries
+        for query in in_clause_queries:
+            inside = query.split(" IN (", 1)[1].rsplit(")", 1)[0]
+            assert inside.count(",") + 1 <= 500
 
     def test_category_config_change_invalidates_only_compatible_rows(
         self, tmp_home: Path,

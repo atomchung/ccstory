@@ -160,7 +160,9 @@ def parse_window(raw: str | None) -> tuple[datetime, datetime, str]:
     if raw == "all":
         return datetime(2000, 1, 1, tzinfo=local_tz), now, f"all-thru-{now:%Y-%m-%d}"
     m = re.match(r"^(\d{4})-(\d{2})$", raw)
-    if m:
+    # `2026-13` matches the shape but must fail with the same friendly
+    # message as any other malformed window, not a raw datetime ValueError.
+    if m and 1 <= int(m.group(2)) <= 12:
         year, month = int(m.group(1)), int(m.group(2))
         since = datetime(year, month, 1, tzinfo=local_tz)
         nxt = datetime(year + (month // 12), (month % 12) + 1, 1,

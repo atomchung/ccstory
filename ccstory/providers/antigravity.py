@@ -26,7 +26,7 @@ from ..time_tracking import (
     clip_active_intervals,
     make_window_evidence,
 )
-from .base import BaseAgentProvider
+from .base import BaseAgentProvider, _usage_windows_utc
 from .excerpts import (
     ASSISTANT_EVIDENCE_CHARS,
     build_excerpt,
@@ -846,6 +846,10 @@ class AntigravityProvider(BaseAgentProvider):
         """Scan all Antigravity step logs and aggregate token usage in [since, until]."""
         from ..token_usage import ModelUsage
 
+        # Step timestamps parse UTC-aware; normalize caller bounds so direct
+        # naive-datetime callers keep the public naive-means-UTC rule
+        # (matching Claude/Codex) instead of a TypeError.
+        since, until = _usage_windows_utc({"window": (since, until)})["window"]
         assistant_turns = 0
         child_ids = self._get_child_session_ids()
 

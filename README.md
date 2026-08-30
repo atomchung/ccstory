@@ -249,6 +249,10 @@ more than one folder name:
 "infocollector" = "info-collector"   # both roll up as one project
 ```
 
+A chained entry (`a = "b"` while `b = "c"`) resolves all the way to the
+terminal name, so every surface — rollups, goals, project list — agrees on
+one identity.
+
 **Area overrides.** Folder rules can be overridden per-session by content
 (`--classify content` / `hybrid`), where one batched local narrator call
 re-buckets sessions by what they were actually about. An override changes a
@@ -968,7 +972,7 @@ upsert(session_id, "Fixed the auth regression from the 0.7 release.",
 ```
 
 A `provided` row is authoritative: ccstory never overwrites or regenerates
-it, even under `--refresh` or `--llm-narrative --force`. Callers may also
+it, even under `--refresh` or `--llm-narrative --refresh`. Callers may also
 write their own prefixed `source` values (e.g. `"cloud:main"`) for their own
 bookkeeping; ccstory stores those verbatim and treats them as any other
 non-authoritative row.
@@ -997,7 +1001,9 @@ MCP settings — same shape):
 }
 ```
 
-Five read-only tools:
+Five read-only tools ("read-only" covers transcripts, config, and goal
+state; `get_recap` still updates ccstory's own caches in
+`~/.ccstory/cache.db`, exactly like a CLI recap run):
 
 | Tool | Returns |
 |---|---|

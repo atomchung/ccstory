@@ -470,7 +470,12 @@ class CodexProvider(BaseAgentProvider):
         """
         from ..token_usage import ModelUsage
 
-        assistant_turns = {key: 0 for key in windows}
+        # Snapshot timestamps are always UTC-aware; normalize caller bounds
+        # the same way Claude's collector does so direct naive-datetime
+        # callers keep the public naive-means-UTC rule instead of a
+        # TypeError.
+        normalized_windows = _usage_windows_utc(windows)
+        assistant_turns = {key: 0 for key in normalized_windows}
         fields = (
             "input_tokens",
             "cached_input_tokens",
@@ -664,7 +669,7 @@ class CodexProvider(BaseAgentProvider):
 
                 uncached_inp = max(0, inp - cached_inp)
 
-                for key, (since, until) in windows.items():
+                for key, (since, until) in normalized_windows.items():
                     if ts < since or ts > until:
                         continue
                     mu = by_model_by_window[key].setdefault(

@@ -386,6 +386,33 @@ class TestAntigravityUsageCollection:
         assert by_model["gemini-3.6-flash"].input_tokens == 100
         assert by_model["gemini-3.6-flash"].output_tokens == 50
 
+    def test_direct_collect_usage_normalizes_naive_bounds(
+        self, antigravity_factory, tmp_home
+    ):
+        # Public rule: naive datetimes mean UTC. The direct provider call
+        # must normalize like Claude/Codex, not raise TypeError on the
+        # aware-vs-naive comparison against parsed step timestamps.
+        sid = "99999999-9999-9999-9999-999999999999"
+        resp = _planner("resp", 2)
+        resp["usage"] = {
+            "model": "gemini-3.6-flash",
+            "input_tokens": 10,
+            "output_tokens": 5,
+        }
+        antigravity_factory(sid, [_user("hi", 1), resp], cwd="/Users/x/demo")
+        provider = AntigravityProvider(
+            antigravity_dir=tmp_home / ".gemini" / "antigravity"
+        )
+        by_model: dict = {}
+
+        turns = provider.collect_usage(
+            datetime(2026, 7, 1), datetime(2026, 7, 30), by_model,
+        )
+
+        assert turns == 1
+        assert by_model["gemini-3.6-flash"].input_tokens == 10
+        assert by_model["gemini-3.6-flash"].output_tokens == 5
+
     def test_child_discovery_is_cached_and_reads_structured_id_once(
         self, antigravity_factory, tmp_home, monkeypatch
     ):

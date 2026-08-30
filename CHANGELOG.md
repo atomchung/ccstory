@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Chained `[projects]` aliases no longer strand goal hours in
+  `unattributed`** (#229 follow-up). `alias_fold()` now resolves chains to
+  their terminal name (a cyclic table settles deterministically on one
+  member instead of hanging), which makes folding idempotent: the goal side
+  (folded at parse time and again at attribution) and the raw
+  provider-supplied session side converge on one identity. Single-hop
+  tables keep byte-identical behavior.
+- **Windows: mutation-command confirmations no longer crash legacy-encoding
+  pipes** (#250). Non-information commands probe stdout/stderr against the
+  static glyph set ccstory emits (`✓`, sparklines, CJK samples) and
+  reconfigure unencodable streams to UTF-8, mirroring the merged
+  help/version logic. UTF-8 streams are untouched.
+- **`provider_coverage` names every provider whose tokens are in a window's
+  totals.** A provider whose only session failed the engagement filter (or
+  whose usage event sat on the inclusive window boundary) kept its tokens
+  in the totals while vanishing from the coverage lane, leaving
+  `usage_complete` vacuously true. The snapshot, trend-comparison, and MCP
+  surfaces now union usage-derived providers into the active set.
+- **A Claude transcript holding an invalid UTF-8 byte no longer crashes the
+  library/MCP entry points** — the file is skipped exactly as the CLI
+  snapshot path always did — and the usage scan opens transcripts with
+  explicit UTF-8 instead of the platform locale encoding.
+- **Codex and Antigravity `collect_usage` accept naive datetimes** under
+  the public naive-means-UTC rule, matching Claude, instead of raising
+  `TypeError`.
+- **Window and trend input validation**: `2026-13`-style windows raise
+  ccstory's friendly unrecognized-window message instead of the stdlib
+  month-range error; `trend --weeks/--months` reject `0` and negatives
+  instead of silently reverting to the 8-week default; `--narrative
+  overall --no-aggregate` warns on stderr that the combination cancels
+  every narrative section.
+- **PyPI download auto-detection no longer sits behind
+  `github_repo_limit`** — that limit bounds GitHub API calls, while package
+  detection only reads a local `pyproject.toml`. It now covers every
+  discovered repo and survives `github_repo_limit = 0`.
+- **Markdown time surfaces agree at rounding boundaries** (Top focus
+  `7.0h` no longer coexists with a truncated `6h 59m` table row for the
+  same value), and the report's `Generated:` stamp carries the local UTC
+  offset like JSON's `generated_at`.
+- **A broken absolute `TZ` path falls back to the system-local timezone**
+  instead of silently substituting `/etc/localtime` for an explicit choice.
+- **`ccstory init` writes the same `config.toml` for the same data**:
+  deep-mode sampling, the prompt's project cap, and folder-rule majority
+  votes break ties deterministically instead of following filesystem
+  enumeration order.
+
+### Changed
+
+- Cache-layer scaling: `~/.ccstory/config.toml` is parsed once per process
+  in the narrative path (config edits take effect on the next run, matching
+  the language directive), and summary/classification/correction bulk
+  lookups chunk their SQL `IN` lists to stay under the pre-2020 SQLite
+  placeholder limit at real store sizes.
+- The MCP module and README scope the "read-only" claim precisely:
+  `get_recap` persists ccstory's own summary/classification caches in
+  `~/.ccstory/cache.db` exactly like a CLI recap run.
+
 ## [0.8.5] - 2026-08-26
 
 ### Fixed

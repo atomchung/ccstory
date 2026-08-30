@@ -19,6 +19,7 @@ from ccstory.token_usage import (
 )
 import ccstory.providers.claude as claude_module
 from ccstory.providers.claude import ClaudeCodeProvider
+from ccstory.providers.codex import CodexProvider
 
 from tests.conftest import _ts, make_assistant_msg, make_user_msg
 
@@ -249,6 +250,35 @@ class TestCollectUsage:
         assert rep.assistant_turns == 1
         assert rep.total_input == 42
 
+    def test_invalid_utf8_byte_skips_the_file_not_the_run(
+        self, tmp_home, jsonl_factory,
+    ):
+        # A transcript holding one raw invalid byte must be skipped like
+        # any unreadable file — not escape as UnicodeDecodeError through
+        # the library/MCP entry points. collect_snapshot already treats
+        # it that way; parse_session/collect_usage must agree.
+        good = jsonl_factory(
+            "-Users-alice-code-app", "session-good",
+            [
+                make_user_msg("hi", _ts(2026, 5, 10, 10, 0, 0)),
+                make_assistant_msg(
+                    "ok", _ts(2026, 5, 10, 10, 0, 5), "msg_1",
+                    input_tokens=42,
+                ),
+            ],
+        )
+        corrupt = good.parent / "session-corrupt.jsonl"
+        corrupt.write_bytes(b'{"type": "user"\xff}\n')
+
+        assert ClaudeCodeProvider().parse_session(corrupt) is None
+
+        rep = collect_usage(
+            datetime(2026, 5, 1, tzinfo=timezone.utc),
+            datetime(2026, 5, 31, tzinfo=timezone.utc),
+        )
+        assert rep.assistant_turns == 1
+        assert rep.total_input == 42
+
     def test_cache_hit_ratio(self, jsonl_factory):
         # 9000 cache_read out of 10000 total input-side = 0.9
         records = [
@@ -402,6 +432,38 @@ class TestCodexTokenUsage:
         assert mu.input_tokens == 2000
         assert mu.cache_read == 500
         assert mu.output_tokens == 300
+
+    def test_direct_provider_normalizes_naive_bounds(self, codex_factory):
+        # Public rule: naive datetimes mean UTC. The direct provider call
+        # must normalize like Claude's collector, not raise TypeError on
+        # aware-vs-naive comparison.
+        records = [
+            {
+                "timestamp": "2026-07-22T12:00:00Z",
+                "type": "session_meta",
+                "payload": {"session_id": "sid-naive", "cwd": "/Users/test/app"},
+            },
+            {
+                "timestamp": "2026-07-22T12:01:00Z",
+                "type": "turn_context",
+                "payload": {"model": "gpt-5.6-sol"},
+            },
+            make_codex_token_count(
+                "2026-07-22T12:02:00Z",
+                input_tokens=1000, cached_input_tokens=200, output_tokens=100,
+            ),
+        ]
+        codex_factory("sid-naive", records)
+        by_model: dict = {}
+
+        turns = CodexProvider().collect_usage(
+            datetime(2026, 7, 1), datetime(2026, 7, 31), by_model,
+        )
+
+        assert turns == 1
+        assert by_model["gpt-5.6-sol"].input_tokens == 800
+        assert by_model["gpt-5.6-sol"].cache_read == 200
+        assert by_model["gpt-5.6-sol"].output_tokens == 100
 
     def test_cache_conversion_subtracts_cached_input_tokens(self, codex_factory):
         records = [

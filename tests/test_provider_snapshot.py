@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -337,17 +337,97 @@ def test_usage_boundary_same_model_merge_and_session_derived_coverage(
             cache_read=33,
             output_tokens=44,
         )
+    # Both providers' single usage event sits exactly at BOUNDARY, which is
+    # inclusive in both adjacent windows (see the boundary-merge assertion
+    # above: each window's "shared-model" total is alpha's 10 + beta's 1).
+    # alpha's only *session* is in "current" and beta's only session is in
+    # "previous", but coverage must still name both providers in both
+    # windows — a provider with real usage in a window must appear in that
+    # window's provider_coverage even where it has no session at all, or the
+    # totals above would show tokens spent by a provider named nowhere.
     assert snapshot.usage_by_window["previous"].provider_coverage == {
-        "beta": "complete"
+        "alpha": "partial", "beta": "complete",
     }
     assert snapshot.usage_by_window["current"].provider_coverage == {
-        "alpha": "partial"
+        "alpha": "partial", "beta": "complete",
     }
+    assert snapshot.usage_by_window["previous"].incomplete_agents == ["alpha"]
     assert snapshot.usage_by_window["current"].incomplete_agents == ["alpha"]
     assert (
         snapshot.usage_by_window["previous"].by_model["shared-model"]
         is not snapshot.usage_by_window["current"].by_model["shared-model"]
     )
+
+
+def test_non_engaged_session_with_real_usage_still_names_its_provider(
+    monkeypatch,
+):
+    """A provider's only session in a window can fail `SessionStat.engaged`
+    (one quick exchange — a single user message under a minute) while a
+    real, token-bearing turn from that same session still lands in the
+    window through the provider's own usage scan, which never filters by
+    engagement.
+
+    Before the fix, `active_agents` was derived only from
+    `sessions_by_window` (itself filtered to engaged sessions by
+    `collect_snapshot`'s `engaged_only=True` default), so this provider
+    disappeared from `provider_coverage` entirely while its tokens/turns
+    were still merged into `by_model`/`assistant_turns` — real spend with
+    no provider named for it, and `usage_complete` reading True by vacuous
+    truth over an empty `provider_coverage` dict. Same bug class as
+    `test_a_period_reached_only_by_a_crossing_session_reports_its_provider`
+    in `tests/test_trend_windows.py` ("a period could show tokens spent by
+    nobody"), but via engagement filtering rather than start-time bucketing.
+    """
+    quiet_session = replace(
+        _session(
+            "quiet",
+            "quiet-quick-exchange",
+            BOUNDARY + timedelta(minutes=1),
+            BOUNDARY + timedelta(minutes=1, seconds=5),
+        ),
+        user_msg_count=1,
+        active_sec=5,
+    )
+    assert quiet_session.engaged is False
+
+    quiet = _WindowCountingProvider(
+        "quiet",
+        [quiet_session],
+        [
+            (
+                BOUNDARY + timedelta(minutes=1, seconds=2),
+                "quiet-model",
+                100, 0, 0, 50,
+            )
+        ],
+        invocation_order=[],
+    )
+    _install_specs(
+        monkeypatch,
+        [AgentProviderSpec("quiet", "Quiet", lambda: quiet, "partial")],
+    )
+
+    snapshot = collect_provider_snapshot(WINDOWS)
+
+    # The session really did fail engagement and is absent from the window.
+    assert snapshot.sessions_by_window["current"] == []
+    # ...yet its provider's real usage is already in the aggregate totals.
+    report = snapshot.usage_by_window["current"]
+    assert report.assistant_turns == 1
+    assert report.by_model["quiet-model"].output_tokens == 50
+
+    # The fix: the provider must be named, and usage_complete must reflect
+    # its non-complete coverage rather than defaulting to True over an
+    # empty dict.
+    assert report.provider_coverage == {"quiet": "partial"}
+    assert report.usage_complete is False
+    assert report.incomplete_agents == ["quiet"]
+
+    # The "previous" window has none of this provider's usage — coverage
+    # must stay scoped to the window usage actually landed in.
+    assert snapshot.usage_by_window["previous"].provider_coverage == {}
+    assert snapshot.usage_by_window["previous"].usage_complete is True
 
 
 def test_default_metrics_fail_closed_and_carry_no_sensitive_identifiers():

@@ -14,6 +14,7 @@ from ccstory.init_categories import (
     DEEP_DEFAULT_DAYS,
     DEEP_DEFAULT_MAX,
     _aggregate_folder_rules,
+    _format_prompt,
     _parse_toml_categories,
     _salvage_toml_categories,
     _write_config,
@@ -93,6 +94,33 @@ class TestSampleSessionsForDeep:
         assert "d11-s0" in ids
         assert "d12-s0" in ids
 
+    def test_tied_active_sec_breaks_ties_deterministically_by_session_id(self):
+        # 5 same-day sessions, all tied on active_sec: which 3 survive the
+        # day quota must not depend on the order sessions were enumerated in
+        # (e.g. filesystem order), only on a stable secondary key.
+        ids_in = ["s5", "s3", "s1", "s4", "s2"]
+        order_a = [_mk_session(sid, "p", 10, 100) for sid in ids_in]
+        order_b = list(reversed(order_a))
+
+        out_a = [s.session_id for s in sample_sessions_for_deep(order_a, days=1, max_n=3)]
+        out_b = [s.session_id for s in sample_sessions_for_deep(order_b, days=1, max_n=3)]
+
+        assert out_a == out_b == ["s1", "s2", "s3"]
+
+    def test_overflow_fill_breaks_ties_deterministically_by_session_id(self):
+        # Two days, each leaving one tied-active_sec overflow session; the
+        # single remaining slot must resolve the same way regardless of the
+        # order the caller's session list happened to enumerate them in.
+        day_a = [_mk_session(sid, "p", 10, 100) for sid in ["a3", "a1", "a2"]]
+        day_b = [_mk_session(sid, "p", 11, 100) for sid in ["b3", "b1", "b2"]]
+        order_a = day_a + day_b
+        order_b = list(reversed(day_a + day_b))
+
+        out_a = [s.session_id for s in sample_sessions_for_deep(order_a, days=2, max_n=5)]
+        out_b = [s.session_id for s in sample_sessions_for_deep(order_b, days=2, max_n=5)]
+
+        assert out_a == out_b == ["a1", "a2", "b1", "b2", "a3"]
+
 
 # --- _aggregate_folder_rules -----------------------------------------------
 
@@ -132,6 +160,49 @@ class TestAggregateFolderRules:
         mapping = {"s1": "investment", "s2": "writing"}
         rules = _aggregate_folder_rules(sessions, mapping)
         assert rules == {"investment": ["stock"], "writing": ["blog"]}
+
+    def test_tied_bucket_counts_break_ties_deterministically_by_bucket_name(self):
+        # 2 votes "zebra", 2 votes "apple": a genuine count tie. Counter's own
+        # most_common() would break it by which bucket was first *counted*,
+        # which depends on session enumeration order -- pin it to the
+        # alphabetically first bucket name instead.
+        sessions = [
+            _mk_session("s1", "-Users-x-Side-project-proj", 10, 100),
+            _mk_session("s2", "-Users-x-Side-project-proj", 10, 100),
+            _mk_session("s3", "-Users-x-Side-project-proj", 10, 100),
+            _mk_session("s4", "-Users-x-Side-project-proj", 10, 100),
+        ]
+        mapping = {"s1": "zebra", "s2": "zebra", "s3": "apple", "s4": "apple"}
+
+        order_a = sessions  # "zebra" counted first
+        order_b = [sessions[2], sessions[3], sessions[0], sessions[1]]  # "apple" first
+
+        rules_a = _aggregate_folder_rules(order_a, mapping)
+        rules_b = _aggregate_folder_rules(order_b, mapping)
+
+        assert rules_a == rules_b == {"apple": ["proj"]}
+
+
+# --- _format_prompt ----------------------------------------------------------
+
+class TestFormatPrompt:
+    def test_tied_sample_counts_break_ties_deterministically_by_leaf_name(
+        self, monkeypatch,
+    ):
+        # 3 leafs tied on sample count; cap to 2 so the tie-break decides
+        # which one gets cut. dict iteration order (insertion order) must
+        # not change the result.
+        monkeypatch.setattr(init_categories, "MAX_PROJECTS_IN_PROMPT", 2)
+        samples_a = {"zebra": ["x"], "apple": ["x"], "mango": ["x"]}
+        samples_b = {k: samples_a[k] for k in ["mango", "apple", "zebra"]}
+
+        prompt_a = _format_prompt(samples_a)
+        prompt_b = _format_prompt(samples_b)
+
+        assert prompt_a == prompt_b
+        assert "folder → apple" in prompt_a
+        assert "folder → mango" in prompt_a
+        assert "folder → zebra" not in prompt_a
 
 
 # --- run_skip_mode ----------------------------------------------------------

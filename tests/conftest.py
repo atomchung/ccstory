@@ -108,6 +108,9 @@ def tmp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.delenv(session_summarizer.CCSTORY_LANG_ENV, raising=False)
     # language_directive() is @lru_cache'd; flush so per-test CLAUDE.md edits take effect.
     session_summarizer.language_directive.cache_clear()
+    # _read_ccstory_config() is @lru_cache'd too; flush so per-test config.toml
+    # edits take effect.
+    session_summarizer._read_ccstory_config.cache_clear()
     monkeypatch.setattr(categorizer, "CONFIG_PATH", ccstory_dir / "config.toml")
     monkeypatch.setattr(artifacts, "DB_PATH", ccstory_dir / "cache.db")
 

@@ -281,6 +281,36 @@ def prepare_information_streams(
                 reconfigure(encoding="utf-8")
 
 
+# Static non-ASCII glyphs command output can emit: confirmations (✓/✗),
+# warnings, separators/arrows/ellipses, comparison deltas, sparkline bars,
+# and CJK sample text from help/narrative templates.
+_COMMAND_GLYPH_PROBE = "✓✗⚠️·→—–…▲▼▁▂▃▄▅▆▇█日本語繁體中文"
+
+
+def prepare_command_streams() -> None:
+    """Make command output encodable on legacy-encoding pipes (#250).
+
+    A redirected Windows stream can default to cp1252 while confirmations
+    print glyphs like ``✓``. Dynamic content (project names, narratives) is
+    arbitrary Unicode, so a stream whose declared encoding cannot represent
+    the static glyph set is switched to UTF-8 wholesale rather than taught
+    per-glyph fallbacks. UTF-8 streams — every modern terminal — pass the
+    probe and remain untouched, mirroring the information-action logic in
+    :func:`prepare_information_streams`.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        encoding = getattr(stream, "encoding", None)
+        if not encoding:
+            # In-memory text streams accept Unicode directly.
+            continue
+        try:
+            _COMMAND_GLYPH_PROBE.encode(encoding)
+        except (LookupError, UnicodeEncodeError):
+            reconfigure = getattr(stream, "reconfigure", None)
+            if callable(reconfigure):
+                reconfigure(encoding="utf-8")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Serve top-level information cheaply; delegate every real command."""
     raw = list(argv) if argv is not None else sys.argv[1:]

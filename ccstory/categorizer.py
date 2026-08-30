@@ -110,13 +110,29 @@ def load_project_aliases(config_path: Path | None = None) -> dict[str, str]:
 def alias_fold(leaf: str, aliases: dict[str, str] | None) -> str:
     """Map a normalized project leaf onto its canonical name via ``[projects]``.
 
+    Chains (``a → b → c``) resolve to their terminal name, which makes the
+    fold idempotent: goal parsing and goal attribution fold at different
+    times, and every caller-supplied value — raw or already-canonical — must
+    converge on one identity (#229). A cyclic table cannot hang and resolves
+    every entry point to the cycle's lexicographically smallest member so
+    repeated folds still agree.
+
     No-op when ``aliases`` is empty/None or the leaf has no entry — so existing
     configs (no ``[projects]`` table) fold to the identity and every layer-1
     number stays byte-identical.
     """
     if not aliases:
         return leaf
-    return aliases.get(leaf, leaf)
+    current = leaf
+    seen = [current]
+    while True:
+        target = aliases.get(current)
+        if target is None or target == current:
+            return current
+        if target in seen:
+            return min(seen[seen.index(target):])
+        seen.append(target)
+        current = target
 
 
 def project_identity(

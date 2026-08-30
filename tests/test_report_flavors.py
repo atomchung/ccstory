@@ -235,6 +235,48 @@ class TestPlainFlavor:
         assert md.startswith(title)
         assert f"> Agent scope: `{agent}`" in md
 
+    def test_generated_timestamp_is_timezone_aware(self):
+        s = _stat("coding", "-Users-alice-code-myapp", "s1")
+        md = render_report(
+            label="2026-05",
+            since=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 31, tzinfo=timezone.utc),
+            sessions=[s],
+            rollups=[_rollup("coding", [s])],
+            usage=_usage(),
+            summaries={},
+        )
+        generated_line = next(
+            line for line in md.splitlines() if line.startswith("> Period label:")
+        )
+        generated_str = generated_line.split("Generated: ", 1)[1]
+        # Must match the JSON envelope's `.astimezone()` — a naive
+        # datetime.now().isoformat() has no offset and parses as tzinfo=None.
+        assert datetime.fromisoformat(generated_str).tzinfo is not None
+
+    def test_time_distribution_row_rounds_like_top_focus_headline(self):
+        s = _stat("coding", "-Users-alice-code-myapp", "s1")
+        rollup = CategoryRollup(
+            category="coding",
+            active_min=419.6,
+            sessions=1,
+            messages=10,
+            top_sessions=[s],
+        )
+        md = render_report(
+            label="2026-05",
+            since=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 31, tzinfo=timezone.utc),
+            sessions=[s],
+            rollups=[rollup],
+            usage=_usage(),
+            summaries={},
+        )
+        # Top focus headline rounds active_min/60 to "7.0h"; the table cell
+        # must agree instead of floor-truncating to "6h 59m".
+        assert "**★ Top focus: `coding` — 7.0h" in md
+        assert "| coding | 7h 00m | 100% | 1 | 10 |" in md
+
 
 class TestObsidianFlavor:
     def test_starts_with_frontmatter(self):

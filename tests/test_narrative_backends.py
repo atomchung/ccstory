@@ -219,6 +219,10 @@ model = "gpt-5.6-terra-next"
 """,
         encoding="utf-8",
     )
+    # _read_ccstory_config() is @lru_cache'd (like language_directive): a
+    # config edit takes effect on the next process, not mid-process. Flush
+    # explicitly here to simulate that restart and exercise the comparison.
+    ss._read_ccstory_config.cache_clear()
     assert ss._needs_llm(stored) is True
 
 

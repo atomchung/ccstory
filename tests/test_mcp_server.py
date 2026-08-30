@@ -59,6 +59,20 @@ def _seed_session(jsonl_factory, project: str, sid: str, hours_ago: float) -> No
     jsonl_factory(project, sid, records)
 
 
+def _seed_quiet_session(jsonl_factory, project: str, sid: str, hours_ago: float) -> None:
+    """One non-engaged exchange (single user message, a few seconds of
+    activity — `SessionStat.engaged` is False) that still carries a real,
+    token-bearing assistant turn. Provider usage collection never filters by
+    engagement, so this session's tokens/cost land in aggregate totals
+    regardless of whether ccstory counts it as "engaged"."""
+    records = [
+        make_user_msg("quick ping", _recent_ts(hours_ago)),
+        make_assistant_msg("quick pong", _recent_ts(hours_ago - 0.001),
+                           f"{sid}-m1"),
+    ]
+    jsonl_factory(project, sid, records)
+
+
 def _seed_codex_session(codex_factory, sid: str, hours_ago: float) -> None:
     codex_factory(
         sid,
@@ -509,6 +523,50 @@ class TestCompareToPrevious:
         codex = compare_to_previous(window="week", agent="codex")
         assert claude["ok"] is True and claude["agent"] == "claude"
         assert codex["ok"] is True and codex["agent"] == "codex"
+
+    def test_non_engaged_session_still_names_its_provider_in_coverage(
+        self, tmp_home, jsonl_factory, codex_factory,
+    ):
+        """A provider whose only session in a window fails
+        SessionStat.engaged (one quick exchange) must still be named in
+        that window's provider_coverage — its tokens are already in
+        current/previous_cost_usd regardless of engagement, since
+        collect_usage's per-provider scan never filters by engagement. Only
+        the engaged codex sessions keep this tool from bailing out on "No
+        engaged sessions" / "No sessions in the previous window": the quiet
+        claude sessions prove their own provider survives that filter into
+        coverage, in both the current window (mcp_server.py's own
+        collect_usage call) and the previous window (trends.py's
+        compare_to_previous fallback, reached here because this tool never
+        supplies precollected previous_sessions/previous_usage). Same bug
+        class as
+        test_a_period_reached_only_by_a_crossing_session_reports_its_provider
+        in tests/test_trend_windows.py.
+        """
+        _seed_codex_session(codex_factory, "codex-prev", hours_ago=9 * 24)
+        _seed_codex_session(codex_factory, "codex-cur", hours_ago=2)
+        _seed_quiet_session(
+            jsonl_factory, "-Users-me-proj", "claude-quiet-prev",
+            hours_ago=9 * 24,
+        )
+        _seed_quiet_session(
+            jsonl_factory, "-Users-me-proj", "claude-quiet-cur", hours_ago=2,
+        )
+
+        out = compare_to_previous(window="week")
+
+        assert out["ok"] is True
+        # Before the fix, each window's quiet session's provider was absent
+        # here even though its tokens were already merged into that
+        # window's cost — this is the exact "tokens spent by nobody" pattern.
+        assert out["usage_coverage"]["current"]["providers"] == {
+            "codex": "complete", "claude": "complete",
+        }
+        assert out["usage_coverage"]["previous"]["providers"] == {
+            "codex": "complete", "claude": "complete",
+        }
+        assert out["usage_coverage"]["current"]["complete"] is True
+        assert out["usage_coverage"]["previous"]["complete"] is True
 
 
 class TestGetTrend:

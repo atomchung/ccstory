@@ -18,7 +18,7 @@ from pathlib import Path
 
 from rich.console import Console
 
-from ccstory.categorizer import resolve_session_bucket
+from ccstory.categorizer import alias_fold, resolve_session_bucket
 from ccstory.report import (
     JSON_SCHEMA_VERSION,
     build_report_json,
@@ -249,3 +249,33 @@ class TestTwoLayerRendering:
         ))
         out = console.export_text()
         assert "By project" not in out
+
+
+class TestAliasFold:
+    def test_chains_resolve_to_the_terminal_name(self):
+        aliases = {"stockdash": "stock", "stock": "investing"}
+        assert alias_fold("stockdash", aliases) == "investing"
+        assert alias_fold("stock", aliases) == "investing"
+        assert alias_fold("investing", aliases) == "investing"
+
+    def test_folding_is_idempotent(self):
+        aliases = {"stockdash": "stock", "stock": "investing"}
+        once = alias_fold("stockdash", aliases)
+        assert alias_fold(once, aliases) == once
+
+    def test_single_hop_tables_behave_exactly_as_before(self):
+        aliases = {"info-collector": "info_collector"}
+        assert alias_fold("info-collector", aliases) == "info_collector"
+        assert alias_fold("info_collector", aliases) == "info_collector"
+        assert alias_fold("unrelated", aliases) == "unrelated"
+        assert alias_fold("unrelated", {}) == "unrelated"
+        assert alias_fold("unrelated", None) == "unrelated"
+
+    def test_cycles_terminate_deterministically_and_idempotently(self):
+        aliases = {"a": "b", "b": "a", "c": "a", "self": "self"}
+        folded = {alias_fold(name, aliases) for name in ("a", "b", "c")}
+        assert folded == {"a"}
+        assert alias_fold("a", aliases) == alias_fold(
+            alias_fold("a", aliases), aliases,
+        )
+        assert alias_fold("self", aliases) == "self"
