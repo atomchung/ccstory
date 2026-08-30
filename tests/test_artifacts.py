@@ -443,6 +443,31 @@ class TestCollectArtifacts:
         assert out.github_repos_queried == 0
         assert out.total_commits == 1
 
+    def test_zero_github_limit_still_autodetects_pypi_package(
+        self, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # github_repo_limit only bounds `gh` API calls. PyPI detection reads
+        # a local pyproject.toml and must not be gated by it.
+        (git_repo / "pyproject.toml").write_text(
+            '[project]\nname = "repo-pkg"\n', encoding="utf-8"
+        )
+        _commit(git_repo, "w", datetime(2026, 7, 2, tzinfo=timezone.utc))
+        seen: list[str] = []
+        monkeypatch.setattr(
+            artifacts, "pypi_downloads",
+            lambda pkg, win: seen.append(pkg) or None,
+        )
+
+        out = collect_artifacts(
+            [_stat(str(git_repo))],
+            SINCE,
+            UNTIL,
+            settings={"artifacts": {"github_repo_limit": 0}},
+        )
+
+        assert out is not None
+        assert seen == ["repo-pkg"]
+
     def test_one_hundred_repos_query_only_top_ten_by_local_activity(
         self, monkeypatch: pytest.MonkeyPatch
     ):

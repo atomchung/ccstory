@@ -526,7 +526,7 @@ def collect_artifacts(
     # add a quiet local repo only when that repo was inside the bounded target
     # set and the remote lookup found activity.
     auto_pypi_roots = {
-        art.root for art, _ in discovered[:repo_limit]
+        art.root for art, _ in discovered
         if art.commits or id(art) in github_target_ids
     }
     for art, _slug in discovered:
