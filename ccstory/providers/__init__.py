@@ -319,6 +319,19 @@ def collect_provider_snapshot(
         key: {} for key in window_map
     }
     assistant_turns_by_window = {key: 0 for key in window_map}
+    # Providers with real per-window usage, read off each provider's own
+    # pre-merge record. `sessions_by_window` only holds engaged sessions
+    # (`collect_snapshot`'s `engaged_only` filter), but a provider's usage
+    # scan never filters by engagement — a session that is real work yet
+    # fails `SessionStat.engaged` (one quick exchange) still contributes its
+    # exact tokens/turns here. Deriving `active_agents` from
+    # `sessions_by_window` alone would then merge that spend into
+    # `by_model`/`assistant_turns` below while naming no provider for it in
+    # `provider_coverage`, and `usage_complete` would read True by vacuous
+    # truth over an empty dict.
+    usage_active_agents_by_window: dict[str, set[str]] = {
+        key: set() for key in window_map
+    }
     providers_by_agent = {spec.name: provider for spec, provider in selected}
     for record in records:
         provider = providers_by_agent[record.agent]
@@ -332,6 +345,11 @@ def collect_provider_snapshot(
                 )
             )
         for key in window_map:
+            if (
+                record.by_model_by_window[key]
+                or record.assistant_turns_by_window[key]
+            ):
+                usage_active_agents_by_window[key].add(record.agent)
             _merge_model_usage(
                 by_model_by_window[key],
                 record.by_model_by_window[key],
@@ -344,9 +362,10 @@ def collect_provider_snapshot(
     specs_by_name = {spec.name: spec for spec, _provider in selected}
     usage_by_window: dict[str, UsageReport] = {}
     for key, (since, until) in usage_windows.items():
-        active_agents = {
-            session.agent for session in sessions_by_window[key]
-        }
+        active_agents = (
+            {session.agent for session in sessions_by_window[key]}
+            | usage_active_agents_by_window[key]
+        )
         usage_by_window[key] = UsageReport(
             since=since,
             until=until,

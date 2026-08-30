@@ -383,7 +383,18 @@ def compare_to_previous(
         }
     try:
         since, until, label = parse_window(window)
-        sessions = collect_sessions(since, until, agent=agent)
+        # Fetch the whole window's population once — engaged or not — then
+        # split it: `sessions` (used for the gate below, rollups, and
+        # current_sessions) stays the historical engaged-only subset, while
+        # `all_sessions` feeds collect_usage's `active_agents` filter. A
+        # provider whose only session here fails SessionStat.engaged (one
+        # quick exchange) is invisible to an engaged-only session list, even
+        # though collect_usage's own per-provider scan never filters by
+        # engagement and still merges that session's real tokens into the
+        # totals — so it would vanish from provider_coverage while its spend
+        # stayed in the numbers.
+        all_sessions = collect_sessions(since, until, agent=agent, engaged_only=False)
+        sessions = [s for s in all_sessions if s.engaged]
         if not sessions:
             return {
                 "ok": False,
@@ -408,7 +419,7 @@ def compare_to_previous(
             since,
             until,
             agent=agent,
-            active_agents={session.agent for session in sessions},
+            active_agents={session.agent for session in all_sessions},
         )
         cmp = _compare_to_previous(
             current_sessions=sessions,

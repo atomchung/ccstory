@@ -192,8 +192,23 @@ def compare_to_previous(
     # both adjacent windows. Keep the standalone API's old collection path
     # for callers that only have the current window in hand.
     prev_sessions = previous_sessions
+    # Only set when we do our own fresh scan below — the population usage
+    # coverage should be checked against. `prev_sessions` itself must stay
+    # engaged-only (unchanged output for rollups/previous_session_ids), but
+    # collect_usage's `active_agents` filter needs the full population: a
+    # provider whose only previous-window session fails SessionStat.engaged
+    # (one quick exchange) is invisible to an engaged-only session list, even
+    # though collect_usage's own per-provider scan never filters by
+    # engagement and still merges that session's real tokens into the
+    # totals. Without this, that provider vanishes from provider_coverage
+    # while its spend stays in the numbers.
+    prev_usage_active_agents: set[str] | None = None
     if prev_sessions is None:
-        prev_sessions = collect_sessions(prev_since, prev_until, agent=agent)
+        all_prev_sessions = collect_sessions(
+            prev_since, prev_until, agent=agent, engaged_only=False,
+        )
+        prev_sessions = [s for s in all_prev_sessions if s.engaged]
+        prev_usage_active_agents = {s.agent for s in all_prev_sessions}
     if not prev_sessions:
         return None
     _resolve_sessions_from_cache(prev_sessions, mode=mode, fallback=fallback)
@@ -202,7 +217,11 @@ def compare_to_previous(
         prev_since,
         prev_until,
         agent=agent,
-        active_agents={session.agent for session in prev_sessions},
+        active_agents=(
+            prev_usage_active_agents
+            if prev_usage_active_agents is not None
+            else {session.agent for session in prev_sessions}
+        ),
     )
 
     cats = {r.category for r in current_rollups} | {r.category for r in prev_rollups}
