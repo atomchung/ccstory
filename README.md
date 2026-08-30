@@ -968,7 +968,7 @@ upsert(session_id, "Fixed the auth regression from the 0.7 release.",
 ```
 
 A `provided` row is authoritative: ccstory never overwrites or regenerates
-it, even under `--refresh` or `--llm-narrative --force`. Callers may also
+it, even under `--refresh` or `--llm-narrative --refresh`. Callers may also
 write their own prefixed `source` values (e.g. `"cloud:main"`) for their own
 bookkeeping; ccstory stores those verbatim and treats them as any other
 non-authoritative row.
