@@ -9,6 +9,8 @@
 Sibling to [ccusage](https://github.com/ryoppippi/ccusage):
 **ccusage tells you how much you spent · ccstory tells you what on.**
 
+![ccstory recap](assets/ccstory-recap.gif)
+
 ## Who this is for
 
 - People who want to write a weekly status without scrolling scrollback.
