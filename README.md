@@ -1001,7 +1001,9 @@ MCP settings — same shape):
 }
 ```
 
-Five read-only tools:
+Five read-only tools ("read-only" covers transcripts, config, and goal
+state; `get_recap` still updates ccstory's own caches in
+`~/.ccstory/cache.db`, exactly like a CLI recap run):
 
 | Tool | Returns |
 |---|---|
