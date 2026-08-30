@@ -34,6 +34,54 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+class TestTrendCountValidation:
+    """`--weeks 0` / `--months 0` used to be silently discarded by the
+    truthiness in `period`/`count` derivation and fall back to the 8-week
+    default; they must be argparse errors instead."""
+
+    @pytest.mark.parametrize("flag", ["--weeks", "--months"])
+    @pytest.mark.parametrize("value", ["0", "-3"])
+    def test_non_positive_counts_exit_with_argparse_error(
+        self, flag, value, capsys,
+    ):
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["trend", flag, value])
+        assert exc.value.code == 2
+        assert "must be a positive integer" in capsys.readouterr().err
+
+    def test_positive_counts_pass_the_type_gate(self):
+        assert cli._positive_int("6") == 6
+
+
+class TestContradictoryNarrativeWarning:
+    @staticmethod
+    def _ns(**overrides):
+        base = dict(narrative="per-category", no_aggregate=False,
+                    minimal=False)
+        base.update(overrides)
+        return argparse.Namespace(**base)
+
+    def test_overall_with_no_aggregate_warns(self):
+        msg = cli._contradictory_narrative_warning(
+            self._ns(narrative="overall", no_aggregate=True))
+        assert msg is not None
+        assert "--no-aggregate" in msg
+
+    def test_minimal_suppresses_the_warning(self):
+        assert cli._contradictory_narrative_warning(
+            self._ns(narrative="overall", no_aggregate=True, minimal=True),
+        ) is None
+
+    @pytest.mark.parametrize("overrides", [
+        dict(narrative="overall"),
+        dict(no_aggregate=True),
+        dict(narrative="both", no_aggregate=True),
+    ])
+    def test_valid_combinations_stay_silent(self, overrides):
+        assert cli._contradictory_narrative_warning(
+            self._ns(**overrides)) is None
+
+
 class TestMinimalFlag:
     def test_minimal_sets_flag(self):
         args = _build_parser().parse_args(["week", "--minimal"])

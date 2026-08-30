@@ -231,6 +231,15 @@ class TestBuildRecap:
         with pytest.raises(ValueError, match="unrecognized window"):
             build_recap("2026-13-99")
 
+    @pytest.mark.parametrize("raw", ["2026-13", "2026-00"])
+    def test_out_of_range_month_gets_the_friendly_window_error(
+        self, tmp_home, raw,
+    ):
+        """Shape-valid but impossible months must raise ccstory's own
+        message, not the stdlib's `month must be in 1..12`."""
+        with pytest.raises(ValueError, match="unrecognized window"):
+            build_recap(raw)
+
     def test_minimal_skips_narrative_pipeline(self, tmp_home, jsonl_factory):
         _seed_session(jsonl_factory)
         result = build_recap("week", minimal=True)

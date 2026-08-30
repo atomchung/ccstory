@@ -760,6 +760,27 @@ def _run_project(argv: list[str], console: Console) -> int:
     return 0
 
 
+def _positive_int(text: str) -> int:
+    """argparse type for count flags: `--months 0` must be an error, not a
+    silently ignored falsy value that reverts to the default period."""
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return value
+
+
+def _contradictory_narrative_warning(args: argparse.Namespace) -> str | None:
+    """`--narrative overall --no-aggregate` cancels every narrative section;
+    each flag is fine alone, so argparse can't reject the pair — warn."""
+    if args.narrative == "overall" and args.no_aggregate and not args.minimal:
+        return (
+            "ccstory: warning: --narrative overall with --no-aggregate "
+            "disables every narrative section; the recap will be numbers "
+            "only. Drop --no-aggregate to keep the overall narrative."
+        )
+    return None
+
+
 def _run_trend(argv: list[str]) -> int:
     from rich.console import Console
 
@@ -778,9 +799,9 @@ def _run_trend(argv: list[str]) -> int:
         prog="ccstory trend",
         description="Show per-bucket sparklines over N periods.",
     )
-    p.add_argument("--weeks", type=int, default=None,
+    p.add_argument("--weeks", type=_positive_int, default=None,
                    help="Number of 7-day windows (default 8)")
-    p.add_argument("--months", type=int, default=None,
+    p.add_argument("--months", type=_positive_int, default=None,
                    help="Number of calendar months")
     p.add_argument("--classify", choices=["folder", "content", "hybrid"],
                    default="hybrid",
@@ -1009,6 +1030,10 @@ def _dispatch(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         args.minimal = True
+
+    contradiction = _contradictory_narrative_warning(args)
+    if contradiction:
+        print(contradiction, file=sys.stderr)
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.WARNING,
