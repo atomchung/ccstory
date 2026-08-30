@@ -239,8 +239,17 @@ def _read_ccstory_language(path: Path | None = None) -> str | None:
     return None
 
 
+@lru_cache(maxsize=1)
 def _read_ccstory_config(path: Path | None = None) -> dict:
-    """Return ccstory's TOML config, or an empty mapping on malformed input."""
+    """Return ccstory's TOML config, or an empty mapping on malformed input.
+
+    Cached like ``language_directive`` above: every ``narrative_backends()``
+    call (in turn called once per candidate session by
+    ``narrative_config_fingerprint()``) otherwise re-opens and re-parses this
+    file. Flushed only on process restart — config edits take effect on the
+    next run, matching ``language_directive``'s contract. Callers must treat
+    the returned dict as read-only; it is shared across every call site.
+    """
     target = path or CCSTORY_CONFIG_PATH
     if not target.exists():
         return {}
@@ -1116,6 +1125,17 @@ def _cache_fingerprint(family: str, *parts: str) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+# SQLite builds with the pre-2020 default SQLITE_MAX_VARIABLE_NUMBER=999
+# reject a single `IN (?,?,...)` list sized to a real store's ~1.4k session
+# ids. Stay well under that per query.
+_SQL_IN_CHUNK_SIZE = 500
+
+
+def _chunked(items: list[str], size: int = _SQL_IN_CHUNK_SIZE) -> list[list[str]]:
+    """Split ``items`` into consecutive chunks of at most ``size`` elements."""
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
 def upsert(
     session_id: str,
     summary: str,
@@ -1194,17 +1214,20 @@ def get(session_id: str) -> SessionSummary | None:
 def get_many(session_ids: list[str]) -> dict[str, SessionSummary]:
     if not session_ids:
         return {}
+    result: dict[str, SessionSummary] = {}
     with cache_session() as conn:
-        placeholders = ",".join("?" for _ in session_ids)
-        rows = conn.execute(
-            f"""SELECT session_id, summary, source, project, created_at,
-                       prompt_version, narrator_provider, narrator_model,
-                       narrator_fingerprint, evidence_fingerprint,
-                       observed_evidence_fingerprint
-                FROM session_summaries WHERE session_id IN ({placeholders})""",
-            session_ids,
-        ).fetchall()
-        return {r[0]: SessionSummary(*r) for r in rows}
+        for chunk in _chunked(session_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""SELECT session_id, summary, source, project, created_at,
+                           prompt_version, narrator_provider, narrator_model,
+                           narrator_fingerprint, evidence_fingerprint,
+                           observed_evidence_fingerprint
+                    FROM session_summaries WHERE session_id IN ({placeholders})""",
+                chunk,
+            ).fetchall()
+            result.update({r[0]: SessionSummary(*r) for r in rows})
+    return result
 
 
 def recent_auto_timestamps(limit: int = 60) -> list[float]:
@@ -3071,15 +3094,18 @@ def _classify_cache_get_many(
     if not session_ids:
         return {}
     fingerprint = input_fingerprint or _content_classification_fingerprint()
+    result: dict[str, str] = {}
     with cache_session() as conn:
-        placeholders = ",".join("?" for _ in session_ids)
-        rows = conn.execute(
-            f"SELECT session_id, bucket FROM session_content_buckets "
-            f"WHERE session_id IN ({placeholders}) "
-            f"AND input_fingerprint = ?",
-            [*session_ids, fingerprint],
-        ).fetchall()
-        return {sid: bucket for sid, bucket in rows}
+        for chunk in _chunked(session_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"SELECT session_id, bucket FROM session_content_buckets "
+                f"WHERE session_id IN ({placeholders}) "
+                f"AND input_fingerprint = ?",
+                [*chunk, fingerprint],
+            ).fetchall()
+            result.update({sid: bucket for sid, bucket in rows})
+    return result
 
 
 def _classify_cache_upsert_many(

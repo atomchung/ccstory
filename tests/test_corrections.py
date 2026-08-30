@@ -248,6 +248,46 @@ class TestGetSessionCorrections:
         result = corrections.get_session_corrections(["sess1"])
         assert result["sess1"]["summary"].value == "text"
 
+    def test_bulk_fetch_chunks_ids_beyond_sqlite_placeholder_limit(
+        self, tmp_home: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        # SQLite builds with the pre-2020 default SQLITE_MAX_VARIABLE_NUMBER=999
+        # reject a single `IN (?,?,...)` query with this many placeholders; a
+        # real store can reach ~1.4k session ids. Results must match the
+        # unchunked semantics regardless. The dev machine's SQLite build
+        # tolerates 1200 placeholders in one query, so a crash cannot prove
+        # chunking happened -- trace the literal SQL sqlite3 executes instead
+        # and check no single statement's IN (...) list exceeds 500 ids.
+        corrections.set_session_correction("sess1", "summary", "s1 summary", "fp-1")
+        corrections.set_session_correction("sess2", "category", "coding", "fp-2")
+
+        ids = [f"sess-missing-{i}" for i in range(1198)] + ["sess1", "sess2"]
+        assert len(ids) == 1200
+
+        traced: list[str] = []
+        original_connect = ss._connect
+
+        def traced_connect():
+            conn = original_connect()
+            conn.set_trace_callback(traced.append)
+            return conn
+
+        monkeypatch.setattr(ss, "_connect", traced_connect)
+
+        result = corrections.get_session_corrections(ids)
+
+        assert set(result.keys()) == {"sess1", "sess2"}
+        assert result["sess1"]["summary"].value == "s1 summary"
+        assert result["sess2"]["category"].value == "coding"
+
+        in_clause_queries = [
+            s for s in traced if "session_corrections" in s and " IN (" in s
+        ]
+        assert len(in_clause_queries) == 3  # 1200 ids chunked at <=500 => 3 queries
+        for query in in_clause_queries:
+            inside = query.split(" IN (", 1)[1].rsplit(")", 1)[0]
+            assert inside.count(",") + 1 <= 500
+
 
 class TestResolvePrecedence:
     def test_resolve_summary_correction_wins_over_generated(self, tmp_home: Path):

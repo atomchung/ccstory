@@ -95,6 +95,46 @@ class TestSqliteRoundtrip:
     def test_get_many_empty_input(self, tmp_home: Path):
         assert get_many([]) == {}
 
+    def test_get_many_chunks_ids_beyond_sqlite_placeholder_limit(
+        self, tmp_home: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        # SQLite builds with the pre-2020 default SQLITE_MAX_VARIABLE_NUMBER=999
+        # reject a single `IN (?,?,...)` query with this many placeholders; a
+        # real store can reach ~1.4k session ids. Results must match the
+        # unchunked semantics regardless. The dev machine's SQLite build
+        # tolerates 1200 placeholders in one query, so a crash cannot prove
+        # chunking happened -- trace the literal SQL sqlite3 executes instead
+        # and check no single statement's IN (...) list exceeds 500 ids.
+        upsert("a", "a-summary", "generated")
+        upsert("b", "b-summary", "extracted")
+
+        ids = [f"missing-{i}" for i in range(1198)] + ["a", "b"]
+        assert len(ids) == 1200
+
+        traced: list[str] = []
+        original_connect = ss._connect
+
+        def traced_connect():
+            conn = original_connect()
+            conn.set_trace_callback(traced.append)
+            return conn
+
+        monkeypatch.setattr(ss, "_connect", traced_connect)
+
+        result = get_many(ids)
+
+        assert set(result.keys()) == {"a", "b"}
+        assert result["a"].summary == "a-summary"
+        assert result["b"].summary == "b-summary"
+
+        in_clause_queries = [
+            s for s in traced if "session_summaries" in s and " IN (" in s
+        ]
+        assert len(in_clause_queries) == 3  # 1200 ids chunked at <=500 => 3 queries
+        for query in in_clause_queries:
+            inside = query.split(" IN (", 1)[1].rsplit(")", 1)[0]
+            assert inside.count(",") + 1 <= 500
+
     def test_missing_ids(self, tmp_home: Path):
         upsert("present", "x", "generated")
         miss = missing_ids(["present", "absent1", "absent2"])
@@ -1877,6 +1917,29 @@ class TestLanguageDirective:
         cfg.write_text("this is = not [ valid toml", encoding="utf-8")
         ss.language_directive.cache_clear()
         assert language_directive() == "Respond in English."
+
+
+class TestReadCcstoryConfig:
+    """`_read_ccstory_config` is `@lru_cache`'d like `language_directive`
+    above it: `narrative_config_fingerprint()` calls it once per candidate
+    session in `prepare_backfill_plan`, so re-parsing the file every call is
+    pure waste."""
+
+    def test_second_read_is_cached_until_cleared(self, tmp_home: Path):
+        cfg = tmp_home / ".ccstory" / "config.toml"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text('[narrative]\nproviders = ["codex"]\n', encoding="utf-8")
+        ss._read_ccstory_config.cache_clear()
+        first = ss._read_ccstory_config()
+        assert first["narrative"]["providers"] == ["codex"]
+
+        # Overwrite on disk without clearing the cache: the stale cached
+        # value must still come back, proving the file is not re-read.
+        cfg.write_text('[narrative]\nproviders = ["antigravity"]\n', encoding="utf-8")
+        assert ss._read_ccstory_config()["narrative"]["providers"] == ["codex"]
+
+        ss._read_ccstory_config.cache_clear()
+        assert ss._read_ccstory_config()["narrative"]["providers"] == ["antigravity"]
 
 
 class TestDetectSystemLocale:

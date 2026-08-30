@@ -352,6 +352,17 @@ def set_session_correction(
     )
 
 
+# SQLite builds with the pre-2020 default SQLITE_MAX_VARIABLE_NUMBER=999
+# reject a single `IN (?,?,...)` list sized to a real store's ~1.4k session
+# ids. Stay well under that per query.
+_SQL_IN_CHUNK_SIZE = 500
+
+
+def _chunked(items: list[str], size: int = _SQL_IN_CHUNK_SIZE) -> list[list[str]]:
+    """Split ``items`` into consecutive chunks of at most ``size`` elements."""
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
 def get_session_corrections(
     session_ids: list[str],
 ) -> dict[str, dict[str, SessionCorrection]]:
@@ -367,15 +378,17 @@ def get_session_corrections(
     ids = [sid.strip() for sid in session_ids if sid and sid.strip()]
     if not ids:
         return {}
+    rows: list[Any] = []
     with cache_session() as conn:
-        placeholders = ",".join("?" for _ in ids)
-        rows = conn.execute(
-            f"""SELECT session_id, field, value, created_at, updated_at,
-                       base_evidence_fingerprint, status, note
-                FROM session_corrections
-                WHERE session_id IN ({placeholders})""",
-            ids,
-        ).fetchall()
+        for chunk in _chunked(ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows.extend(conn.execute(
+                f"""SELECT session_id, field, value, created_at, updated_at,
+                           base_evidence_fingerprint, status, note
+                    FROM session_corrections
+                    WHERE session_id IN ({placeholders})""",
+                chunk,
+            ).fetchall())
     result: dict[str, dict[str, SessionCorrection]] = {}
     for row in rows:
         correction = _row_to_correction(row)
