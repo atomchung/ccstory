@@ -8,6 +8,9 @@
   - Skip    ([s], instant): Just write a template config with empty
             [categories]. Built-in DEFAULT_RULES + fallback take over.
 
+Quick/Deep timings assume a responsive backend; a slow or retrying narrator
+can take a few minutes instead.
+
 Why three modes: Quick covers users with self-descriptive folder names
 (`stock-dashboard`, `rednote-analysis`). Deep covers brand-name folders
 (`ccstory`, `personal-os`) where folder text gives the LLM nothing. Skip
@@ -104,8 +107,13 @@ def _collect_project_samples(days: int) -> dict[str, list[str]]:
 
 def _format_prompt(samples: dict[str, list[str]]) -> str:
     lines: list[str] = []
-    # Sort by recency-of-use proxy = number of samples; cap to MAX_PROJECTS
-    items = sorted(samples.items(), key=lambda kv: -len(kv[1]))[:MAX_PROJECTS_IN_PROMPT]
+    # Sort by recency-of-use proxy = number of samples; cap to MAX_PROJECTS.
+    # Tie-break on the leaf name itself so the picked/cut set is stable
+    # regardless of filesystem enumeration order (mirrors sampling.py's
+    # _tie_break_key pattern, #188 0.8-G).
+    items = sorted(
+        samples.items(), key=lambda kv: (-len(kv[1]), kv[0]),
+    )[:MAX_PROJECTS_IN_PROMPT]
     for leaf, texts in items:
         lines.append(f"\nfolder → {leaf}")
         for t in texts:
@@ -361,11 +369,14 @@ def sample_sessions_for_deep(
     sampled: list[SessionStat] = []
     overflow: list[SessionStat] = []
     for date in sorted(by_date.keys()):
-        day_sorted = sorted(by_date[date], key=lambda s: -s.active_sec)
+        # Tie-break on session_id so the split between "sampled" and
+        # "overflow" is stable regardless of filesystem enumeration order
+        # (mirrors sampling.py's _tie_break_key pattern, #188 0.8-G).
+        day_sorted = sorted(by_date[date], key=lambda s: (-s.active_sec, s.session_id))
         sampled.extend(day_sorted[:quota_per_day])
         overflow.extend(day_sorted[quota_per_day:])
     if len(sampled) < max_n:
-        overflow.sort(key=lambda s: -s.active_sec)
+        overflow.sort(key=lambda s: (-s.active_sec, s.session_id))
         sampled.extend(overflow[: max_n - len(sampled)])
     return sampled[:max_n]
 
@@ -378,7 +389,10 @@ def _aggregate_folder_rules(
 
     Returns ``{bucket: [folder_leaf, ...]}`` suitable for ``_write_config``.
     For each project leaf, pick the most common bucket the LLM assigned to
-    its sessions; ties broken by first occurrence in the iteration.
+    its sessions; ties broken alphabetically by bucket name, not by
+    ``Counter``'s insertion-order tiebreak (which would depend on filesystem
+    enumeration order — mirrors sampling.py's _tie_break_key pattern, #188
+    0.8-G), so the same tied input always writes the same config.toml.
     """
     by_folder: dict[str, Counter] = defaultdict(Counter)
     for s in sessions:
@@ -390,7 +404,9 @@ def _aggregate_folder_rules(
 
     rules: dict[str, list[str]] = defaultdict(list)
     for leaf, counter in by_folder.items():
-        majority_bucket = counter.most_common(1)[0][0]
+        majority_bucket = sorted(
+            counter.items(), key=lambda kv: (-kv[1], kv[0]),
+        )[0][0]
         rules[majority_bucket].append(leaf)
     return dict(rules)
 
@@ -581,6 +597,8 @@ def _prompt_for_mode(console: Console) -> str:
         "catch-all repos like ccstory / scratch)[/dim]\n"
         "  [bold][S][/bold] Skip      — Built-in keyword defaults only "
         "[dim](no LLM)[/dim]\n"
+        "[dim]Quick/Deep timings assume a responsive backend; a slow or "
+        "retrying narrator can take a few minutes.[/dim]\n"
     )
     choice = Prompt.ask(
         "Choose",
