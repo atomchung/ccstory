@@ -421,24 +421,6 @@ def _terminal_plain_text(value: str) -> str:
     return text.replace("`", "")
 
 
-def _top_session_text(
-    rollup: CategoryRollup,
-    summaries: dict,
-    max_chars: int | None = 70,
-) -> str:
-    """Single-line summary of the longest session, optionally character-capped."""
-    if not rollup.top_sessions:
-        return ""
-    top = rollup.top_sessions[0]
-    text = _session_summary_text(top, summaries) or "(no summary)"
-    text = _terminal_plain_text(text)
-    # Always collapse to one line — newlines/extra whitespace mangle the panel
-    text = " ".join(text.split())
-    if max_chars is not None and len(text) > max_chars:
-        text = text[: max_chars - 1].rstrip() + "…"
-    return text
-
-
 @dataclass(frozen=True)
 class TopFocusNarrative:
     """Deterministic, category-first projection for the Top focus surface.
@@ -938,7 +920,7 @@ def render_report(
     date_range = _format_date_range(since, until)
     lines.append(f"# {_agent_title(agent_scope, 'Recap')} · {date_range}")
     lines.append("")
-    lines.append(f"> Period label: `{label}` · Generated: {datetime.now().isoformat(timespec='seconds')}")
+    lines.append(f"> Period label: `{label}` · Generated: {datetime.now().astimezone().isoformat(timespec='seconds')}")
     lines.append(f"> Window: {since.date()} → {until.date()}")
     lines.append(f"> Agent scope: `{agent_scope}`")
     lines.append(
@@ -965,7 +947,10 @@ def render_report(
     lines.append("|---|---:|---:|---:|---:|")
     for r in rollups:
         pct = (r.active_min / total_min * 100) if total_min else 0
-        h_m = f"{int(r.active_min // 60)}h {int(r.active_min % 60):02d}m"
+        # Round before divmod so this agrees with the Top focus headline's
+        # active_min/60 rounding (419.6 → "7h 00m", not a truncated "6h 59m").
+        rounded_min = round(r.active_min)
+        h_m = f"{rounded_min // 60}h {rounded_min % 60:02d}m"
         lines.append(
             f"| {_md_cell(r.category)} | {h_m} | {pct:.0f}% | {r.sessions} | {r.messages:,} |"
         )
