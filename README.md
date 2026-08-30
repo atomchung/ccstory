@@ -249,6 +249,10 @@ more than one folder name:
 "infocollector" = "info-collector"   # both roll up as one project
 ```
 
+A chained entry (`a = "b"` while `b = "c"`) resolves all the way to the
+terminal name, so every surface — rollups, goals, project list — agrees on
+one identity.
+
 **Area overrides.** Folder rules can be overridden per-session by content
 (`--classify content` / `hybrid`), where one batched local narrator call
 re-buckets sessions by what they were actually about. An override changes a
