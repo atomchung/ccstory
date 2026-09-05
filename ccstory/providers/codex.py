@@ -32,7 +32,14 @@ from ..time_tracking import (
     clip_active_intervals,
     make_window_evidence,
 )
-from .base import BaseAgentProvider, _usage_windows_utc
+from ..token_usage import ModelUsage
+from .base import (
+    BaseAgentProvider,
+    ProviderRecord,
+    SnapshotMetrics,
+    _datetime_utc,
+    _usage_windows_utc,
+)
 from .excerpts import (
     ASSISTANT_EVIDENCE_CHARS,
     build_excerpt,
@@ -95,6 +102,159 @@ def strip_task_wrapper(text: str) -> str:
         if stripped.rstrip().endswith("</task>"):
             stripped = stripped.rstrip()[: -len("</task>")]
     return stripped.strip()
+
+
+_USAGE_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+)
+
+
+def _reconstruct_codex_usage(
+    snapshots_by_branch: Mapping[str, list[tuple[datetime, dict, str]]],
+    branch_parents: Mapping[str, str | None],
+    normalized_windows: Mapping[str, tuple[datetime, datetime]],
+    by_model_by_window: Mapping[str, dict[str, ModelUsage]],
+    thread_roots: Mapping[str, str] | None = None,
+) -> dict[str, int]:
+    """Reconstruct token usage across cumulative branches and attribute to windows.
+
+    Each branch_id has a list of (timestamp, total_token_usage_dict, model).
+    Deduplicates snapshots per branch, computes inherited prefix length from
+    ancestors, calculates deltas handling counter resets, and accumulates
+    positive deltas into the matching windows.
+    """
+    fields = _USAGE_FIELDS
+    ordered_by_branch: dict[str, list[tuple[datetime, dict, str]]] = {}
+    for branch_id, snapshots in snapshots_by_branch.items():
+        unique: dict[tuple, tuple[datetime, dict, str]] = {}
+        for ts, totals, model in snapshots:
+            key = (
+                ts,
+                tuple(int(totals.get(field, 0) or 0) for field in fields),
+            )
+            existing = unique.get(key)
+            if existing is None or (
+                existing[2] == "unknown" and model != "unknown"
+            ):
+                unique[key] = (ts, totals, model)
+        ordered = sorted(
+            unique.values(),
+            key=lambda item: (
+                item[0],
+                tuple(int(item[1].get(field, 0) or 0) for field in fields),
+            ),
+        )
+        ordered_by_branch[branch_id] = ordered
+
+    def _totals_key(snapshot: tuple[datetime, dict, str]) -> tuple[int, ...]:
+        return tuple(
+            max(0, int(snapshot[1].get(field, 0) or 0))
+            for field in fields
+        )
+
+    def _resolve_ancestor(
+        ancestor_id: str | None,
+    ) -> tuple[list[tuple[datetime, dict, str]], str | None]:
+        if not ancestor_id:
+            return [], None
+        if ancestor_id in ordered_by_branch:
+            return ordered_by_branch[ancestor_id], branch_parents.get(ancestor_id)
+        if thread_roots and ancestor_id in thread_roots:
+            root_branch = thread_roots[ancestor_id]
+            if root_branch in ordered_by_branch:
+                return ordered_by_branch[root_branch], branch_parents.get(root_branch)
+        return [], None
+
+    def _inherited_prefix_len(
+        branch_id: str,
+        snapshots: list[tuple[datetime, dict, str]],
+    ) -> int:
+        if not snapshots:
+            return 0
+        child_values = [_totals_key(snapshot) for snapshot in snapshots]
+        best = 0
+        ancestor_id = branch_parents.get(branch_id)
+        visited = {branch_id}
+        while ancestor_id and ancestor_id not in visited:
+            visited.add(ancestor_id)
+            ancestor, next_ancestor_id = _resolve_ancestor(ancestor_id)
+            if not ancestor:
+                break
+            ancestor_values = [
+                _totals_key(snapshot) for snapshot in ancestor
+            ]
+            cursor = 0
+            matched = 0
+            for child_value in child_values:
+                found = next(
+                    (
+                        index
+                        for index in range(cursor, len(ancestor_values))
+                        if ancestor_values[index] == child_value
+                    ),
+                    None,
+                )
+                if found is None:
+                    break
+                matched += 1
+                cursor = found + 1
+            best = max(best, matched)
+            ancestor_id = next_ancestor_id
+        return best
+
+    assistant_turns = {key: 0 for key in normalized_windows}
+    for branch_id, ordered in ordered_by_branch.items():
+        inherited = _inherited_prefix_len(branch_id, ordered)
+        previous = {field: 0 for field in fields}
+        for index, (ts, totals, model) in enumerate(ordered):
+            current = {
+                field: max(0, int(totals.get(field, 0) or 0))
+                for field in fields
+            }
+            delta = {}
+            for field in fields:
+                curr_val = current[field]
+                prev_val = previous[field]
+                if curr_val >= prev_val:
+                    delta[field] = curr_val - prev_val
+                else:
+                    # Cumulative counter reset/decreased mid-branch: treat
+                    # the decrease as a new baseline starting from 0
+                    # (delta = curr_val) instead of silently dropping tokens
+                    # via max(0, ...).
+                    delta[field] = curr_val
+            previous = current
+
+            if index < inherited:
+                continue
+
+            if not any(delta.values()):
+                continue
+
+            inp = delta["input_tokens"]
+            cached_inp = delta["cached_input_tokens"]
+            cw = delta["cache_write_input_tokens"]
+            out = delta["output_tokens"]
+
+            uncached_inp = max(0, inp - cached_inp)
+
+            for key, (since, until) in normalized_windows.items():
+                if ts < since or ts > until:
+                    continue
+                mu = by_model_by_window[key].setdefault(
+                    model, ModelUsage(model=model),
+                )
+                mu.turns += 1
+                mu.input_tokens += uncached_inp
+                mu.cache_read += cached_inp
+                mu.cache_creation += cw
+                mu.output_tokens += out
+                assistant_turns[key] += 1
+
+    return assistant_turns
 
 
 class CodexProvider(BaseAgentProvider):
@@ -308,8 +468,17 @@ class CodexProvider(BaseAgentProvider):
     def _transcript_globs(self) -> list[str]:
         return [str(root / "**" / "*.jsonl") for root in self.data_roots()]
 
-    def parse_session(self, jsonl_path: Path) -> SessionStat | None:
-        """Parse one Codex rollout transcript into a SessionStat."""
+    def _parse_rollout_file(
+        self, jsonl_path: Path
+    ) -> tuple[
+        SessionStat | None,
+        list[tuple[datetime, dict, str]],
+        str,
+        str | None,
+        str | None,
+        int,
+        bool,
+    ]:
         timestamps: list[datetime] = []
         msg_count = 0
         user_msg_count = 0
@@ -318,9 +487,20 @@ class CodexProvider(BaseAgentProvider):
         session_id = ""
         delegation_source = ""
         is_automation = False
+        is_subagent = False
+
+        current_model = "unknown"
+        branch_id = str(jsonl_path)
+        parent_id: str | None = None
+        root_thread_id: str | None = None
+        identity_seen = False
+        snapshots: list[tuple[datetime, dict, str]] = []
+
+        records_parsed = 0
+        complete = True
 
         try:
-            with jsonl_path.open("r", encoding="utf-8", errors="ignore") as f:
+            with jsonl_path.open("r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -328,7 +508,12 @@ class CodexProvider(BaseAgentProvider):
                     try:
                         d = json.loads(line)
                     except json.JSONDecodeError:
+                        complete = False
                         continue
+                    if not isinstance(d, dict):
+                        complete = False
+                        continue
+                    records_parsed += 1
 
                     payload = d.get("payload")
                     if not isinstance(payload, dict):
@@ -337,30 +522,55 @@ class CodexProvider(BaseAgentProvider):
                     ptype = payload.get("type")
 
                     if kind == "session_meta":
-                        if is_subagent_meta(payload):
-                            return None
-                        if payload.get("originator") == "Claude Code":
-                            delegation_source = "claude_code"
-                        if payload.get("thread_source") == "automation":
-                            # SCHEDULED-mode provenance only
-                            # (ccstory/provenance.py). Not is_scheduled:
-                            # that field relaxes SessionStat.engaged's
-                            # admission threshold and was measured to admit
-                            # +41 sessions (+13.7%) when this marker was
-                            # wired into it during #240 (see #136).
-                            is_automation = True
-                        # `id` is this rollout; `session_id` is the *thread*
-                        # root and is shared by every resumed/forked rollout of
-                        # it — 313 of 532 real files collide on it, which as a
-                        # cache key means each one's summary overwrites the
-                        # last. `id` was unique across all of them.
+                        if not identity_seen:
+                            if is_subagent_meta(payload):
+                                is_subagent = True
+                            if payload.get("originator") == "Claude Code":
+                                delegation_source = "claude_code"
+                            if payload.get("thread_source") == "automation":
+                                is_automation = True
+                            rollout_id = payload.get("id")
+                            if isinstance(rollout_id, str) and rollout_id:
+                                branch_id = rollout_id
+                            raw_root = payload.get("session_id")
+                            if isinstance(raw_root, str) and raw_root:
+                                root_thread_id = raw_root
+                            parent = payload.get("parent_thread_id")
+                            if isinstance(parent, str) and parent:
+                                parent_id = parent
+                            identity_seen = True
                         for key in ("id", "session_id"):
                             if not session_id and isinstance(payload.get(key), str):
                                 session_id = payload[key]
-                    # `session_meta` carries the launch cwd, `turn_context`
-                    # the per-turn one; either is fine, first wins.
+
                     if not cwd and isinstance(payload.get("cwd"), str):
                         cwd = payload["cwd"]
+
+                    if kind == "turn_context":
+                        m = payload.get("model")
+                        if isinstance(m, str) and m:
+                            current_model = m
+
+                    elif kind == "event_msg" and ptype == "token_count":
+                        ts_raw = d.get("timestamp")
+                        info = (
+                            payload.get("info")
+                            if isinstance(payload.get("info"), dict)
+                            else {}
+                        )
+                        ttu = (
+                            info.get("total_token_usage")
+                            if isinstance(info, dict)
+                            else None
+                        )
+                        if ts_raw and isinstance(ttu, dict):
+                            ts = _parse_ts(ts_raw)
+                            if ts:
+                                snapshots.append((ts, ttu, current_model))
+                            else:
+                                complete = False
+                        else:
+                            complete = False
 
                     counts_as_activity = kind == "response_item" or (
                         kind == "event_msg" and ptype in _ACTIVITY_EVENT_TYPES
@@ -371,11 +581,10 @@ class CodexProvider(BaseAgentProvider):
                     ts = _parse_ts(d.get("timestamp"))
                     if ts:
                         timestamps.append(ts)
+                    else:
+                        complete = False
 
                     if kind == "response_item":
-                        # Mirror the Claude provider's msg_count, which counts
-                        # every user/assistant record including tool traffic.
-                        # Reasoning items have no counterpart there.
                         if (
                             ptype == "message"
                             and payload.get("role") in ("user", "assistant")
@@ -405,38 +614,58 @@ class CodexProvider(BaseAgentProvider):
                             if not first_user_text:
                                 first_user_text = text[:200]
                         msg_count += 1
-        except OSError:
-            return None
+        except (OSError, UnicodeError):
+            return (
+                None,
+                [],
+                str(jsonl_path),
+                None,
+                None,
+                records_parsed,
+                False,
+            )
 
-        if not timestamps:
-            return None
+        stat: SessionStat | None = None
+        if not is_subagent and timestamps:
+            timestamps.sort()
+            active_sec = 0
+            for prev, curr in zip(timestamps, timestamps[1:]):
+                gap = (curr - prev).total_seconds()
+                active_sec += min(gap, GAP_CAP_SEC)
 
-        timestamps.sort()
-        active_sec = 0
-        for prev, curr in zip(timestamps, timestamps[1:]):
-            gap = (curr - prev).total_seconds()
-            active_sec += min(gap, GAP_CAP_SEC)
+            stat = SessionStat(
+                project=encode_project_dir(worktree_origin(cwd)) if cwd else "codex",
+                category="",
+                session_id=session_id or jsonl_path.stem,
+                start=timestamps[0],
+                end=timestamps[-1],
+                active_sec=int(active_sec),
+                msg_count=msg_count,
+                user_msg_count=user_msg_count,
+                first_user_text=first_user_text,
+                is_scheduled=False,
+                cwd=cwd,
+                timestamps=[t.timestamp() for t in timestamps],
+                agent=self.agent_name,
+                path=jsonl_path,
+                is_delegated=bool(delegation_source),
+                delegation_source=delegation_source,
+                is_automation=is_automation,
+            )
 
-        return SessionStat(
-            project=encode_project_dir(worktree_origin(cwd)) if cwd else "codex",
-            # Left empty on purpose — see ClaudeCodeProvider.parse_session.
-            category="",
-            session_id=session_id or jsonl_path.stem,
-            start=timestamps[0],
-            end=timestamps[-1],
-            active_sec=int(active_sec),
-            msg_count=msg_count,
-            user_msg_count=user_msg_count,
-            first_user_text=first_user_text,
-            is_scheduled=False,
-            cwd=cwd,
-            timestamps=[t.timestamp() for t in timestamps],
-            agent=self.agent_name,
-            path=jsonl_path,
-            is_delegated=bool(delegation_source),
-            delegation_source=delegation_source,
-            is_automation=is_automation,
+        return (
+            stat,
+            snapshots,
+            branch_id,
+            parent_id,
+            root_thread_id,
+            records_parsed,
+            complete,
         )
+
+    def parse_session(self, jsonl_path: Path) -> SessionStat | None:
+        """Parse one Codex rollout transcript into a SessionStat."""
+        return self._parse_rollout_file(jsonl_path)[0]
 
     def collect_usage(
         self,
@@ -453,236 +682,149 @@ class CodexProvider(BaseAgentProvider):
         windows: Mapping[str, tuple[datetime, datetime]],
         by_model_by_window: Mapping[str, dict],
     ) -> dict[str, int]:
-        """Scan all Codex jsonl files and aggregate token usage in [since, until].
-
-        Each rollout id is a cumulative counter branch. Spawned subagents have
-        their own branches and therefore their own real token cost, but a child
-        can begin at a cumulative baseline copied from an ancestor. Interleaving
-        all branches by their shared root ``session_id`` loses divergent child
-        deltas; summing each branch's full final total counts that inherited
-        baseline repeatedly.
-
-        This collector reconstructs each branch independently, removes the
-        longest leading snapshot sequence copied from an ancestor, then
-        attributes positive adjacent deltas in the requested window. Subagent
-        rollouts remain excluded from SessionStat/time collection, but their
-        branch-local token usage is included exactly once here.
-        """
-        from ..token_usage import ModelUsage
-
-        # Snapshot timestamps are always UTC-aware; normalize caller bounds
-        # the same way Claude's collector does so direct naive-datetime
-        # callers keep the public naive-means-UTC rule instead of a
-        # TypeError.
+        """Scan all Codex jsonl files and aggregate token usage in [since, until]."""
         normalized_windows = _usage_windows_utc(windows)
-        assistant_turns = {key: 0 for key in normalized_windows}
-        fields = (
-            "input_tokens",
-            "cached_input_tokens",
-            "cache_write_input_tokens",
-            "output_tokens",
-        )
+        snapshots_by_branch: dict[str, list[tuple[datetime, dict, str]]] = {}
         branch_parents: dict[str, str | None] = {}
-        snapshots_by_branch: dict[
-            str, list[tuple[datetime, dict, str]]
-        ] = {}
+        thread_roots: dict[str, str] = {}
 
+        seen_paths: set[Path] = set()
         for pattern in self._transcript_globs():
             for path_str in glob.glob(pattern, recursive=True):
                 jsonl_path = Path(path_str)
-
-                current_model = "unknown"
-                branch_id = str(jsonl_path)
-                parent_id: str | None = None
-                identity_seen = False
-                snapshots: list[tuple[datetime, dict, str]] = []
-
-                try:
-                    with jsonl_path.open("r", encoding="utf-8", errors="ignore") as f:
-                        for line in f:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            try:
-                                d = json.loads(line)
-                            except json.JSONDecodeError:
-                                continue
-
-                            kind = d.get("type")
-                            payload = (
-                                d.get("payload")
-                                if isinstance(d.get("payload"), dict)
-                                else {}
-                            )
-
-                            if kind == "session_meta":
-                                # Forked rollouts can carry copied ancestor
-                                # session_meta records after their own. The
-                                # first one is the identity of this file.
-                                if not identity_seen:
-                                    rollout_id = payload.get("id")
-                                    if isinstance(rollout_id, str) and rollout_id:
-                                        branch_id = rollout_id
-                                    else:
-                                        root_id = payload.get("session_id")
-                                        if isinstance(root_id, str) and root_id:
-                                            branch_id = root_id
-                                    parent = payload.get("parent_thread_id")
-                                    if isinstance(parent, str) and parent:
-                                        parent_id = parent
-                                    identity_seen = True
-                            elif kind == "turn_context":
-                                m = payload.get("model")
-                                if isinstance(m, str) and m:
-                                    current_model = m
-                            elif (
-                                kind == "event_msg"
-                                and payload.get("type") == "token_count"
-                            ):
-                                ts_raw = d.get("timestamp")
-                                info = (
-                                    payload.get("info")
-                                    if isinstance(payload.get("info"), dict)
-                                    else {}
-                                )
-                                ttu = (
-                                    info.get("total_token_usage")
-                                    if isinstance(info, dict)
-                                    else None
-                                )
-                                if ts_raw and isinstance(ttu, dict):
-                                    ts = _parse_ts(ts_raw)
-                                    if ts:
-                                        snapshots.append((ts, ttu, current_model))
-                except OSError:
+                if jsonl_path in seen_paths:
                     continue
-
-                if not snapshots:
-                    continue
-                snapshots_by_branch.setdefault(branch_id, []).extend(snapshots)
-                if branch_id not in branch_parents or parent_id is not None:
-                    branch_parents[branch_id] = parent_id
-
-        ordered_by_branch: dict[
-            str, list[tuple[datetime, dict, str]]
-        ] = {}
-        for branch_id, snapshots in snapshots_by_branch.items():
-            # Resumed rollouts can copy the last snapshot from their parent.
-            # Deduplicate the exact cumulative point, preferring a known model
-            # when one copy appeared before its turn_context was restored.
-            unique: dict[tuple, tuple[datetime, dict, str]] = {}
-            for ts, totals, model in snapshots:
-                key = (
-                    ts,
-                    tuple(int(totals.get(field, 0) or 0) for field in fields),
+                seen_paths.add(jsonl_path)
+                _, file_snapshots, branch_id, parent_id, root_thread_id, _, _ = (
+                    self._parse_rollout_file(jsonl_path)
                 )
-                existing = unique.get(key)
-                if existing is None or (
-                    existing[2] == "unknown" and model != "unknown"
-                ):
-                    unique[key] = (ts, totals, model)
-            ordered = sorted(
-                unique.values(),
-                key=lambda item: (
-                    item[0],
-                    tuple(int(item[1].get(field, 0) or 0) for field in fields),
+                if file_snapshots:
+                    snapshots_by_branch.setdefault(branch_id, []).extend(file_snapshots)
+                    if branch_id not in branch_parents or parent_id is not None:
+                        branch_parents[branch_id] = parent_id
+                    if root_thread_id and parent_id is None:
+                        thread_roots.setdefault(root_thread_id, branch_id)
+
+        target_by_model: dict[str, dict[str, ModelUsage]] = {
+            key: {} for key in normalized_windows
+        }
+        turns = _reconstruct_codex_usage(
+            snapshots_by_branch=snapshots_by_branch,
+            branch_parents=branch_parents,
+            normalized_windows=normalized_windows,
+            by_model_by_window=target_by_model,
+            thread_roots=thread_roots,
+        )
+        for key in normalized_windows:
+            if key in by_model_by_window:
+                by_model_by_window[key].update(target_by_model[key])
+        return turns
+
+    def collect_snapshot(
+        self,
+        windows: Mapping[str, tuple[datetime, datetime]],
+        *,
+        engaged_only: bool = True,
+    ) -> ProviderRecord:
+        """Derive session and exact-usage facts from one Codex source pass.
+
+        Metrics count unique matched paths, open attempts, successfully
+        decoded dictionary records, and zero companion reads. Inventory is
+        complete only when enumeration and every source read succeed, every
+        non-empty row decodes to a dictionary, and session/usage candidate
+        records contain the schema needed for their facts.
+        """
+        if not windows:
+            return ProviderRecord(
+                agent=self.agent_name,
+                sessions_by_window={},
+                by_model_by_window={},
+                assistant_turns_by_window={},
+                metrics=SnapshotMetrics(
+                    sources_enumerated=0,
+                    source_opens=0,
+                    records_parsed=0,
+                    companion_reads=0,
+                    record_inventory_complete=False,
                 ),
             )
-            ordered_by_branch[branch_id] = ordered
 
-        def _totals_key(snapshot: tuple[datetime, dict, str]) -> tuple[int, ...]:
-            return tuple(
-                max(0, int(snapshot[1].get(field, 0) or 0))
-                for field in fields
+        normalized_windows = _usage_windows_utc(windows)
+        source_paths: list[Path] = []
+        seen_paths: set[Path] = set()
+        inventory_complete = True
+        for pattern in self._transcript_globs():
+            try:
+                matching_paths = glob.glob(pattern, recursive=True)
+            except OSError:
+                inventory_complete = False
+                continue
+            for path_str in matching_paths:
+                path = Path(path_str)
+                if path in seen_paths:
+                    continue
+                seen_paths.add(path)
+                source_paths.append(path)
+
+        sessions: list[SessionStat] = []
+        source_opens = 0
+        records_parsed = 0
+        snapshots_by_branch: dict[str, list[tuple[datetime, dict, str]]] = {}
+        branch_parents: dict[str, str | None] = {}
+        thread_roots: dict[str, str] = {}
+
+        for path in source_paths:
+            source_opens += 1
+            sess, file_snapshots, branch_id, parent_id, root_thread_id, file_records, file_complete = (
+                self._parse_rollout_file(path)
             )
+            records_parsed += file_records
+            if not file_complete:
+                inventory_complete = False
+            if sess is not None:
+                if not engaged_only or sess.engaged:
+                    sessions.append(sess)
+            if file_snapshots:
+                snapshots_by_branch.setdefault(branch_id, []).extend(file_snapshots)
+                if branch_id not in branch_parents or parent_id is not None:
+                    branch_parents[branch_id] = parent_id
+                if root_thread_id and parent_id is None:
+                    thread_roots.setdefault(root_thread_id, branch_id)
 
-        def _inherited_prefix_len(
-            branch_id: str,
-            snapshots: list[tuple[datetime, dict, str]],
-        ) -> int:
-            """Longest leading child sequence copied from an ancestor.
+        by_model_by_window: dict[str, dict[str, ModelUsage]] = {
+            key: {} for key in normalized_windows
+        }
+        assistant_turns_by_window = _reconstruct_codex_usage(
+            snapshots_by_branch=snapshots_by_branch,
+            branch_parents=branch_parents,
+            normalized_windows=normalized_windows,
+            by_model_by_window=by_model_by_window,
+            thread_roots=thread_roots,
+        )
 
-            Parent logs can retain repeated no-change snapshots that a copied
-            child prefix omits, so equality must be order-preserving rather
-            than strictly contiguous. The first child value not found later in
-            the ancestor marks the start of branch-local usage.
-            """
-            if not snapshots:
-                return 0
-            child_values = [_totals_key(snapshot) for snapshot in snapshots]
-            best = 0
-            ancestor_id = branch_parents.get(branch_id)
-            visited = {branch_id}
-            while ancestor_id and ancestor_id not in visited:
-                visited.add(ancestor_id)
-                ancestor = ordered_by_branch.get(ancestor_id, [])
-                ancestor_values = [
-                    _totals_key(snapshot) for snapshot in ancestor
-                ]
-                cursor = 0
-                matched = 0
-                for child_value in child_values:
-                    found = next(
-                        (
-                            index
-                            for index in range(cursor, len(ancestor_values))
-                            if ancestor_values[index] == child_value
-                        ),
-                        None,
-                    )
-                    if found is None:
-                        break
-                    matched += 1
-                    cursor = found + 1
-                best = max(best, matched)
-                ancestor_id = branch_parents.get(ancestor_id)
-            return best
+        sessions_by_window = {
+            key: [
+                session
+                for session in sessions
+                if _datetime_utc(session.end) >= since
+                and _datetime_utc(session.start) < until
+            ]
+            for key, (since, until) in normalized_windows.items()
+        }
 
-        for branch_id, ordered in ordered_by_branch.items():
-            inherited = _inherited_prefix_len(branch_id, ordered)
-            previous = {field: 0 for field in fields}
-            for index, (ts, totals, model) in enumerate(ordered):
-                current = {
-                    field: max(0, int(totals.get(field, 0) or 0))
-                    for field in fields
-                }
-                delta = {
-                    field: max(0, current[field] - previous[field])
-                    for field in fields
-                }
-                previous = current
-
-                if index < inherited:
-                    continue
-
-                # The snapshot timestamp owns the increment since the previous
-                # cumulative snapshot. Keeping every baseline is what excludes
-                # pre-window usage when this one scan attributes deltas to
-                # several adjacent windows.
-                if not any(delta.values()):
-                    continue
-
-                inp = delta["input_tokens"]
-                cached_inp = delta["cached_input_tokens"]
-                cw = delta["cache_write_input_tokens"]
-                out = delta["output_tokens"]
-
-                uncached_inp = max(0, inp - cached_inp)
-
-                for key, (since, until) in normalized_windows.items():
-                    if ts < since or ts > until:
-                        continue
-                    mu = by_model_by_window[key].setdefault(
-                        model, ModelUsage(model=model),
-                    )
-                    mu.turns += 1
-                    mu.input_tokens += uncached_inp
-                    mu.cache_read += cached_inp
-                    mu.cache_creation += cw
-                    mu.output_tokens += out
-                    assistant_turns[key] += 1
-
-        return assistant_turns
+        return ProviderRecord(
+            agent=self.agent_name,
+            sessions_by_window=sessions_by_window,
+            by_model_by_window=by_model_by_window,
+            assistant_turns_by_window=assistant_turns_by_window,
+            metrics=SnapshotMetrics(
+                sources_enumerated=len(source_paths),
+                source_opens=source_opens,
+                records_parsed=records_parsed,
+                companion_reads=0,
+                record_inventory_complete=inventory_complete,
+            ),
+        )
 
     def collect_sessions(
         self,

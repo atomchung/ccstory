@@ -384,3 +384,184 @@ class TestTranscriptResolution:
             active_sec=60, msg_count=2, agent="codex",
         )
         assert TranscriptResolver().path_for(stat) is None
+
+
+def _token_count(
+    ts: str,
+    input_tokens: int,
+    cached_input_tokens: int,
+    output_tokens: int,
+) -> dict:
+    return {
+        "timestamp": ts,
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {
+                "total_token_usage": {
+                    "input_tokens": input_tokens,
+                    "cached_input_tokens": cached_input_tokens,
+                    "cache_write_input_tokens": 0,
+                    "output_tokens": output_tokens,
+                }
+            },
+        },
+    }
+
+
+class TestCodexUsageCorrectness:
+    def test_concurrent_branches_without_rollout_id_do_not_interleave(
+        self, codex_factory,
+    ):
+        """When rollout `id` is absent, rollouts must not merge under shared `session_id`.
+
+        Two physical files sharing `session_id` (parent and concurrent subagent)
+        must not have their cumulative snapshots interleaved into one branch
+        timeline. Doing so previously caused child deltas to be diffed against
+        parent cumulative totals and vanish.
+        """
+        shared_thread_id = "019f0000-1111-7000-8000-000000000001"
+        # Parent rollout: has session_id, but NO 'id'
+        parent_path = codex_factory(
+            "parent-no-id",
+            [
+                {
+                    "timestamp": "2026-07-22T12:00:00Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "session_id": shared_thread_id,
+                        "cwd": "/Users/x/demo",
+                    },
+                },
+                {
+                    "timestamp": "2026-07-22T12:00:01Z",
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-5.6-terra"},
+                },
+                _user("parent task", 1),
+                _token_count("2026-07-22T12:01:00Z", 500, 100, 50),
+                _token_count("2026-07-22T12:03:00Z", 1000, 200, 100),
+            ],
+        )
+
+        # Child subagent rollout: has session_id, parent_thread_id, but NO 'id'
+        child_path = codex_factory(
+            "child-no-id",
+            [
+                {
+                    "timestamp": "2026-07-22T12:01:30Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "session_id": shared_thread_id,
+                        "parent_thread_id": shared_thread_id,
+                        "source": {"subagent": {"thread_spawn": {"depth": 1}}},
+                        "cwd": "/Users/x/demo",
+                    },
+                },
+                {
+                    "timestamp": "2026-07-22T12:01:31Z",
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-5.6-sol"},
+                },
+                # Copied ancestor snapshot:
+                _token_count("2026-07-22T12:01:32Z", 500, 100, 50),
+                # Child's own growth (interleaved in time between parent's snapshots):
+                _token_count("2026-07-22T12:02:00Z", 1300, 300, 250),
+            ],
+        )
+
+        provider = CodexProvider()
+        usage_by_window = {"w": {}}
+        turns = provider.collect_usage_for_windows(
+            {
+                "w": (
+                    datetime(2026, 7, 22, 11, tzinfo=timezone.utc),
+                    datetime(2026, 7, 22, 13, tzinfo=timezone.utc),
+                )
+            },
+            usage_by_window,
+        )
+
+        # Parent branch:
+        # Snapshot 1: 500 in (100 cached), 50 out => 400 uncached in, 100 cached, 50 out
+        # Snapshot 2: 1000 in (200 cached), 100 out => 400 uncached in, 100 cached, 50 out
+        # Parent total: 800 uncached in, 200 cached, 100 out, 2 turns.
+        #
+        # Child branch:
+        # Copied prefix: 500 in (100 cached), 50 out (matches parent)
+        # Snapshot: 1300 in (300 cached), 250 out => delta: 800 in (200 cached), 200 out
+        # => 600 uncached in, 200 cached, 200 out, 1 turn.
+        #
+        # Combined totals across distinct branches:
+        terra = usage_by_window["w"]["gpt-5.6-terra"]
+        sol = usage_by_window["w"]["gpt-5.6-sol"]
+
+        assert terra.input_tokens == 800
+        assert terra.cache_read == 200
+        assert terra.output_tokens == 100
+        assert terra.turns == 2
+
+        assert sol.input_tokens == 600
+        assert sol.cache_read == 200
+        assert sol.output_tokens == 200
+        assert sol.turns == 1
+
+        assert turns["w"] == 3
+
+    def test_decreasing_cumulative_counter_treated_as_reset(self, codex_factory):
+        """When cumulative token counter drops mid-branch, treat as new baseline.
+
+        A drop in total_token_usage within one branch must not be clipped to 0
+        via max(0, delta) (silent token loss). It must be treated as a counter
+        reset with the new value as the fresh delta.
+        """
+        codex_factory(
+            "counter-reset",
+            [
+                {
+                    "timestamp": "2026-07-22T12:00:00Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "reset-branch",
+                        "session_id": "reset-branch",
+                        "cwd": "/Users/x/demo",
+                    },
+                },
+                {
+                    "timestamp": "2026-07-22T12:00:01Z",
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-5.6-sol"},
+                },
+                _user("task turn 1", 1),
+                _token_count("2026-07-22T12:01:00Z", 1000, 200, 100),
+                # Mid-branch counter reset:
+                _token_count("2026-07-22T12:02:00Z", 300, 50, 50),
+                # Normal growth after reset:
+                _token_count("2026-07-22T12:03:00Z", 500, 100, 90),
+            ],
+        )
+
+        provider = CodexProvider()
+        usage_by_window = {"w": {}}
+        turns = provider.collect_usage_for_windows(
+            {
+                "w": (
+                    datetime(2026, 7, 22, 11, tzinfo=timezone.utc),
+                    datetime(2026, 7, 22, 13, tzinfo=timezone.utc),
+                )
+            },
+            usage_by_window,
+        )
+
+        sol = usage_by_window["w"]["gpt-5.6-sol"]
+        # Turn 1: 1000 in (200 cached), 100 out => uncached in 800, cache 200, out 100
+        # Turn 2 (reset): 300 in (50 cached), 50 out => uncached in 250, cache 50, out 50
+        # Turn 3: delta: 200 in (50 cached), 40 out => uncached in 150, cache 50, out 40
+        # Total uncached input: 800 + 250 + 150 = 1200
+        # Total cached input: 200 + 50 + 50 = 300
+        # Total output: 100 + 50 + 40 = 190
+        assert sol.input_tokens == 1200
+        assert sol.cache_read == 300
+        assert sol.output_tokens == 190
+        assert sol.turns == 3
+        assert turns["w"] == 3
