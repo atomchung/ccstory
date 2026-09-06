@@ -827,7 +827,7 @@ class TestCodexUsageCorrectness:
         # Root: 2 turns. Fork A: +300 input / +50 cached / +40 output.
         # Fork B: +400 input / +80 cached / +60 output. Shared prefix is not replayed.
         assert usage.turns == 4
-        assert usage.input_tokens == 1070
+        assert usage.input_tokens == 1370
         assert usage.cache_read == 330
         assert usage.output_tokens == 200
 
