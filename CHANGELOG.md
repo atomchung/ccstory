@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Codex provider single-pass snapshot and exact usage reconstruction** (#174):
+  `CodexProvider.collect_snapshot()` now derives both session facts and exact
+  usage from a single physical rollout parse pass, cutting transcript file opens
+  in half (from 2 opens down to 1 open per contained transcript).
+
+### Fixed
+
+- **Codex usage reconstruction correctness boundaries** (#174):
+  - Preserved per-line and byte-level fault tolerance for invalid UTF-8 bytes
+    so partial or corrupted lines do not discard previously or subsequently
+    parsed session and usage facts while flagging inventory incomplete.
+  - Replaced order-dependent ancestor resolution with deterministic,
+    evidence-based candidate evaluation, ensuring missing-id root/resume and
+    child subagent branches resolve identically under any input order permutation.
+  - Restored the additive mutation contract in `collect_usage_for_windows()` by
+    accumulating model usage at the field level rather than overwriting pre-populated
+    provider models.
+  - Preserved branch identity when `session_meta.id` is missing by retaining
+    the path-based rollout identifier instead of collapsing concurrent
+    subagent threads onto a shared `session_id`.
+  - Treated cumulative counter decreases on the same branch as counter resets
+    to count fresh tokens instead of dropping usage via `max(0, delta)`.
+
 ## [0.8.6] - 2026-08-30
 
 ### Fixed

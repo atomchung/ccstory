@@ -111,11 +111,11 @@ def test_only_crossing_transcripts_are_reopened(workspace):
     and expensive in practice, so it is asserted directly.
 
     Measured **per provider**, against that provider's own contained
-    transcripts, because the three do not agree on a baseline: Claude opens
-    a contained transcript once, Codex twice during its ordinary parse, and
-    Antigravity three times. Those differences are pre-existing parser
-    behavior (#174), and an absolute "one open per transcript" assertion
-    would be testing that instead of testing what window purity costs.
+    transcripts, because the three do not agree on a baseline: Claude and Codex
+    open a contained transcript once (#174), and Antigravity three times.
+    Those differences are pre-existing parser behavior (#174), and an absolute
+    "one open per transcript" assertion would be testing that instead of testing
+    what window purity costs.
 
     Within one provider the claim is exact: every contained transcript costs
     the same, and the crossing one costs that plus one bounded read per
@@ -165,6 +165,10 @@ def test_only_crossing_transcripts_are_reopened(workspace):
             f"{sorted(contained)} — one was reopened for no reason"
         )
         per_transcript = contained.pop()
+        if provider in ("claude", "codex"):
+            assert per_transcript == 1, (
+                f"{provider}: contained transcripts should be opened exactly once in snapshot"
+            )
 
         for session, count in rows:
             if not session.crosses_boundary:

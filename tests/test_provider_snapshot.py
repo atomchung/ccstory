@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
@@ -13,6 +14,7 @@ import pytest
 
 from ccstory import providers, recap
 import ccstory.providers.claude as claude_module
+import ccstory.providers.codex as codex_module
 from ccstory.providers import (
     AgentProviderSpec,
     ProviderSnapshot,
@@ -24,6 +26,7 @@ from ccstory.providers.base import (
     SnapshotMetrics,
 )
 from ccstory.providers.claude import ClaudeCodeProvider
+from ccstory.providers.codex import CodexProvider
 from ccstory.report import build_report_json, render_report
 from ccstory.session_identity import public_session_id
 from ccstory.time_tracking import (
@@ -955,6 +958,424 @@ def test_snapshot_preserves_codex_cumulative_branch_lineage(codex_factory):
     assert usage.by_model["gpt-5.6-sol"].output_tokens == 60
 
 
+def test_codex_snapshot_derives_session_and_exact_usage_facts(
+    codex_factory,
+    monkeypatch,
+):
+    """Codex derives session facts and exact usage from one parse pass (#174 PR C).
+
+    Contained transcripts must be opened once. A crossing transcript is reopened
+    once per window it crosses to extract bounded evidence. Metrics must report
+    exact counts with companion_reads=0 and clean inventory.
+    """
+    def _ts_str(dt: datetime) -> str:
+        return dt.isoformat().replace("+00:00", "Z")
+
+    def _token_count_record(
+        ts: datetime,
+        input_tokens: int,
+        cached: int,
+        output_tokens: int,
+    ) -> dict:
+        return {
+            "timestamp": _ts_str(ts),
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "total_token_usage": {
+                        "input_tokens": input_tokens,
+                        "cached_input_tokens": cached,
+                        "cache_write_input_tokens": 0,
+                        "output_tokens": output_tokens,
+                    }
+                },
+            },
+        }
+
+    prev_start = BOUNDARY - timedelta(days=2)
+    previous = codex_factory(
+        "previous-session",
+        [
+            {
+                "timestamp": _ts_str(prev_start),
+                "type": "session_meta",
+                "payload": {
+                    "id": "previous-session",
+                    "session_id": "previous-session",
+                    "cwd": "/synthetic/prev",
+                },
+            },
+            {
+                "timestamp": _ts_str(prev_start + timedelta(seconds=1)),
+                "type": "turn_context",
+                "payload": {"model": "gpt-5.6-terra"},
+            },
+            {
+                "timestamp": _ts_str(prev_start + timedelta(minutes=1)),
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "previous turn 1"},
+            },
+            {
+                "timestamp": _ts_str(prev_start + timedelta(minutes=2)),
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "prev done"}],
+                },
+            },
+            _token_count_record(prev_start + timedelta(minutes=2), 100, 20, 10),
+            {
+                "timestamp": _ts_str(prev_start + timedelta(minutes=3)),
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "previous turn 2"},
+            },
+            {
+                "timestamp": _ts_str(prev_start + timedelta(minutes=4)),
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "prev done 2"}],
+                },
+            },
+            _token_count_record(prev_start + timedelta(minutes=4), 300, 60, 30),
+        ],
+    )
+
+    span_start = BOUNDARY - timedelta(minutes=2)
+    spanning = codex_factory(
+        "spanning-session",
+        [
+            {
+                "timestamp": _ts_str(span_start),
+                "type": "session_meta",
+                "payload": {
+                    "id": "spanning-session",
+                    "session_id": "spanning-session",
+                    "cwd": "/synthetic/span",
+                },
+            },
+            {
+                "timestamp": _ts_str(span_start + timedelta(seconds=1)),
+                "type": "turn_context",
+                "payload": {"model": "gpt-5.6-sol"},
+            },
+            {
+                "timestamp": _ts_str(span_start + timedelta(minutes=1)),
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "span turn 1"},
+            },
+            {
+                "timestamp": _ts_str(span_start + timedelta(minutes=1, seconds=30)),
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "span reply 1"}],
+                },
+            },
+            _token_count_record(span_start + timedelta(minutes=1, seconds=30), 200, 40, 20),
+            # Crosses BOUNDARY into 'current'
+            {
+                "timestamp": _ts_str(BOUNDARY + timedelta(minutes=1)),
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "span turn 2"},
+            },
+            {
+                "timestamp": _ts_str(BOUNDARY + timedelta(minutes=1, seconds=30)),
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "span reply 2"}],
+                },
+            },
+            _token_count_record(BOUNDARY + timedelta(minutes=1, seconds=30), 500, 100, 50),
+        ],
+    )
+
+    curr_start = BOUNDARY + timedelta(days=1)
+    unengaged = codex_factory(
+        "unengaged-session",
+        [
+            {
+                "timestamp": _ts_str(curr_start),
+                "type": "session_meta",
+                "payload": {
+                    "id": "unengaged-session",
+                    "session_id": "unengaged-session",
+                    "cwd": "/synthetic/unengaged",
+                },
+            },
+            {
+                "timestamp": _ts_str(curr_start + timedelta(seconds=1)),
+                "type": "turn_context",
+                "payload": {"model": "gpt-5.6-terra"},
+            },
+            {
+                "timestamp": _ts_str(curr_start + timedelta(seconds=10)),
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "quick turn"},
+            },
+            {
+                "timestamp": _ts_str(curr_start + timedelta(seconds=20)),
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "quick ack"}],
+                },
+            },
+            _token_count_record(curr_start + timedelta(seconds=20), 100, 20, 10),
+        ],
+    )
+
+    sub_start = BOUNDARY + timedelta(days=2)
+    subagent = codex_factory(
+        "subagent-session",
+        [
+            {
+                "timestamp": _ts_str(sub_start),
+                "type": "session_meta",
+                "payload": {
+                    "id": "subagent-session",
+                    "session_id": "spanning-session",
+                    "parent_thread_id": "spanning-session",
+                    "source": {"subagent": {"thread_spawn": {"depth": 1}}},
+                    "cwd": "/synthetic/span",
+                },
+            },
+            {
+                "timestamp": _ts_str(sub_start + timedelta(seconds=1)),
+                "type": "turn_context",
+                "payload": {"model": "gpt-5.6-sol"},
+            },
+            # Copied ancestor baseline
+            _token_count_record(sub_start + timedelta(seconds=2), 500, 100, 50),
+            # Branch-local delta
+            _token_count_record(sub_start + timedelta(minutes=1), 900, 200, 90),
+        ],
+    )
+
+    sources = [previous, spanning, unengaged, subagent]
+
+    def _record_count(path: Path) -> int:
+        return sum(
+            1
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        )
+
+    parse_attempts = sum(_record_count(path) for path in sources)
+    spanning_records = _record_count(spanning)
+
+    legacy_sessions = collect_sessions_for_windows(WINDOWS, agent="codex")
+    legacy_models = {key: {} for key in WINDOWS}
+    legacy_turns = CodexProvider().collect_usage_for_windows(WINDOWS, legacy_models)
+    legacy_usage = collect_usage_for_windows(
+        WINDOWS,
+        agent="codex",
+        active_agents_by_window={
+            key: {session.agent for session in sessions}
+            for key, sessions in legacy_sessions.items()
+        },
+    )
+    unfiltered_sessions = collect_sessions_for_windows(
+        WINDOWS,
+        engaged_only=False,
+        agent="codex",
+    )
+    unfiltered_snapshot = CodexProvider().collect_snapshot(
+        WINDOWS,
+        engaged_only=False,
+    )
+    assert unfiltered_snapshot.sessions_by_window == unfiltered_sessions
+    assert {
+        session.session_id
+        for session in unfiltered_snapshot.sessions_by_window["current"]
+    } == {"spanning-session", "unengaged-session"}
+
+    opened: list[Path] = []
+    parse_calls = 0
+    glob_patterns: list[str] = []
+    original_open = Path.open
+    original_loads = codex_module.json.loads
+    original_glob = codex_module.glob.glob
+
+    def counted_open(path: Path, *args, **kwargs):
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if path in sources and "r" in mode:
+            opened.append(path)
+        return original_open(path, *args, **kwargs)
+
+    def counted_loads(payload, *args, **kwargs):
+        nonlocal parse_calls
+        parse_calls += 1
+        return original_loads(payload, *args, **kwargs)
+
+    def counted_glob(pattern: str, *args, **kwargs):
+        glob_patterns.append(pattern)
+        return original_glob(pattern, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", counted_open)
+    monkeypatch.setattr(codex_module.json, "loads", counted_loads)
+    monkeypatch.setattr(codex_module.glob, "glob", counted_glob)
+
+    snapshot = collect_provider_snapshot(WINDOWS, agent="codex")
+    record = snapshot.records[0]
+
+    # Every contained transcript is opened once; the spanning transcript is
+    # opened once in snapshot + once per window crossed (2) for window evidence.
+    windows_crossed = 2
+    assert Counter(opened) == Counter(
+        {
+            path: (1 + windows_crossed if path == spanning else 1)
+            for path in sources
+        }
+    )
+    assert (
+        parse_calls == parse_attempts + windows_crossed * spanning_records
+    )
+    assert record.by_model_by_window == legacy_models
+    assert record.assistant_turns_by_window == legacy_turns
+    assert snapshot.usage_by_window == legacy_usage
+    assert record.sessions_by_window == legacy_sessions
+
+    assert record.metrics == SnapshotMetrics(
+        sources_enumerated=4,
+        source_opens=4,
+        records_parsed=parse_attempts,
+        companion_reads=0,
+        record_inventory_complete=True,
+    )
+
+
+def test_codex_snapshot_marks_clean_inventory_complete(codex_factory):
+    codex_factory(
+        "clean-session",
+        [
+            {
+                "timestamp": (BOUNDARY + timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+                "type": "session_meta",
+                "payload": {"id": "clean-1", "cwd": "/synthetic/clean"},
+            },
+            {
+                "timestamp": (BOUNDARY + timedelta(minutes=2)).isoformat().replace("+00:00", "Z"),
+                "type": "turn_context",
+                "payload": {"model": "gpt-5.6-terra"},
+            },
+            {
+                "timestamp": (BOUNDARY + timedelta(minutes=3)).isoformat().replace("+00:00", "Z"),
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "clean query"},
+            },
+            {
+                "timestamp": (BOUNDARY + timedelta(minutes=4)).isoformat().replace("+00:00", "Z"),
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "clean response"}],
+                },
+            },
+        ],
+    )
+
+    record = CodexProvider().collect_snapshot(WINDOWS)
+
+    assert record.metrics == SnapshotMetrics(
+        sources_enumerated=1,
+        source_opens=1,
+        records_parsed=4,
+        companion_reads=0,
+        record_inventory_complete=True,
+    )
+
+
+def test_codex_snapshot_relevant_schema_corruption_fails_closed(codex_factory):
+    codex_factory(
+        "corrupt-session",
+        [
+            {
+                "timestamp": (BOUNDARY + timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+                "type": "session_meta",
+                "payload": {"id": "corrupt-1", "cwd": "/synthetic/corrupt"},
+            },
+            {
+                # Missing/unparseable timestamp on token_count
+                "timestamp": "not-a-valid-ts",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": 100,
+                            "cached_input_tokens": 20,
+                            "cache_write_input_tokens": 0,
+                            "output_tokens": 10,
+                        }
+                    },
+                },
+            },
+        ],
+    )
+
+    record = CodexProvider().collect_snapshot(WINDOWS)
+
+    assert record.metrics == SnapshotMetrics(
+        sources_enumerated=1,
+        source_opens=1,
+        records_parsed=2,
+        companion_reads=0,
+        record_inventory_complete=False,
+    )
+
+
+def test_codex_snapshot_deduplicates_paths_and_counts_failed_open_attempt(
+    codex_factory,
+    monkeypatch,
+):
+    source = codex_factory(
+        "failed-session",
+        [
+            {
+                "timestamp": (BOUNDARY + timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+                "type": "session_meta",
+                "payload": {"id": "failed-1", "cwd": "/synthetic/failed"},
+            },
+        ],
+    )
+    open_attempts = 0
+    original_open = Path.open
+
+    def duplicate_glob(_pattern: str, *args, **kwargs):
+        return [str(source)]
+
+    def failed_open(path: Path, *args, **kwargs):
+        nonlocal open_attempts
+        if path == source:
+            open_attempts += 1
+            raise OSError("synthetic read failure")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(codex_module.glob, "glob", duplicate_glob)
+    monkeypatch.setattr(Path, "open", failed_open)
+
+    record = CodexProvider().collect_snapshot(WINDOWS)
+
+    assert open_attempts == 1
+    assert record.sessions_by_window == {"previous": [], "current": []}
+    assert record.metrics == SnapshotMetrics(
+        sources_enumerated=1,
+        source_opens=1,
+        records_parsed=0,
+        companion_reads=0,
+        record_inventory_complete=False,
+    )
+
+
 def test_build_recap_consumes_one_current_previous_snapshot(
     jsonl_factory,
     monkeypatch,
@@ -1010,9 +1431,11 @@ def _public_projections(key: str, sessions, usage) -> tuple:
     markdown = render_report(
         key, *WINDOWS[key], sessions, rollups, usage, {}, agent="legacy",
     )
+    markdown = re.sub(r"Generated: [^\n]+", "Generated: deterministic", markdown)
     payload = build_report_json(
         key, *WINDOWS[key], sessions, rollups, usage, {}, agent="legacy",
     )
+    payload.pop("generated_at", None)
     pytest.importorskip("mcp")
     from ccstory.mcp_server import _compact_recap
 
