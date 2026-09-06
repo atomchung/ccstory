@@ -117,6 +117,7 @@ def _reconstruct_codex_usage(
     branch_parents: Mapping[str, str | None],
     normalized_windows: Mapping[str, tuple[datetime, datetime]],
     by_model_by_window: Mapping[str, dict[str, ModelUsage]],
+    thread_candidates: Mapping[str, list[str] | str] | None = None,
     thread_roots: Mapping[str, str] | None = None,
 ) -> dict[str, int]:
     """Reconstruct token usage across cumulative branches and attribute to windows.
@@ -149,24 +150,73 @@ def _reconstruct_codex_usage(
         )
         ordered_by_branch[branch_id] = ordered
 
+    candidates_by_thread: dict[str, list[str]] = {}
+    if thread_candidates:
+        for k, v in thread_candidates.items():
+            if isinstance(v, str):
+                candidates_by_thread[k] = [v]
+            else:
+                candidates_by_thread[k] = list(v)
+    elif thread_roots:
+        for k, v in thread_roots.items():
+            candidates_by_thread[k] = [v]
+
     def _totals_key(snapshot: tuple[datetime, dict, str]) -> tuple[int, ...]:
         return tuple(
             max(0, int(snapshot[1].get(field, 0) or 0))
             for field in fields
         )
 
-    def _resolve_ancestor(
-        ancestor_id: str | None,
-    ) -> tuple[list[tuple[datetime, dict, str]], str | None]:
-        if not ancestor_id:
-            return [], None
-        if ancestor_id in ordered_by_branch:
-            return ordered_by_branch[ancestor_id], branch_parents.get(ancestor_id)
-        if thread_roots and ancestor_id in thread_roots:
-            root_branch = thread_roots[ancestor_id]
-            if root_branch in ordered_by_branch:
-                return ordered_by_branch[root_branch], branch_parents.get(root_branch)
-        return [], None
+    def _branch_sort_key(b: str) -> tuple[datetime, str]:
+        snaps = ordered_by_branch.get(b, [])
+        earliest = (
+            snaps[0][0]
+            if snaps
+            else datetime.min.replace(tzinfo=timezone.utc)
+        )
+        return (earliest, b)
+
+    def _match_prefix(
+        child_values: list[tuple[int, ...]],
+        child_snapshots: list[tuple[datetime, dict, str]],
+        ancestor_snapshots: list[tuple[datetime, dict, str]],
+    ) -> int:
+        if not ancestor_snapshots or not child_values:
+            return 0
+        ancestor_values = [_totals_key(s) for s in ancestor_snapshots]
+        cursor = 0
+        matched = 0
+        for i, child_val in enumerate(child_values):
+            child_ts = child_snapshots[i][0]
+            found = None
+            for idx in range(cursor, len(ancestor_values)):
+                if (
+                    ancestor_values[idx] == child_val
+                    and ancestor_snapshots[idx][0] <= child_ts
+                ):
+                    found = idx
+                    break
+            if found is None:
+                break
+            matched += 1
+            cursor = found + 1
+        return matched
+
+    def _eval_lineage_prefix(
+        start_ancestor_id: str,
+        child_values: list[tuple[int, ...]],
+        child_snapshots: list[tuple[datetime, dict, str]],
+    ) -> int:
+        lineage_best = 0
+        curr_id: str | None = start_ancestor_id
+        visited: set[str] = set()
+        while curr_id and curr_id not in visited:
+            visited.add(curr_id)
+            snaps = ordered_by_branch.get(curr_id, [])
+            m = _match_prefix(child_values, child_snapshots, snaps)
+            lineage_best = max(lineage_best, m)
+            curr_id = branch_parents.get(curr_id)
+        return lineage_best
 
     def _inherited_prefix_len(
         branch_id: str,
@@ -174,35 +224,25 @@ def _reconstruct_codex_usage(
     ) -> int:
         if not snapshots:
             return 0
+        parent_id = branch_parents.get(branch_id)
+        if not parent_id:
+            return 0
         child_values = [_totals_key(snapshot) for snapshot in snapshots]
+
+        if parent_id in ordered_by_branch:
+            candidate_branches = [parent_id]
+        elif parent_id in candidates_by_thread:
+            candidate_branches = sorted(
+                candidates_by_thread[parent_id],
+                key=_branch_sort_key,
+            )
+        else:
+            candidate_branches = []
+
         best = 0
-        ancestor_id = branch_parents.get(branch_id)
-        visited = {branch_id}
-        while ancestor_id and ancestor_id not in visited:
-            visited.add(ancestor_id)
-            ancestor, next_ancestor_id = _resolve_ancestor(ancestor_id)
-            if not ancestor:
-                break
-            ancestor_values = [
-                _totals_key(snapshot) for snapshot in ancestor
-            ]
-            cursor = 0
-            matched = 0
-            for child_value in child_values:
-                found = next(
-                    (
-                        index
-                        for index in range(cursor, len(ancestor_values))
-                        if ancestor_values[index] == child_value
-                    ),
-                    None,
-                )
-                if found is None:
-                    break
-                matched += 1
-                cursor = found + 1
-            best = max(best, matched)
-            ancestor_id = next_ancestor_id
+        for cand in candidate_branches:
+            m = _eval_lineage_prefix(cand, child_values, snapshots)
+            best = max(best, m)
         return best
 
     assistant_turns = {key: 0 for key in normalized_windows}
@@ -500,11 +540,16 @@ class CodexProvider(BaseAgentProvider):
         complete = True
 
         try:
-            with jsonl_path.open("r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
+            with jsonl_path.open("rb") as f:
+                for raw_line in f:
+                    raw_line = raw_line.strip()
+                    if not raw_line:
                         continue
+                    try:
+                        line = raw_line.decode("utf-8")
+                    except UnicodeDecodeError:
+                        complete = False
+                        line = raw_line.decode("utf-8", errors="replace")
                     try:
                         d = json.loads(line)
                     except json.JSONDecodeError:
@@ -614,16 +659,8 @@ class CodexProvider(BaseAgentProvider):
                             if not first_user_text:
                                 first_user_text = text[:200]
                         msg_count += 1
-        except (OSError, UnicodeError):
-            return (
-                None,
-                [],
-                str(jsonl_path),
-                None,
-                None,
-                records_parsed,
-                False,
-            )
+        except OSError:
+            complete = False
 
         stat: SessionStat | None = None
         if not is_subagent and timestamps:
@@ -686,7 +723,7 @@ class CodexProvider(BaseAgentProvider):
         normalized_windows = _usage_windows_utc(windows)
         snapshots_by_branch: dict[str, list[tuple[datetime, dict, str]]] = {}
         branch_parents: dict[str, str | None] = {}
-        thread_roots: dict[str, str] = {}
+        thread_branches: dict[str, list[str]] = {}
 
         seen_paths: set[Path] = set()
         for pattern in self._transcript_globs():
@@ -703,7 +740,9 @@ class CodexProvider(BaseAgentProvider):
                     if branch_id not in branch_parents or parent_id is not None:
                         branch_parents[branch_id] = parent_id
                     if root_thread_id and parent_id is None:
-                        thread_roots.setdefault(root_thread_id, branch_id)
+                        branches = thread_branches.setdefault(root_thread_id, [])
+                        if branch_id not in branches:
+                            branches.append(branch_id)
 
         target_by_model: dict[str, dict[str, ModelUsage]] = {
             key: {} for key in normalized_windows
@@ -713,11 +752,29 @@ class CodexProvider(BaseAgentProvider):
             branch_parents=branch_parents,
             normalized_windows=normalized_windows,
             by_model_by_window=target_by_model,
-            thread_roots=thread_roots,
+            thread_candidates=thread_branches,
         )
-        for key in normalized_windows:
-            if key in by_model_by_window:
-                by_model_by_window[key].update(target_by_model[key])
+        for key, model_dict in target_by_model.items():
+            if key not in by_model_by_window:
+                continue
+            dest = by_model_by_window[key]
+            for model, usage in model_dict.items():
+                if model in dest:
+                    target_mu = dest[model]
+                    target_mu.turns += usage.turns
+                    target_mu.input_tokens += usage.input_tokens
+                    target_mu.cache_read += usage.cache_read
+                    target_mu.cache_creation += usage.cache_creation
+                    target_mu.output_tokens += usage.output_tokens
+                else:
+                    dest[model] = ModelUsage(
+                        model=usage.model,
+                        turns=usage.turns,
+                        input_tokens=usage.input_tokens,
+                        cache_read=usage.cache_read,
+                        cache_creation=usage.cache_creation,
+                        output_tokens=usage.output_tokens,
+                    )
         return turns
 
     def collect_snapshot(
@@ -771,7 +828,7 @@ class CodexProvider(BaseAgentProvider):
         records_parsed = 0
         snapshots_by_branch: dict[str, list[tuple[datetime, dict, str]]] = {}
         branch_parents: dict[str, str | None] = {}
-        thread_roots: dict[str, str] = {}
+        thread_branches: dict[str, list[str]] = {}
 
         for path in source_paths:
             source_opens += 1
@@ -789,7 +846,9 @@ class CodexProvider(BaseAgentProvider):
                 if branch_id not in branch_parents or parent_id is not None:
                     branch_parents[branch_id] = parent_id
                 if root_thread_id and parent_id is None:
-                    thread_roots.setdefault(root_thread_id, branch_id)
+                    branches = thread_branches.setdefault(root_thread_id, [])
+                    if branch_id not in branches:
+                        branches.append(branch_id)
 
         by_model_by_window: dict[str, dict[str, ModelUsage]] = {
             key: {} for key in normalized_windows
@@ -799,7 +858,7 @@ class CodexProvider(BaseAgentProvider):
             branch_parents=branch_parents,
             normalized_windows=normalized_windows,
             by_model_by_window=by_model_by_window,
-            thread_roots=thread_roots,
+            thread_candidates=thread_branches,
         )
 
         sessions_by_window = {

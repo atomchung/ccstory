@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import glob
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -11,6 +12,7 @@ import pytest
 from ccstory.providers import TranscriptResolver, collect_multi_agent_sessions
 from ccstory.providers.codex import CodexProvider
 from ccstory.providers.projects import encode_project_dir
+from ccstory.token_usage import ModelUsage
 
 
 def _ts(minute: int) -> str:
@@ -565,3 +567,263 @@ class TestCodexUsageCorrectness:
         assert sol.output_tokens == 190
         assert sol.turns == 3
         assert turns["w"] == 3
+
+    def test_invalid_utf8_preserves_parsed_facts_and_flags_incomplete(
+        self,
+        tmp_path,
+    ):
+        """Invalid UTF-8 bytes mid-file must not discard parsed session/usage facts (#174)."""
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir(parents=True)
+        file_path = sessions_dir / "rollout-corrupt-utf8.jsonl"
+
+        line1 = json.dumps({
+            "timestamp": "2026-07-22T12:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": "utf8-test", "session_id": "utf8-test", "cwd": "/Users/x/demo"},
+        }).encode("utf-8") + b"\n"
+        line2 = json.dumps({
+            "timestamp": "2026-07-22T12:00:01Z",
+            "type": "turn_context",
+            "payload": {"model": "gpt-5.6-sol"},
+        }).encode("utf-8") + b"\n"
+        line3 = json.dumps({
+            "timestamp": "2026-07-22T12:01:00Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {"total_token_usage": {"input_tokens": 100, "cached_input_tokens": 20, "output_tokens": 10}},
+            },
+        }).encode("utf-8") + b"\n"
+        # Invalid UTF-8 byte (\xff) inside user message payload:
+        line4 = b'{"timestamp": "2026-07-22T12:02:00Z", "type": "event_msg", "payload": {"type": "user_message", "message": "hello \xff world"}}\n'
+        # Line 5: subsequent token count after the bad byte
+        line5 = json.dumps({
+            "timestamp": "2026-07-22T12:03:00Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {"total_token_usage": {"input_tokens": 300, "cached_input_tokens": 50, "output_tokens": 40}},
+            },
+        }).encode("utf-8") + b"\n"
+        # Line 6: second user message to pass engagement filter
+        line6 = json.dumps({
+            "timestamp": "2026-07-22T12:04:00Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "follow up"},
+        }).encode("utf-8") + b"\n"
+
+        file_path.write_bytes(line1 + line2 + line3 + line4 + line5 + line6)
+
+        provider = CodexProvider(codex_dir=tmp_path)
+        windows = {
+            "w": (
+                datetime(2026, 7, 22, 11, tzinfo=timezone.utc),
+                datetime(2026, 7, 22, 13, tzinfo=timezone.utc),
+            )
+        }
+        record = provider.collect_snapshot(windows)
+
+        assert record.metrics.record_inventory_complete is False
+        assert record.metrics.records_parsed == 6
+        assert record.metrics.source_opens == 1
+
+        assert len(record.sessions_by_window["w"]) == 1
+        sess = record.sessions_by_window["w"][0]
+        assert sess.session_id == "utf8-test"
+        assert sess.user_msg_count == 2
+        assert "hello" in sess.first_user_text
+
+        sol = record.by_model_by_window["w"]["gpt-5.6-sol"]
+        assert sol.input_tokens == 250
+        assert sol.cache_read == 50
+        assert sol.output_tokens == 40
+        assert sol.turns == 2
+        assert record.assistant_turns_by_window["w"] == 2
+
+    def test_missing_id_ancestor_resolution_invariant_to_input_order(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Ancestor resolution for missing-id rollouts must be invariant to input order (#174)."""
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir(parents=True)
+
+        root_path = sessions_dir / "rollout-2026-07-22T10-00-00-root.jsonl"
+        root_records = [
+            {
+                "timestamp": "2026-07-22T10:00:00Z",
+                "type": "session_meta",
+                "payload": {"session_id": "thread-shared", "cwd": "/Users/x/demo"},
+            },
+            {
+                "timestamp": "2026-07-22T10:00:01Z",
+                "type": "turn_context",
+                "payload": {"model": "gpt-5.6-sol"},
+            },
+            _user("root turn 1", 1),
+            _token_count("2026-07-22T10:01:00Z", 500, 100, 50),
+            _token_count("2026-07-22T10:05:00Z", 1000, 200, 100),
+        ]
+        with root_path.open("w", encoding="utf-8") as f:
+            for r in root_records:
+                f.write(json.dumps(r) + "\n")
+
+        resume_path = sessions_dir / "rollout-2026-07-22T11-00-00-resume.jsonl"
+        resume_records = [
+            {
+                "timestamp": "2026-07-22T11:00:00Z",
+                "type": "session_meta",
+                "payload": {"session_id": "thread-shared", "cwd": "/Users/x/demo"},
+            },
+            {
+                "timestamp": "2026-07-22T11:00:01Z",
+                "type": "turn_context",
+                "payload": {"model": "gpt-5.6-sol"},
+            },
+            _token_count("2026-07-22T10:01:00Z", 500, 100, 50),
+            _token_count("2026-07-22T10:05:00Z", 1000, 200, 100),
+            _user("resume turn 2", 2),
+            _token_count("2026-07-22T11:01:00Z", 1500, 300, 150),
+            _token_count("2026-07-22T11:05:00Z", 2000, 400, 200),
+        ]
+        with resume_path.open("w", encoding="utf-8") as f:
+            for r in resume_records:
+                f.write(json.dumps(r) + "\n")
+
+        child_path = sessions_dir / "rollout-2026-07-22T11-10-00-child.jsonl"
+        child_records = [
+            {
+                "timestamp": "2026-07-22T11:10:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "session_id": "subagent-thread",
+                    "parent_thread_id": "thread-shared",
+                    "source": {"subagent": {"thread_spawn": {"depth": 1}}},
+                    "cwd": "/Users/x/demo",
+                },
+            },
+            {
+                "timestamp": "2026-07-22T11:10:01Z",
+                "type": "turn_context",
+                "payload": {"model": "gpt-5.6-sol"},
+            },
+            _token_count("2026-07-22T10:01:00Z", 500, 100, 50),
+            _token_count("2026-07-22T10:05:00Z", 1000, 200, 100),
+            _token_count("2026-07-22T11:01:00Z", 1500, 300, 150),
+            _token_count("2026-07-22T11:05:00Z", 2000, 400, 200),
+            _user("child turn 1", 3),
+            _token_count("2026-07-22T11:10:10Z", 2500, 500, 250),
+        ]
+        with child_path.open("w", encoding="utf-8") as f:
+            for r in child_records:
+                f.write(json.dumps(r) + "\n")
+
+        provider = CodexProvider(codex_dir=tmp_path)
+        windows = {
+            "w": (
+                datetime(2026, 7, 22, 9, tzinfo=timezone.utc),
+                datetime(2026, 7, 22, 12, tzinfo=timezone.utc),
+            )
+        }
+
+        monkeypatch.setattr(
+            glob, "glob", lambda pat, recursive=True: [str(root_path), str(resume_path), str(child_path)]
+        )
+        rec_order1 = provider.collect_snapshot(windows)
+
+        monkeypatch.setattr(
+            glob, "glob", lambda pat, recursive=True: [str(resume_path), str(root_path), str(child_path)]
+        )
+        rec_order2 = provider.collect_snapshot(windows)
+
+        monkeypatch.setattr(
+            glob, "glob", lambda pat, recursive=True: [str(child_path), str(resume_path), str(root_path)]
+        )
+        rec_order3 = provider.collect_snapshot(windows)
+
+        # In all permutations:
+        # 1. Total tokens must be strictly identical across all input orders
+        u1 = rec_order1.by_model_by_window["w"]["gpt-5.6-sol"]
+        u2 = rec_order2.by_model_by_window["w"]["gpt-5.6-sol"]
+        u3 = rec_order3.by_model_by_window["w"]["gpt-5.6-sol"]
+
+        assert u1 == u2 == u3
+        assert rec_order1.assistant_turns_by_window["w"] == rec_order2.assistant_turns_by_window["w"] == rec_order3.assistant_turns_by_window["w"]
+
+        # 2. Child correctly inherited 4 snapshots from resume (and did not fall
+        # back to root which only had 2 snapshots, re-billing the baseline):
+        # - Root: 2 turns (800 in, 200 cached, 100 out)
+        # - Resume: 4 turns (1600 in, 400 cached, 200 out)
+        # - Child: 1 turn (400 in, 100 cached, 50 out, with 4 snapshots inherited from resume)
+        # Total turns: 7
+        # Total uncached input: 2800
+        # Total cached input: 700
+        # Total output: 350
+        assert u1.turns == 7
+        assert u1.input_tokens == 2800
+        assert u1.cache_read == 700
+        assert u1.output_tokens == 350
+
+    def test_collect_usage_for_windows_additive_mutation_contract(self, codex_factory):
+        """collect_usage_for_windows must accumulate onto existing model usage, not overwrite (#174)."""
+        codex_factory(
+            "usage-session",
+            [
+                {
+                    "timestamp": "2026-07-22T12:00:00Z",
+                    "type": "session_meta",
+                    "payload": {"id": "additive-branch", "cwd": "/Users/x/demo"},
+                },
+                {
+                    "timestamp": "2026-07-22T12:00:01Z",
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-5.6-sol"},
+                },
+                _token_count("2026-07-22T12:01:00Z", 500, 100, 50),
+            ],
+        )
+
+        provider = CodexProvider()
+        by_model = {
+            "w": {
+                "gpt-5.6-sol": ModelUsage(
+                    model="gpt-5.6-sol",
+                    turns=10,
+                    input_tokens=1000,
+                    cache_read=500,
+                    cache_creation=50,
+                    output_tokens=200,
+                ),
+                "other-model": ModelUsage(
+                    model="other-model",
+                    turns=5,
+                    input_tokens=300,
+                    cache_read=100,
+                    output_tokens=50,
+                ),
+            }
+        }
+
+        turns = provider.collect_usage_for_windows(
+            {
+                "w": (
+                    datetime(2026, 7, 22, 11, tzinfo=timezone.utc),
+                    datetime(2026, 7, 22, 13, tzinfo=timezone.utc),
+                )
+            },
+            by_model,
+        )
+
+        sol = by_model["w"]["gpt-5.6-sol"]
+        assert sol.turns == 10 + 1
+        assert sol.input_tokens == 1000 + 400
+        assert sol.cache_read == 500 + 100
+        assert sol.cache_creation == 50
+        assert sol.output_tokens == 200 + 50
+
+        other = by_model["w"]["other-model"]
+        assert other.turns == 5
+        assert other.input_tokens == 300
+        assert turns["w"] == 1
