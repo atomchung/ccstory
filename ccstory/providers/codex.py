@@ -161,6 +161,11 @@ def _reconstruct_codex_usage(
         for k, v in thread_roots.items():
             candidates_by_thread[k] = [v]
 
+    thread_by_branch: dict[str, str] = {}
+    for thread_id, candidates in candidates_by_thread.items():
+        for candidate in candidates:
+            thread_by_branch.setdefault(candidate, thread_id)
+
     def _totals_key(snapshot: tuple[datetime, dict, str]) -> tuple[int, ...]:
         return tuple(
             max(0, int(snapshot[1].get(field, 0) or 0))
@@ -202,6 +207,49 @@ def _reconstruct_codex_usage(
             cursor = found + 1
         return matched
 
+    def _copied_thread_prefix_len(
+        child_snapshots: list[tuple[datetime, dict, str]],
+        ancestor_snapshots: list[tuple[datetime, dict, str]],
+    ) -> int:
+        """Return a provable copied prefix for no-id linear resumes.
+
+        Missing rollout ids force physical paths to remain distinct branches so
+        concurrent forks cannot be interleaved.  A top-level resume of the same
+        thread can nevertheless copy the ancestor's cumulative history.  Treat
+        it as inherited only when every cumulative *change point* from the
+        earlier rollout is the leading history of the later rollout, in order
+        and no earlier in time.  Divergent siblings therefore stay independent.
+        """
+        if not child_snapshots or not ancestor_snapshots:
+            return 0
+        if ancestor_snapshots[-1][0] >= child_snapshots[-1][0]:
+            return 0
+
+        ancestor_changes: list[tuple[datetime, tuple[int, ...]]] = []
+        for snapshot in ancestor_snapshots:
+            value = _totals_key(snapshot)
+            if not ancestor_changes or ancestor_changes[-1][1] != value:
+                ancestor_changes.append((snapshot[0], value))
+
+        child_changes: list[tuple[int, datetime, tuple[int, ...]]] = []
+        for index, snapshot in enumerate(child_snapshots):
+            value = _totals_key(snapshot)
+            if not child_changes or child_changes[-1][2] != value:
+                child_changes.append((index, snapshot[0], value))
+
+        if len(child_changes) < len(ancestor_changes):
+            return 0
+        for ancestor_change, child_change in zip(
+            ancestor_changes,
+            child_changes,
+        ):
+            ancestor_ts, ancestor_value = ancestor_change
+            _child_index, child_ts, child_value = child_change
+            if ancestor_value != child_value or ancestor_ts > child_ts:
+                return 0
+
+        return child_changes[len(ancestor_changes) - 1][0] + 1
+
     def _eval_lineage_prefix(
         start_ancestor_id: str,
         child_values: list[tuple[int, ...]],
@@ -225,23 +273,37 @@ def _reconstruct_codex_usage(
         if not snapshots:
             return 0
         parent_id = branch_parents.get(branch_id)
-        if not parent_id:
-            return 0
         child_values = [_totals_key(snapshot) for snapshot in snapshots]
 
-        if parent_id in ordered_by_branch:
-            candidate_branches = [parent_id]
-        elif parent_id in candidates_by_thread:
-            candidate_branches = sorted(
-                candidates_by_thread[parent_id],
-                key=_branch_sort_key,
-            )
-        else:
-            candidate_branches = []
+        if parent_id:
+            if parent_id in ordered_by_branch:
+                candidate_branches = [parent_id]
+            elif parent_id in candidates_by_thread:
+                candidate_branches = sorted(
+                    candidates_by_thread[parent_id],
+                    key=_branch_sort_key,
+                )
+            else:
+                candidate_branches = []
+
+            best = 0
+            for cand in candidate_branches:
+                m = _eval_lineage_prefix(cand, child_values, snapshots)
+                best = max(best, m)
+            return best
+
+        thread_id = thread_by_branch.get(branch_id)
+        if not thread_id:
+            return 0
 
         best = 0
-        for cand in candidate_branches:
-            m = _eval_lineage_prefix(cand, child_values, snapshots)
+        for candidate in candidates_by_thread.get(thread_id, []):
+            if candidate == branch_id:
+                continue
+            m = _copied_thread_prefix_len(
+                snapshots,
+                ordered_by_branch.get(candidate, []),
+            )
             best = max(best, m)
         return best
 
