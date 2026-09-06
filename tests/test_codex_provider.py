@@ -646,7 +646,7 @@ class TestCodexUsageCorrectness:
         tmp_path,
         monkeypatch,
     ):
-        """Ancestor resolution for missing-id rollouts must be invariant to input order (#174)."""
+        """No-id linear resumes and child ancestry stay exact under any input order."""
         sessions_dir = tmp_path / "sessions"
         sessions_dir.mkdir(parents=True)
 
@@ -743,28 +743,93 @@ class TestCodexUsageCorrectness:
         )
         rec_order3 = provider.collect_snapshot(windows)
 
-        # In all permutations:
-        # 1. Total tokens must be strictly identical across all input orders
         u1 = rec_order1.by_model_by_window["w"]["gpt-5.6-sol"]
         u2 = rec_order2.by_model_by_window["w"]["gpt-5.6-sol"]
         u3 = rec_order3.by_model_by_window["w"]["gpt-5.6-sol"]
 
         assert u1 == u2 == u3
-        assert rec_order1.assistant_turns_by_window["w"] == rec_order2.assistant_turns_by_window["w"] == rec_order3.assistant_turns_by_window["w"]
+        assert rec_order1.assistant_turns_by_window["w"] == 5
+        assert rec_order2.assistant_turns_by_window["w"] == 5
+        assert rec_order3.assistant_turns_by_window["w"] == 5
 
-        # 2. Child correctly inherited 4 snapshots from resume (and did not fall
-        # back to root which only had 2 snapshots, re-billing the baseline):
-        # - Root: 2 turns (800 in, 200 cached, 100 out)
-        # - Resume: 4 turns (1600 in, 400 cached, 200 out)
-        # - Child: 1 turn (400 in, 100 cached, 50 out, with 4 snapshots inherited from resume)
-        # Total turns: 7
-        # Total uncached input: 2800
-        # Total cached input: 700
-        # Total output: 350
-        assert u1.turns == 7
-        assert u1.input_tokens == 2800
-        assert u1.cache_read == 700
-        assert u1.output_tokens == 350
+        # Root owns the first two increments. Resume copies those two points,
+        # then contributes only 1000->1500->2000. Child copies all four points
+        # and contributes only 2000->2500. Every physical increment is charged once.
+        assert u1.turns == 5
+        assert u1.input_tokens == 2000
+        assert u1.cache_read == 500
+        assert u1.output_tokens == 250
+
+    def test_missing_id_divergent_thread_branches_keep_independent_growth(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Sibling no-id branches share only the proven root prefix; divergence is additive."""
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir(parents=True)
+
+        def write(path: Path, records: list[dict]) -> None:
+            with path.open("w", encoding="utf-8") as f:
+                for record in records:
+                    f.write(json.dumps(record) + "\n")
+
+        root = sessions_dir / "root.jsonl"
+        fork_a = sessions_dir / "fork-a.jsonl"
+        fork_b = sessions_dir / "fork-b.jsonl"
+        shared_meta = {"session_id": "thread-divergent", "cwd": "/Users/x/demo"}
+
+        write(
+            root,
+            [
+                {"timestamp": "2026-07-22T10:00:00Z", "type": "session_meta", "payload": shared_meta},
+                {"timestamp": "2026-07-22T10:00:01Z", "type": "turn_context", "payload": {"model": "gpt-5.6-sol"}},
+                _token_count("2026-07-22T10:01:00Z", 500, 100, 50),
+                _token_count("2026-07-22T10:05:00Z", 1000, 200, 100),
+            ],
+        )
+        write(
+            fork_a,
+            [
+                {"timestamp": "2026-07-22T10:10:00Z", "type": "session_meta", "payload": shared_meta},
+                {"timestamp": "2026-07-22T10:10:01Z", "type": "turn_context", "payload": {"model": "gpt-5.6-sol"}},
+                _token_count("2026-07-22T10:01:00Z", 500, 100, 50),
+                _token_count("2026-07-22T10:05:00Z", 1000, 200, 100),
+                _token_count("2026-07-22T10:11:00Z", 1300, 250, 140),
+            ],
+        )
+        write(
+            fork_b,
+            [
+                {"timestamp": "2026-07-22T10:12:00Z", "type": "session_meta", "payload": shared_meta},
+                {"timestamp": "2026-07-22T10:12:01Z", "type": "turn_context", "payload": {"model": "gpt-5.6-sol"}},
+                _token_count("2026-07-22T10:01:00Z", 500, 100, 50),
+                _token_count("2026-07-22T10:05:00Z", 1000, 200, 100),
+                _token_count("2026-07-22T10:13:00Z", 1400, 280, 160),
+            ],
+        )
+
+        monkeypatch.setattr(
+            glob,
+            "glob",
+            lambda pat, recursive=True: [str(fork_b), str(root), str(fork_a)],
+        )
+        record = CodexProvider(codex_dir=tmp_path).collect_snapshot(
+            {
+                "w": (
+                    datetime(2026, 7, 22, 9, tzinfo=timezone.utc),
+                    datetime(2026, 7, 22, 12, tzinfo=timezone.utc),
+                )
+            }
+        )
+        usage = record.by_model_by_window["w"]["gpt-5.6-sol"]
+
+        # Root: 2 turns. Fork A: +300 input / +50 cached / +40 output.
+        # Fork B: +400 input / +80 cached / +60 output. Shared prefix is not replayed.
+        assert usage.turns == 4
+        assert usage.input_tokens == 1070
+        assert usage.cache_read == 330
+        assert usage.output_tokens == 200
 
     def test_collect_usage_for_windows_additive_mutation_contract(self, codex_factory):
         """collect_usage_for_windows must accumulate onto existing model usage, not overwrite (#174)."""
