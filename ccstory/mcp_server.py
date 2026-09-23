@@ -571,7 +571,9 @@ def get_goal_activity_history(
 @mcp.tool()
 def list_categories() -> dict:
     """User + default bucket rules ccstory classifies sessions into, in
-    resolver priority order (first match wins)."""
+    resolver priority order (first match wins). Each entry is a bucket name
+    and its match needles; this is the rule table, not how any session was
+    classified — use `get_recap` for per-period results. Takes no arguments."""
     try:
         rules = load_rules()
     except _TOOL_ERRORS as e:
