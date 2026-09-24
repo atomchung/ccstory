@@ -35,6 +35,7 @@ __all__ = [
     "ClaudeCodeProvider",
     "CodexProvider",
     "AntigravityProvider",
+    "GrokProvider",
     "TranscriptResolver",
     "register_provider",
     "provider_specs",

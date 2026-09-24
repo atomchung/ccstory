@@ -3,8 +3,8 @@
 > **Your AI coding-agent week, in plain English.**
 > Reads local coding-agent session logs and writes a categorized recap with
 > active hours, costs, and a per-bucket narrative. This release bundles Claude
-> Code, OpenAI Codex, and Google Antigravity; the provider registry is designed
-> to add more agents without changing the recap contract.
+> Code, OpenAI Codex, Google Antigravity, and the Grok CLI; the provider
+> registry keeps the same recap contract across them.
 
 Sibling to [ccusage](https://github.com/ryoppippi/ccusage):
 **ccusage tells you how much you spent · ccstory tells you what on.**
@@ -143,6 +143,7 @@ flow after the live debug session on Wednesday.
 | `--agent claude` | Claude Code only (`~/.claude/projects`) |
 | `--agent codex` | OpenAI Codex only (`~/.codex/sessions`) |
 | `--agent antigravity` | Google Antigravity only (`~/.gemini/antigravity/brain`) |
+| `--agent grok` | Grok CLI only (`$GROK_HOME/sessions`, default `~/.grok/sessions`) |
 
 Also accepted by `ccstory trend`, so a trend line and a week over the same range
 describe the same population. See [Multiple coding agents](#multiple-coding-agents)
@@ -483,10 +484,26 @@ paths, prompts, correction text, or source paths.
 ## Multiple coding agents
 
 This release currently reads Claude Code (`~/.claude/projects`), OpenAI Codex
-(`~/.codex/sessions`, plus `archived_sessions`), and Google Antigravity
-(`~/.gemini/antigravity/brain`). That list is an implementation snapshot, not
-an architecture limit: each future agent belongs in the same provider registry
-and receives the same recap, report, JSON, trend, and MCP contracts.
+(`~/.codex/sessions`, plus `archived_sessions`), Google Antigravity
+(`~/.gemini/antigravity/brain`), and Grok CLI (`$GROK_HOME/sessions`,
+defaulting to `~/.grok/sessions`). Grok session metadata and conversation
+history come from its native `summary.json` and `chat_history.jsonl`; exact
+model and token usage comes only from `turn_completed` records in
+`updates.jsonl`. A resumed session keeps its native session identity. Fork
+copies with the same native event ID are counted once; conflicting copies are
+skipped and leave usage coverage incomplete. Child subagent sessions do not
+appear as separate attended sessions, but their exact native usage remains in
+token totals. Grok usage coverage is partial because some completed turns have
+no exact usage receipt. Observed cached-read tokens are separated from fresh
+input. Cache-creation tokens are not counted when nonzero because their native
+semantics have not been verified; those rows leave usage coverage incomplete.
+Missing-turn tokens are not estimated and their model is not inferred from
+session defaults. Imported history without Grok final usage remains visible as
+session activity only.
+
+That list is an implementation snapshot, not an architecture limit: each
+future agent belongs in the same provider registry and receives the same
+recap, report, JSON, trend, and MCP contracts.
 
 Where a provider records a working directory, ccstory attributes its sessions
 to a project through the shared rules — including git worktrees, so a detached
@@ -526,6 +543,9 @@ from `gen_metadata` in companion SQLite databases. Some compacted database
 steps have no source timestamp, so their report-window membership is
 deterministically attributed from neighboring transcript step indexes. Treat
 that as local-parser evidence, not a provider billing-portal reconciliation.
+For Grok, token categories come from the final native usage event; provider
+cost metadata in the log is ignored. Model IDs remain exactly as recorded, so
+a Grok CLI build model with no exact LiteLLM snapshot entry stays unpriced.
 Models with known tokens but no known rate remain visible and trigger a
 missing-price warning.
 

@@ -60,6 +60,13 @@ BUNDLED_PROVIDER_DEFINITIONS = (
         module=".providers.antigravity",
         class_name="AntigravityProvider",
     ),
+    BundledProviderDefinition(
+        name="grok",
+        label="Grok",
+        usage_coverage="partial",
+        module=".providers.grok",
+        class_name="GrokProvider",
+    ),
 )
 
 

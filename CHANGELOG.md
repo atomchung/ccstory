@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Grok CLI session provider** (#274): reads local session metadata and
+  conversation history, attributes exact per-model token usage from native
+  final turn records, separates observed cached-read tokens from fresh input,
+  and deduplicates copied fork/resume events by event ID. Grok remains partial
+  usage coverage when a completed turn has no exact usage receipt. Unverified
+  cache-creation records, missing usage, and missing prices are not estimated.
+
 ### Changed
 
 - **LiteLLM model-price refresh (#273)** now includes first-party xAI Grok and
