@@ -584,7 +584,7 @@ class TestUnpricedModelCaveatMarkdown:
             summaries={},
         )
         assert "Cost figures exclude gpt-5.7-super" in md
-        assert "underestimated" in md
+        assert "understated" in md
 
     def test_blank_line_after_cost_section(self):
         s = _stat("coding", "myapp", "s1")

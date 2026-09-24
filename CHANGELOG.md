@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **LiteLLM model-price refresh (#273)** now includes first-party xAI Grok and
+  current GPT model IDs in the existing packaged snapshot. Only explicit
+  upstream rates are retained; missing cache rates remain unpriced, and the
+  validated snapshot replaces the existing file atomically. Usage requiring a
+  missing rate remains visible in `unpriced_models` instead of being valued at
+  an estimated or zero rate. LiteLLM's request-tier dimensions are retained;
+  a model stays unpriced when aggregate usage could have crossed a tier that
+  requires unavailable per-request facts. Non-token add-ons remain outside the
+  token-equivalent calculation.
 - **Codex provider single-pass snapshot and exact usage reconstruction** (#174):
   `CodexProvider.collect_snapshot()` now derives both session facts and exact
   usage from a single physical rollout parse pass, cutting transcript file opens

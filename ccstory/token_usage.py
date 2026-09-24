@@ -16,6 +16,7 @@ from __future__ import annotations
 import importlib.resources
 import json
 import logging
+import re
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -199,7 +200,7 @@ def pricing_snapshot_warning(
         return None
     return (
         f"Pricing snapshot {effective} may be stale ({age} days old); "
-        "verify current Anthropic API pricing."
+        "verify current provider pricing."
     )
 
 
@@ -253,20 +254,51 @@ def load_prices_config(
         mk = model_key.lower()
         base_price = _match_price_in_table(mk, merged, provenance)
         target = dict(base_price) if base_price else {}
+        applied_overrides: set[str] = set()
         for cfg_key, internal_key in _CONFIG_KEY_MAP.items():
             if cfg_key in override:
                 try:
                     target[internal_key] = float(override[cfg_key])
+                    applied_overrides.add(cfg_key)
                 except (TypeError, ValueError):
                     LOG.warning(
                         "ignoring non-numeric [prices.%s].%s", model_key, cfg_key,
                     )
+        dimensions = target.get("_unsupported_dimensions")
+        if isinstance(dimensions, list):
+            remaining_dimensions = []
+            for dimension in dimensions:
+                matched_component = next(
+                    (
+                        internal_key
+                        for source_key, internal_key in (
+                            ("input_cost_per_token", "inp"),
+                            ("output_cost_per_token", "out"),
+                            ("cache_creation_input_token_cost", "cw"),
+                            ("cache_read_input_token_cost", "cr"),
+                        )
+                        if isinstance(dimension, str) and dimension.startswith(source_key)
+                    ),
+                    None,
+                )
+                config_key = next(
+                    (
+                        key
+                        for key, internal_key in _CONFIG_KEY_MAP.items()
+                        if internal_key == matched_component
+                    ),
+                    None,
+                )
+                if config_key is None or config_key not in applied_overrides:
+                    remaining_dimensions.append(dimension)
+            if remaining_dimensions:
+                target["_unsupported_dimensions"] = remaining_dimensions
+            else:
+                target.pop("_unsupported_dimensions", None)
         missing = [k for k in ("inp", "out", "cw", "cr") if k not in target]
         if missing:
-            for k in missing:
-                target[k] = 0.0
             LOG.warning(
-                "[prices.%s] missing %s; treating as $0.0/M",
+                "[prices.%s] missing %s; usage requiring these rates remains unpriced",
                 model_key, ", ".join(missing),
             )
         merged[mk] = target
@@ -318,29 +350,103 @@ class ModelUsage:
         )
 
     @property
+    def missing_price_components(self) -> list[str]:
+        """Rates absent for token categories used by this model's usage."""
+        required = (
+            ("inp", self.input_tokens),
+            ("out", self.output_tokens),
+            ("cw", self.cache_creation),
+            ("cr", self.cache_read),
+        )
+        rates = _price_for(self.model) or {}
+        return [rate for rate, tokens in required if tokens > 0 and rate not in rates]
+
+    @property
+    def unsupported_price_dimensions(self) -> list[str]:
+        """Source tariffs that cannot be resolved from this aggregate usage.
+
+        A token total below a context threshold proves no individual request
+        crossed that threshold. Above it, this aggregate lacks the per-request
+        split needed to select the source rate. Cache-write duration tiers need
+        cache-age facts which the shared usage shape does not currently retain.
+        Non-token add-ons remain outside this token-equivalent cost contract.
+        """
+        rates = _price_for(self.model) or {}
+        dimensions = rates.get("_unsupported_dimensions", [])
+        if not isinstance(dimensions, list):
+            return []
+        prompt_tokens = self.input_tokens + self.cache_creation + self.cache_read
+        relevant: list[str] = []
+        for dimension in dimensions:
+            if not isinstance(dimension, str):
+                continue
+            if "cache_creation_input_token_cost_above_1hr" in dimension:
+                if self.cache_creation > 0:
+                    relevant.append(dimension)
+                continue
+            threshold = re.search(r"_above_(\d+)k_tokens", dimension)
+            if threshold is None or prompt_tokens <= int(threshold.group(1)) * 1000:
+                continue
+            if dimension.startswith(("input_cost_per_token", "cache_creation_input_token_cost")):
+                relevant_tokens = self.input_tokens + self.cache_creation
+            elif dimension.startswith("cache_read_input_token_cost"):
+                relevant_tokens = self.cache_read
+            elif dimension.startswith("output_cost_per_token"):
+                relevant_tokens = self.output_tokens
+            else:
+                relevant_tokens = 0
+            if relevant_tokens > 0:
+                relevant.append(dimension)
+        return relevant
+
+    @property
+    def cost_is_priced(self) -> bool:
+        """Whether all observed token categories have an explicit rate."""
+        if self.unsupported_price_dimensions:
+            return False
+        return not self.missing_price_components
+
+    @property
     def cost_usd(self) -> float:
         p = _price_for(self.model)
-        if not p:
+        if not p or not self.cost_is_priced:
             return 0.0
         return (
-            self.input_tokens   * p["inp"]
-            + self.output_tokens  * p["out"]
-            + self.cache_creation * p["cw"]
-            + self.cache_read     * p["cr"]
+            self.input_tokens * p.get("inp", 0.0)
+            + self.output_tokens * p.get("out", 0.0)
+            + self.cache_creation * p.get("cw", 0.0)
+            + self.cache_read * p.get("cr", 0.0)
         ) / 1_000_000
+
+    @property
+    def cost_uncached_is_priced(self) -> bool:
+        p = _price_for(self.model) or {}
+        if self.unsupported_price_dimensions:
+            return False
+        return not (
+            (self.input_tokens + self.cache_creation + self.cache_read > 0 and "inp" not in p)
+            or (self.output_tokens > 0 and "out" not in p)
+        )
 
     @property
     def cost_uncached_usd(self) -> float:
         """Hypothetical cost if no caching had been used."""
         p = _price_for(self.model)
-        if not p:
+        if not p or not self.cost_uncached_is_priced:
             return 0.0
         return (
-            self.input_tokens   * p["inp"]
-            + self.output_tokens  * p["out"]
-            + self.cache_creation * p["inp"]
-            + self.cache_read     * p["inp"]
+            self.input_tokens * p.get("inp", 0.0)
+            + self.output_tokens * p.get("out", 0.0)
+            + self.cache_creation * p.get("inp", 0.0)
+            + self.cache_read * p.get("inp", 0.0)
         ) / 1_000_000
+
+    @property
+    def cache_savings_usd(self) -> float:
+        """Known cache savings; incomplete rates never create fictitious savings."""
+        if not self.cost_is_priced or not self.cost_uncached_is_priced:
+            return 0.0
+        return self.cost_uncached_usd - self.cost_usd
 
 
 @dataclass
@@ -414,7 +520,7 @@ class UsageReport:
 
     @property
     def cache_savings_usd(self) -> float:
-        return self.total_cost_uncached_usd - self.total_cost_usd
+        return sum(m.cache_savings_usd for m in self.by_model.values())
 
     @property
     def cache_hit_ratio(self) -> float:
@@ -423,15 +529,16 @@ class UsageReport:
 
     @property
     def unpriced_models(self) -> list[str]:
-        """Models that consumed tokens but have no row in the price table.
+        """Models whose observed token categories are not fully priced.
 
-        Their tokens are counted in the usage totals but contribute $0 to cost,
-        so the report must say so rather than present a silently low bill.
+        Their tokens remain in usage totals. Their model cost is excluded until
+        each category used has an explicit rate, so reports can disclose the
+        incomplete cost instead of implying the missing category was free.
         """
         return sorted([
             mu.model
             for mu in self.by_model.values()
-            if mu.total_tokens > 0 and not _price_for(mu.model)
+            if mu.total_tokens > 0 and not mu.cost_is_priced
         ])
 
 

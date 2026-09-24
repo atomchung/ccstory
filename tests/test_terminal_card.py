@@ -447,7 +447,7 @@ class TestUnpricedModelCaveatTerminalCard:
             )
         )
         text = console.export_text()
-        assert "Cost excludes gpt-5.7-super (missing from price table)." in text
+        assert "Cost excludes gpt-5.7-super (incomplete price data)." in text
 
     def test_caveat_is_a_footer_after_agent_breakdown_and_report_link(self):
         usage = UsageReport(since=SINCE, until=UNTIL)

@@ -12,6 +12,7 @@ import pytest
 from ccstory import token_usage
 from ccstory.token_usage import (
     DEFAULT_PRICES,
+    ModelUsage,
     PRICES_SNAPSHOT_DATE,
     _price_for,
     apply_prices,
@@ -43,7 +44,9 @@ class TestVendoredPriceTable:
         assert "prices" in content
         assert isinstance(content["prices"], dict)
         assert content["entry_count"] == len(content["prices"])
-        assert content["entry_count"] < 150
+        assert content["entry_count"] < 200
+        assert "xai/grok-4.6" in content["prices"]
+        assert "gpt-6-luna" in content["prices"]
 
     def test_vendored_file_contains_required_models(self):
         prices, _ = load_vendored_prices()
@@ -60,7 +63,45 @@ class TestVendoredPriceTable:
         ]
         for m in required_models:
             assert m in prices, f"Required model {m} missing from vendored model_prices.json"
-            assert all(k in prices[m] for k in ("inp", "out", "cw", "cr"))
+            assert all(k in prices[m] for k in ("inp", "out"))
+            assert set(prices[m]).issubset(
+                {"inp", "out", "cw", "cr", "_unsupported_dimensions"}
+            )
+            assert all(
+                prices[m][key] >= 0
+                for key in ("inp", "out", "cw", "cr")
+                if key in prices[m]
+            )
+
+    def test_request_dependent_rates_are_disclosed_and_not_flat_priced(self):
+        prices, _ = load_vendored_prices()
+        dimensions = prices["xai/grok-4.20"]["_unsupported_dimensions"]
+        assert "input_cost_per_token_above_200k_tokens" in dimensions
+        assert "cache_read_input_token_cost_above_200k_tokens" in dimensions
+
+        usage = ModelUsage(
+            model="xai/grok-4.20",
+            input_tokens=250_000,
+            output_tokens=10,
+        )
+        assert not usage.cost_is_priced
+        assert usage.cost_usd == 0.0
+        assert usage.cost_uncached_usd == 0.0
+        assert usage.cache_savings_usd == 0.0
+
+        small_request = ModelUsage(
+            model="xai/grok-4.20",
+            input_tokens=100_000,
+            output_tokens=10,
+        )
+        assert small_request.cost_is_priced
+        assert small_request.cost_usd > 0.0
+
+    def test_missing_cache_rates_are_not_synthesized(self):
+        prices, _ = load_vendored_prices()
+        assert "cw" not in prices["gemini-3.6-flash"]
+        assert "cr" in prices["gemini-3.6-flash"]
+        assert "cw" not in prices["xai/grok-4.6"]
 
 
 class TestAliasPriceResolution:

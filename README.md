@@ -780,9 +780,10 @@ standard language name such as `"Traditional Chinese"`, `"日本語"`, or
 
 ## Custom pricing
 
-Default API list prices snapshot to `2026-07`. Every human-readable report
-shows the snapshot date and warns once it is over 90 days old relative to the
-report window end. ccstory makes no pricing network requests at runtime; model rates ship with each release and come from the LiteLLM registry.
+Default API list prices use the packaged LiteLLM snapshot. Every human-readable
+report shows its snapshot date and warns once it is over 90 days old relative
+to the report window end. ccstory makes no pricing network requests at
+runtime; model rates ship with each release.
 
 Override per-model rates in `~/.ccstory/config.toml`:
 
@@ -797,9 +798,21 @@ cache_write = 7.5
 cache_read  = 0.6
 ```
 
-Partial overrides are fine — unspecified keys keep their default. Defining a
-brand-new model (`[prices.custom]`) with only some keys defaults the rest to
-`$0` with a warning so misconfig is loud.
+For a model already in the packaged table, unspecified override keys keep the
+packaged rate. For a new model (`[prices.custom]`), only the supplied rate
+components are known; missing rates stay unpriced. Token categories whose rate
+is missing remain in usage totals, while that model is listed in
+`unpriced_models` and excluded from the cost total. Missing rates are never
+estimated or treated as free.
+
+LiteLLM also publishes request-dependent context and cache-age tiers. The
+snapshot retains those source dimensions. When observed aggregate usage could
+have crossed a context tier, or includes cache writes whose age is unknown,
+ccstory lists the affected model in `unpriced_models` instead of applying the
+base rate. Usage below a tier can still use the base rate. Non-token charges
+such as per-query or per-image fees are outside this token-equivalent cost
+calculation. A complete per-model override can replace the source's tiered
+token rates.
 
 ## How ccstory differs from ccusage
 
@@ -890,8 +903,8 @@ local narrator calls with `--minimal --classify folder` (and initialize with
   `total_tokens`. In typical use ~96% of total_tokens is `cache_read`,
   which inflates with turn count and system prompt size and isn't a stable
   signal of work done. Output tokens stay comparable month over month.
-- **Pricing**: prices are list prices snapshotted by date (default
-  `2026-07`); every human-readable report shows the snapshot date and warns
+- **Pricing**: prices are API list prices from the packaged LiteLLM snapshot;
+  every human-readable report shows the snapshot date and warns
   when it is over 90 days old relative to that report's window end.
 
 ## Library usage (integration API)
