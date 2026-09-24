@@ -547,6 +547,10 @@ class GrokProvider(BaseAgentProvider):
                     usage.output_tokens += output_tokens
                     usage.cache_read += cache_read
                     usage.cache_creation += cache_creation
+                    usage.max_request_prompt_tokens = max(
+                        usage.max_request_prompt_tokens or 0,
+                        input_tokens + cache_read + cache_creation,
+                    )
                 turns[key] += 1
         return turns
 
@@ -623,6 +627,10 @@ class GrokProvider(BaseAgentProvider):
                     usage.output_tokens += output_tokens
                     usage.cache_read += cache_read
                     usage.cache_creation += cache_creation
+                    usage.max_request_prompt_tokens = max(
+                        usage.max_request_prompt_tokens or 0,
+                        input_tokens + cache_read + cache_creation,
+                    )
                 assistant_turns_by_window[key] += 1
 
         sessions_by_window: dict[str, list[SessionStat]] = {}

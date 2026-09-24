@@ -24,9 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validated snapshot replaces the existing file atomically. Usage requiring a
   missing rate remains visible in `unpriced_models` instead of being valued at
   an estimated or zero rate. LiteLLM's request-tier dimensions are retained;
-  a model stays unpriced when aggregate usage could have crossed a tier that
-  requires unavailable per-request facts. Non-token add-ons remain outside the
-  token-equivalent calculation.
+  Grok `grok-<version>-build` IDs resolve only when the exact matching
+  `xai/grok-<version>` LiteLLM row exists. Claude, Codex, and Grok retain the
+  largest exact per-request prompt size so separate turns do not spuriously
+  trigger context tiers; requests over a tier without a supported tier rate
+  remain unpriced. Cache-age uncertainty and non-token add-ons remain outside
+  the token-equivalent calculation.
 - **Codex provider single-pass snapshot and exact usage reconstruction** (#174):
   `CodexProvider.collect_snapshot()` now derives both session facts and exact
   usage from a single physical rollout parse pass, cutting transcript file opens

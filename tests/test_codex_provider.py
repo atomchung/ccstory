@@ -502,11 +502,13 @@ class TestCodexUsageCorrectness:
         assert terra.cache_read == 200
         assert terra.output_tokens == 100
         assert terra.turns == 2
+        assert terra.max_request_prompt_tokens == 500
 
         assert sol.input_tokens == 600
         assert sol.cache_read == 200
         assert sol.output_tokens == 200
         assert sol.turns == 1
+        assert sol.max_request_prompt_tokens == 800
 
         assert turns["w"] == 3
 

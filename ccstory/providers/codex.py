@@ -354,6 +354,10 @@ def _reconstruct_codex_usage(
                 mu.cache_read += cached_inp
                 mu.cache_creation += cw
                 mu.output_tokens += out
+                mu.max_request_prompt_tokens = max(
+                    mu.max_request_prompt_tokens or 0,
+                    uncached_inp + cached_inp + cw,
+                )
                 assistant_turns[key] += 1
 
     return assistant_turns
@@ -828,6 +832,10 @@ class CodexProvider(BaseAgentProvider):
                     target_mu.cache_read += usage.cache_read
                     target_mu.cache_creation += usage.cache_creation
                     target_mu.output_tokens += usage.output_tokens
+                    target_mu.max_request_prompt_tokens = max(
+                        getattr(target_mu, "max_request_prompt_tokens", None) or 0,
+                        getattr(usage, "max_request_prompt_tokens", None) or 0,
+                    )
                 else:
                     dest[model] = ModelUsage(
                         model=usage.model,
@@ -836,6 +844,11 @@ class CodexProvider(BaseAgentProvider):
                         cache_read=usage.cache_read,
                         cache_creation=usage.cache_creation,
                         output_tokens=usage.output_tokens,
+                        max_request_prompt_tokens=getattr(
+                            usage,
+                            "max_request_prompt_tokens",
+                            None,
+                        ),
                     )
         return turns
 
