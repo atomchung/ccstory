@@ -156,7 +156,23 @@ def make_assistant_msg(
     cache_creation: int = 0,
     cache_read: int = 0,
     output_tokens: int = 50,
+    cache_creation_5m: int | None = None,
+    cache_creation_1h: int | None = None,
+    service_tier: str | None = None,
 ) -> dict:
+    usage: dict[str, object] = {
+        "input_tokens": input_tokens,
+        "cache_creation_input_tokens": cache_creation,
+        "cache_read_input_tokens": cache_read,
+        "output_tokens": output_tokens,
+    }
+    if cache_creation_5m is not None or cache_creation_1h is not None:
+        usage["cache_creation"] = {
+            "ephemeral_5m_input_tokens": cache_creation_5m,
+            "ephemeral_1h_input_tokens": cache_creation_1h,
+        }
+    if service_tier is not None:
+        usage["service_tier"] = service_tier
     return {
         "type": "assistant",
         "timestamp": ts,
@@ -165,12 +181,7 @@ def make_assistant_msg(
             "id": msg_id,
             "model": model,
             "content": [{"type": "text", "text": text}],
-            "usage": {
-                "input_tokens": input_tokens,
-                "cache_creation_input_tokens": cache_creation,
-                "cache_read_input_tokens": cache_read,
-                "output_tokens": output_tokens,
-            },
+            "usage": usage,
         },
     }
 

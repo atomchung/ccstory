@@ -220,7 +220,7 @@ class TestLoadPricesConfig:
     ):
         cfg = tmp_path / "config.toml"
         cfg.write_text(
-            '[prices."gemini-2.5-computer-use-preview-10-2025"]\n'
+            '[prices."xai/grok-4.6"]\n'
             "input = 1.0\noutput = 2.0\ncache_write = 0.5\ncache_read = 0.1\n",
             encoding="utf-8",
         )
@@ -228,12 +228,12 @@ class TestLoadPricesConfig:
         apply_prices(prices, snapshot_date=snapshot, provenance=provenance)
 
         usage = ModelUsage(
-            model="gemini-2.5-computer-use-preview-10-2025",
+            model="grok-4.6-build",
             input_tokens=250_000,
         )
         assert (
-            "_unsupported_dimensions"
-            not in prices["gemini-2.5-computer-use-preview-10-2025"]
+            "_context_tiers"
+            not in prices["xai/grok-4.6"]
         )
         assert usage.cost_is_priced
         assert usage.cost_usd == 0.25
@@ -243,15 +243,42 @@ class TestLoadPricesConfig:
     ):
         cfg = tmp_path / "config.toml"
         cfg.write_text(
-            '[prices."gemini-2.5-computer-use-preview-10-2025"]\n'
+            '[prices."xai/grok-4.6"]\n'
             'input = "not a rate"\n',
             encoding="utf-8",
         )
         prices, _, _ = load_prices_config(cfg)
-        dimensions = prices["gemini-2.5-computer-use-preview-10-2025"][
-            "_unsupported_dimensions"
-        ]
-        assert "input_cost_per_token_above_200k_tokens" in dimensions
+        tiers = prices["xai/grok-4.6"]["_context_tiers"]
+        assert tiers["200000"]["inp"] > 0
+
+    def test_user_component_override_replaces_context_and_service_tier_rates(
+        self, tmp_path: Path,
+    ):
+        cfg = tmp_path / "config.toml"
+        cfg.write_text("[prices.gpt-6-luna]\ninput = 0.75\n", encoding="utf-8")
+
+        prices, _, _ = load_prices_config(cfg)
+
+        assert all(
+            "inp" not in info.get("rates", {})
+            and all(
+                "inp" not in context_rates
+                for context_rates in info.get("context_tiers", {}).values()
+            )
+            for info in prices["gpt-6-luna"]["_service_tiers"].values()
+        )
+        assert prices["gpt-6-luna"]["_service_tiers"]["priority"]["rates"]["out"] > 0
+        apply_prices(prices)
+        input_only = ModelUsage(model="gpt-6-luna", input_tokens=1_000)
+        input_only.record_request_usage(
+            input_tokens=1_000,
+            cache_creation=0,
+            cache_read=0,
+            output_tokens=0,
+            prompt_tokens=1_000,
+        )
+        assert input_only.cost_is_priced
+        assert input_only.cost_usd == 0.00075
 
     def test_missing_cache_rate_does_not_claim_cache_savings(self, tmp_path: Path):
         cfg = tmp_path / "config.toml"

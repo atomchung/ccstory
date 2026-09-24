@@ -208,6 +208,23 @@ def _accumulate_usage_record(
             return False
         token_values.append(count)
     input_tokens, cache_creation, cache_read, output_tokens = token_values
+    cache_creation_details = usage.get("cache_creation")
+    cache_creation_5m = (
+        _token_count(cache_creation_details.get("ephemeral_5m_input_tokens"))
+        if isinstance(cache_creation_details, dict)
+        else None
+    )
+    cache_creation_1h = (
+        _token_count(cache_creation_details.get("ephemeral_1h_input_tokens"))
+        if isinstance(cache_creation_details, dict)
+        else None
+    )
+    if (
+        cache_creation_5m is None
+        or cache_creation_1h is None
+        or cache_creation_5m + cache_creation_1h != cache_creation
+    ):
+        cache_creation_5m = cache_creation_1h = None
 
     for key, (since, until) in windows.items():
         if timestamp < since or timestamp > until:
@@ -228,6 +245,20 @@ def _accumulate_usage_record(
         model_usage.max_request_prompt_tokens = max(
             model_usage.max_request_prompt_tokens or 0,
             input_tokens + cache_creation + cache_read,
+        )
+        model_usage.record_request_usage(
+            input_tokens=input_tokens,
+            cache_creation=cache_creation,
+            cache_read=cache_read,
+            output_tokens=output_tokens,
+            prompt_tokens=input_tokens + cache_creation + cache_read,
+            cache_creation_5m=cache_creation_5m,
+            cache_creation_1h=cache_creation_1h,
+            service_tier=(
+                usage.get("service_tier")
+                if isinstance(usage.get("service_tier"), str)
+                else None
+            ),
         )
         assistant_turns_by_window[key] += 1
     return True

@@ -23,13 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upstream rates are retained; missing cache rates remain unpriced, and the
   validated snapshot replaces the existing file atomically. Usage requiring a
   missing rate remains visible in `unpriced_models` instead of being valued at
-  an estimated or zero rate. LiteLLM's request-tier dimensions are retained;
+  an estimated or zero rate. LiteLLM's context-size and service-class rates are
+  retained; Codex usage uses the `service_tier` recorded in
+  `thread_settings_applied` when available. The snapshot also retains
+  Anthropic's explicit 1-hour cache-write rate. Provider parsers retain
+  request-level token facts so exact requests use the matching LiteLLM tier.
   Grok `grok-<version>-build` IDs resolve only when the exact matching
-  `xai/grok-<version>` LiteLLM row exists. Claude, Codex, and Grok retain the
-  largest exact per-request prompt size so separate turns do not spuriously
-  trigger context tiers; requests over a tier without a supported tier rate
-  remain unpriced. Cache-age uncertainty and non-token add-ons remain outside
-  the token-equivalent calculation.
+  `xai/grok-<version>` LiteLLM row exists. Grok receipts that group multiple
+  calls without per-call context sizes, and cache writes
+  whose TTL is unknown, remain unpriced; exact priced requests still contribute
+  to the subtotal while the model remains listed as incomplete.
 - **Codex provider single-pass snapshot and exact usage reconstruction** (#174):
   `CodexProvider.collect_snapshot()` now derives both session facts and exact
   usage from a single physical rollout parse pass, cutting transcript file opens

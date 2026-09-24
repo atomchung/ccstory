@@ -238,6 +238,40 @@ class TestCollectUsage:
             max_request_prompt_tokens=52,
         )
 
+    def test_claude_cache_creation_ttl_breakdown_is_retained(self, jsonl_factory):
+        records = [
+            make_user_msg("cache ttl", _ts(2026, 5, 10, 10, 0, 0)),
+            make_assistant_msg(
+                "cache response",
+                _ts(2026, 5, 10, 10, 0, 5),
+                "cache-ttl-message",
+                model="claude-opus-5-5",
+                input_tokens=42,
+                cache_creation=12,
+                cache_creation_5m=5,
+                cache_creation_1h=7,
+                cache_read=7,
+                output_tokens=11,
+                service_tier="standard",
+            ),
+        ]
+        jsonl_factory("-Users-alice-code-cache", "session-cache", records)
+        by_model: dict = {}
+
+        ClaudeCodeProvider().collect_usage(
+            datetime(2026, 5, 10),
+            datetime(2026, 5, 11),
+            by_model,
+        )
+
+        usage = by_model["claude-opus-5-5"]
+        request = usage.request_token_usage[0]
+        assert request.cache_creation_5m == 5
+        assert request.cache_creation_1h == 7
+        assert request.cache_creation_unknown == 0
+        assert request.prompt_is_exact
+        assert request.service_tier == "default"
+
     def test_malformed_line_doesnt_crash(self, tmp_home, jsonl_factory):
         # Write a file with a broken line — should be silently skipped
         path = jsonl_factory("-Users-alice-code-app", "session-bad", [])

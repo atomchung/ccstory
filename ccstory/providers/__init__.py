@@ -182,6 +182,8 @@ def _merge_model_usage(
 
     for model, incoming in source.items():
         combined = destination.setdefault(model, ModelUsage(model=model))
+        if not combined.request_token_usage:
+            combined.merge_request_usage(combined)
         combined.turns += incoming.turns
         combined.input_tokens += incoming.input_tokens
         combined.cache_creation += incoming.cache_creation
@@ -194,6 +196,7 @@ def _merge_model_usage(
                 current_max_prompt or 0,
                 incoming_max_prompt,
             )
+        combined.merge_request_usage(incoming)
 
 
 def _window_bounded_sessions(

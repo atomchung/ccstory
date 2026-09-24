@@ -19,6 +19,7 @@ def _usage(
     output_tokens: int = 15,
     cache_read: int = 20,
     cache_creation: int = 0,
+    model_calls: int = 1,
 ) -> dict:
     model = {
         "inputTokens": input_tokens,
@@ -36,7 +37,7 @@ def _usage(
         "cacheCreationTokens": cache_creation,
         "reasoningTokens": 3,
         "totalTokens": input_tokens + output_tokens,
-        "modelCalls": 1,
+        "modelCalls": model_calls,
         "modelUsage": {MODEL: model},
         "costUsdTicks": 987654321,
     }
@@ -318,6 +319,35 @@ def test_malformed_cache_breakdown_is_not_counted(tmp_path: Path) -> None:
     assert record.assistant_turns_by_window["all"] == 0
     assert record.by_model_by_window["all"] == {}
     assert not record.metrics.record_inventory_complete
+
+
+def test_multi_call_receipt_is_not_misrepresented_as_one_request_context(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "sessions"
+    _session(
+        root,
+        "session-1",
+        usage_events=[
+            (
+                "event-1",
+                "prompt-1",
+                START + timedelta(seconds=70),
+                _usage(input_tokens=250_000, model_calls=168),
+            )
+        ],
+    )
+
+    record = GrokProvider(root).collect_snapshot(_window(), engaged_only=False)
+
+    usage = record.by_model_by_window["all"][MODEL]
+    assert usage.request_token_usage[0].prompt_tokens == 250_000
+    assert not usage.request_token_usage[0].prompt_is_exact
+    assert record.metrics.record_inventory_complete
+    assert not usage.cost_is_priced
+    assert "context-tier prompt size is aggregated across model calls" in (
+        usage.unsupported_price_dimensions
+    )
 
 
 def test_unverified_nonzero_cache_creation_is_left_unpriced_for_usage(

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sys
 import tempfile
 import urllib.request
@@ -29,6 +30,33 @@ _RATE_FIELDS = (
     ("cache_creation_input_token_cost", "cw"),
     ("cache_read_input_token_cost", "cr"),
 )
+_CONTEXT_RATE_RE = re.compile(
+    r"^(input_cost_per_token|output_cost_per_token|"
+    r"cache_creation_input_token_cost|cache_read_input_token_cost)_above_(\d+)(k)?_tokens$"
+)
+_SERVICE_TIER_SUFFIX_RE = re.compile(r"_(batches|batch|priority|flex)$")
+_CACHE_CREATION_AGE_RATE = "cache_creation_input_token_cost_above_1hr"
+_CONTEXT_COMPONENTS = {
+    "input_cost_per_token": "inp",
+    "output_cost_per_token": "out",
+    "cache_creation_input_token_cost": "cw",
+    "cache_read_input_token_cost": "cr",
+}
+
+
+def _service_tier_rate_base(source_key: str) -> str | None:
+    """Return the token-rate key for a recognized service-tier field."""
+    suffix = _SERVICE_TIER_SUFFIX_RE.search(source_key)
+    if suffix is None:
+        return None
+    base_key = source_key[:suffix.start()]
+    if (
+        _CONTEXT_RATE_RE.fullmatch(base_key)
+        or base_key == _CACHE_CREATION_AGE_RATE
+        or base_key in {source for source, _ in _RATE_FIELDS}
+    ):
+        return base_key
+    return None
 
 
 def is_allowed_model(model_id: str) -> bool:
@@ -66,10 +94,8 @@ def parse_and_validate_rates(
         raise ValueError(f"Malformed pricing record for model '{model_id}'")
 
     rates: dict[str, object] = {}
-    for source_key, rate_key in _RATE_FIELDS:
-        raw_rate = raw_info.get(source_key)
-        if raw_rate is None:
-            continue
+
+    def validated_rate(source_key: str, raw_rate: object) -> float:
         if isinstance(raw_rate, bool) or not isinstance(raw_rate, (int, float)):
             raise ValueError(
                 f"Invalid {source_key} for model '{model_id}': expected a number or null"
@@ -77,24 +103,116 @@ def parse_and_validate_rates(
         rate = float(raw_rate) * 1_000_000
         if not math.isfinite(rate) or rate < 0 or rate > 1000.0:
             raise ValueError(
-                f"Implausible price rate {rate} for model '{model_id}' ({rate_key}); "
+                f"Implausible price rate {rate} for model '{model_id}' ({source_key}); "
                 "must be finite and between 0 and 1000 USD/M"
             )
-        rates[rate_key] = round(rate, 4)
+        return round(rate, 4)
 
-    # Preserve LiteLLM's other billing dimensions. The current shared usage
-    # report aggregates tokens across turns and cannot apply per-request tiers,
-    # service classes, or modality/tool charges without their source facts.
-    # Mark those rows so cost calculation can fail closed rather than silently
-    # pricing all usage at the base rate.
+    for source_key, rate_key in _RATE_FIELDS:
+        raw_rate = raw_info.get(source_key)
+        if raw_rate is None:
+            continue
+        rates[rate_key] = validated_rate(source_key, raw_rate)
+
+    context_tiers: dict[str, dict[str, float]] = {}
+    service_tiers: dict[str, dict[str, object]] = {}
+    for source_key, raw_rate in raw_info.items():
+        if not isinstance(source_key, str) or raw_rate is None:
+            continue
+        service_tier: str | None = None
+        base_source_key = source_key
+        suffix = _SERVICE_TIER_SUFFIX_RE.search(source_key)
+        if suffix:
+            service_tier = "batches" if suffix.group(1) == "batch" else suffix.group(1)
+            base_source_key = source_key[:suffix.start()]
+
+        match = _CONTEXT_RATE_RE.fullmatch(base_source_key)
+        if match is None:
+            component = next(
+                (internal for source, internal in _RATE_FIELDS
+                 if source == base_source_key),
+                None,
+            )
+            if base_source_key == _CACHE_CREATION_AGE_RATE:
+                if service_tier is None:
+                    continue
+                service_tiers.setdefault(service_tier, {})[
+                    "cache_creation_above_1hr"
+                ] = validated_rate(source_key, raw_rate)
+            elif component is not None and service_tier is not None:
+                service_tiers.setdefault(service_tier, {}).setdefault(
+                    "rates", {},
+                )[component] = validated_rate(source_key, raw_rate)
+            continue
+
+        component = _CONTEXT_COMPONENTS[match.group(1)]
+        threshold = int(match.group(2)) * (1000 if match.group(3) else 1)
+        if service_tier is None:
+            context_tiers.setdefault(str(threshold), {})[component] = validated_rate(
+                source_key, raw_rate,
+            )
+        else:
+            tier_contexts = service_tiers.setdefault(service_tier, {}).setdefault(
+                "context_tiers", {},
+            )
+            tier_contexts.setdefault(str(threshold), {})[component] = validated_rate(
+                source_key, raw_rate,
+            )
+    if context_tiers:
+        rates["_context_tiers"] = {
+            threshold: dict(sorted(tier.items()))
+            for threshold, tier in sorted(context_tiers.items(), key=lambda item: int(item[0]))
+        }
+
+    if service_tiers:
+        normalized_service_tiers: dict[str, dict[str, object]] = {}
+        for service_tier, service_info in sorted(service_tiers.items()):
+            normalized_info: dict[str, object] = {}
+            for key, value in sorted(service_info.items()):
+                if key == "context_tiers" and isinstance(value, Mapping):
+                    normalized_info[key] = {
+                        threshold: dict(sorted(components.items()))
+                        for threshold, components in sorted(
+                            value.items(), key=lambda item: int(item[0]),
+                        )
+                    }
+                elif key == "rates" and isinstance(value, Mapping):
+                    normalized_info[key] = dict(sorted(value.items()))
+                else:
+                    normalized_info[key] = value
+            normalized_service_tiers[service_tier] = normalized_info
+        rates["_service_tiers"] = normalized_service_tiers
+
+    raw_long_cache_write = raw_info.get(_CACHE_CREATION_AGE_RATE)
+    if raw_long_cache_write is not None:
+        rates["_cache_creation_above_1hr"] = validated_rate(
+            _CACHE_CREATION_AGE_RATE, raw_long_cache_write,
+        )
+
+    # Preserve other LiteLLM billing dimensions. Context-size, service-class,
+    # and Anthropic 1h cache-write rates are retained when the local provider
+    # record carries the corresponding request facts.
     supported_source_fields = {source for source, _ in _RATE_FIELDS}
+    supported_source_fields.update(
+        key
+        for key, value in raw_info.items()
+        if isinstance(key, str)
+        and value is not None
+        and (
+            _CONTEXT_RATE_RE.fullmatch(key)
+            or key == _CACHE_CREATION_AGE_RATE
+            or _service_tier_rate_base(key) is not None
+        )
+    )
     unsupported_dimensions = sorted(
         key
         for key, value in raw_info.items()
         if isinstance(key, str)
         and "cost" in key.lower()
-        and key not in supported_source_fields
-        and value is not None
+        and (
+            (key not in supported_source_fields and value is not None)
+            or (value is None and _service_tier_rate_base(key) is not None)
+        )
     )
     if rates and unsupported_dimensions:
         rates["_unsupported_dimensions"] = unsupported_dimensions
@@ -180,6 +298,17 @@ def format_diff_summary(
                     f"{old_rates.get('_unsupported_dimensions', [])} -> "
                     f"{new_rates.get('_unsupported_dimensions', [])}"
                 )
+            for metadata_key in (
+                "_context_tiers",
+                "_cache_creation_above_1hr",
+                "_service_tiers",
+            ):
+                if old_rates.get(metadata_key) != new_rates.get(metadata_key):
+                    lines.append(
+                        f"      {metadata_key}: "
+                        f"{old_rates.get(metadata_key)} -> "
+                        f"{new_rates.get(metadata_key)}"
+                    )
     return "\n".join(lines)
 
 

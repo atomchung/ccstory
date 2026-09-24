@@ -17,6 +17,7 @@ import importlib.resources
 import json
 import logging
 import re
+from copy import deepcopy
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -84,7 +85,7 @@ def _ensure_vendored_loaded() -> None:
         vendored_prices, vendored_snap = load_vendored_prices()
         for k, v in vendored_prices.items():
             if k not in _active_prices:
-                _active_prices[k] = dict(v)
+                _active_prices[k] = deepcopy(v)
                 _active_provenance[k] = "litellm"
         if _active_snapshot_date == PRICES_SNAPSHOT_DATE and vendored_snap:
             _active_snapshot_date = vendored_snap
@@ -97,6 +98,16 @@ MODEL_ALIASES: dict[str, str] = {
 }
 
 _GROK_BUILD_ALIAS_RE = re.compile(r"^grok-(\d+\.\d+)-build$")
+_SERVICE_TIER_SUFFIX_RE = re.compile(r"_(batches|batch|priority|flex)$")
+
+
+def _canonical_service_tier(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized in {"batch", "batches"}:
+        return "batches"
+    if normalized == "standard":
+        return "default"
+    return normalized
 
 
 def _alias_price_target(
@@ -247,12 +258,14 @@ def load_prices_config(
     from .categorizer import _load_toml  # categorizer doesn't import from us
 
     vendored_prices, vendored_snap = load_vendored_prices()
-    merged: dict[str, dict[str, float]] = {k: dict(v) for k, v in DEFAULT_PRICES.items()}
+    merged: dict[str, dict[str, float]] = {
+        k: deepcopy(v) for k, v in DEFAULT_PRICES.items()
+    }
     provenance: dict[str, str] = {k: "default" for k in DEFAULT_PRICES}
 
     for k, v in vendored_prices.items():
         if k not in merged:
-            merged[k] = dict(v)
+            merged[k] = deepcopy(v)
             provenance[k] = "litellm"
 
     effective_snapshot = vendored_snap or PRICES_SNAPSHOT_DATE
@@ -276,7 +289,7 @@ def load_prices_config(
             continue
         mk = model_key.lower()
         base_price = _match_price_in_table(mk, merged, provenance)
-        target = dict(base_price) if base_price else {}
+        target = deepcopy(base_price) if base_price else {}
         applied_overrides: set[str] = set()
         for cfg_key, internal_key in _CONFIG_KEY_MAP.items():
             if cfg_key in override:
@@ -287,6 +300,50 @@ def load_prices_config(
                     LOG.warning(
                         "ignoring non-numeric [prices.%s].%s", model_key, cfg_key,
                     )
+        context_tiers = target.get("_context_tiers")
+        if isinstance(context_tiers, dict):
+            for cfg_key, internal_key in _CONFIG_KEY_MAP.items():
+                if cfg_key not in applied_overrides:
+                    continue
+                for threshold, tier in list(context_tiers.items()):
+                    if isinstance(tier, dict):
+                        tier.pop(internal_key, None)
+                        if not tier:
+                            context_tiers.pop(threshold, None)
+            if not context_tiers:
+                target.pop("_context_tiers", None)
+        service_tiers = target.get("_service_tiers")
+        if isinstance(service_tiers, dict):
+            for service_tier, service_info in list(service_tiers.items()):
+                if not isinstance(service_info, dict):
+                    continue
+                service_rates = service_info.get("rates")
+                if isinstance(service_rates, dict):
+                    for cfg_key, internal_key in _CONFIG_KEY_MAP.items():
+                        if cfg_key in applied_overrides:
+                            service_rates.pop(internal_key, None)
+                    if not service_rates:
+                        service_info.pop("rates", None)
+                service_context = service_info.get("context_tiers")
+                if isinstance(service_context, dict):
+                    for cfg_key, internal_key in _CONFIG_KEY_MAP.items():
+                        if cfg_key not in applied_overrides:
+                            continue
+                        for threshold, tier in list(service_context.items()):
+                            if isinstance(tier, dict):
+                                tier.pop(internal_key, None)
+                                if not tier:
+                                    service_context.pop(threshold, None)
+                    if not service_context:
+                        service_info.pop("context_tiers", None)
+                if "cache_write" in applied_overrides:
+                    service_info.pop("cache_creation_above_1hr", None)
+                if not service_info:
+                    service_tiers.pop(service_tier, None)
+            if not service_tiers:
+                target.pop("_service_tiers", None)
+        if "cache_write" in applied_overrides:
+            target.pop("_cache_creation_above_1hr", None)
         dimensions = target.get("_unsupported_dimensions")
         if isinstance(dimensions, list):
             remaining_dimensions = []
@@ -338,7 +395,7 @@ def apply_prices(
     """Replace the active price table. Called by cli on startup."""
     global _active_snapshot_date, _vendored_initialized
     _active_prices.clear()
-    _active_prices.update({k: dict(v) for k, v in prices.items()})
+    _active_prices.update({k: deepcopy(v) for k, v in prices.items()})
     _active_provenance.clear()
     prov_map = provenance if provenance is not None else getattr(prices, "_provenance", None)
     for k in _active_prices:
@@ -355,6 +412,28 @@ def apply_prices(
 
 
 @dataclass
+class RequestTokenUsage:
+    """Token facts for one provider receipt, which may aggregate many calls.
+
+    ``prompt_is_exact`` is false when the provider receipt combines multiple
+    model calls and exposes no per-call context sizes. Such a row can use base
+    rates only when its aggregate prompt tokens are below every tier boundary.
+    Cache creation is split by TTL when the provider exposes those facts;
+    ``cache_creation_unknown`` keeps any unclassified amount explicit.
+    """
+
+    input_tokens: int
+    cache_creation_5m: int
+    cache_creation_1h: int
+    cache_creation_unknown: int
+    cache_read: int
+    output_tokens: int
+    prompt_tokens: int
+    prompt_is_exact: bool
+    service_tier: str | None = None
+
+
+@dataclass
 class ModelUsage:
     model: str
     turns: int = 0
@@ -366,11 +445,85 @@ class ModelUsage:
     # ``None`` keeps legacy/aggregate callers on the conservative total-token
     # threshold check.
     max_request_prompt_tokens: int | None = None
+    request_token_usage: list[RequestTokenUsage] = field(
+        default_factory=list,
+        compare=False,
+    )
 
     def __setstate__(self, state: dict[str, object]) -> None:
-        """Keep PersonalOS snapshots pickled before this field readable."""
+        """Keep PersonalOS snapshots pickled before request facts readable."""
         self.__dict__.update(state)
         self.__dict__.setdefault("max_request_prompt_tokens", None)
+        self.__dict__.setdefault("request_token_usage", [])
+
+    def record_request_usage(
+        self,
+        *,
+        input_tokens: int,
+        cache_creation: int,
+        cache_read: int,
+        output_tokens: int,
+        prompt_tokens: int,
+        prompt_is_exact: bool = True,
+        cache_creation_5m: int | None = None,
+        cache_creation_1h: int | None = None,
+        service_tier: str | None = None,
+    ) -> None:
+        """Retain the smallest token facts needed for source-defined price tiers."""
+        if cache_creation == 0:
+            cache_5m = cache_1h = cache_unknown = 0
+        elif (
+            cache_creation_5m is not None
+            and cache_creation_1h is not None
+            and cache_creation_5m >= 0
+            and cache_creation_1h >= 0
+            and cache_creation_5m + cache_creation_1h == cache_creation
+        ):
+            cache_5m = cache_creation_5m
+            cache_1h = cache_creation_1h
+            cache_unknown = 0
+        else:
+            cache_5m = cache_1h = 0
+            cache_unknown = cache_creation
+        normalized_service_tier = (
+            _canonical_service_tier(service_tier)
+            if isinstance(service_tier, str) and service_tier.strip()
+            else None
+        )
+        self.request_token_usage.append(
+            RequestTokenUsage(
+                input_tokens=input_tokens,
+                cache_creation_5m=cache_5m,
+                cache_creation_1h=cache_1h,
+                cache_creation_unknown=cache_unknown,
+                cache_read=cache_read,
+                output_tokens=output_tokens,
+                prompt_tokens=prompt_tokens,
+                prompt_is_exact=prompt_is_exact,
+                service_tier=normalized_service_tier,
+            )
+        )
+
+    def merge_request_usage(self, incoming: "ModelUsage") -> None:
+        """Merge request facts, falling back to an explicitly aggregated row."""
+        if incoming.request_token_usage:
+            self.request_token_usage.extend(incoming.request_token_usage)
+            return
+        if incoming.total_tokens <= 0:
+            return
+        prompt_tokens = getattr(incoming, "max_request_prompt_tokens", None)
+        self.record_request_usage(
+            input_tokens=incoming.input_tokens,
+            cache_creation=incoming.cache_creation,
+            cache_read=incoming.cache_read,
+            output_tokens=incoming.output_tokens,
+            prompt_tokens=(
+                prompt_tokens
+                if prompt_tokens is not None
+                else incoming.input_tokens + incoming.cache_creation + incoming.cache_read
+            ),
+            prompt_is_exact=False,
+        )
 
     @property
     def total_tokens(self) -> int:
@@ -393,6 +546,361 @@ class ModelUsage:
         rates = _price_for(self.model) or {}
         return [rate for rate, tokens in required if tokens > 0 and rate not in rates]
 
+    def _request_pricing_result(
+        self,
+        *,
+        uncached: bool = False,
+    ) -> tuple[float, bool] | None:
+        """Return (known cost, fully priced) from retained request facts.
+
+        Costs for requests whose context or cache-write tier is ambiguous are
+        omitted from the known subtotal. Their model remains in
+        ``unpriced_models`` so the subtotal is never presented as complete.
+        """
+        if not self.request_token_usage:
+            return None
+        rates = _price_for(self.model)
+        if not rates:
+            return 0.0, False
+        request_totals = {
+            "input_tokens": sum(row.input_tokens for row in self.request_token_usage),
+            "cache_creation": sum(
+                row.cache_creation_5m
+                + row.cache_creation_1h
+                + row.cache_creation_unknown
+                for row in self.request_token_usage
+            ),
+            "cache_read": sum(row.cache_read for row in self.request_token_usage),
+            "output_tokens": sum(row.output_tokens for row in self.request_token_usage),
+        }
+        if request_totals != {
+            "input_tokens": self.input_tokens,
+            "cache_creation": self.cache_creation,
+            "cache_read": self.cache_read,
+            "output_tokens": self.output_tokens,
+        }:
+            # A request-granularity gap must never make the known subtotal look
+            # more complete than the aggregated token totals.
+            return 0.0, False
+
+        raw_tiers = rates.get("_context_tiers", {})
+        context_tiers: list[tuple[int, dict[str, float]]] = []
+        if isinstance(raw_tiers, Mapping):
+            for threshold, tier in raw_tiers.items():
+                try:
+                    threshold_tokens = int(threshold)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(tier, Mapping):
+                    context_tiers.append((
+                        threshold_tokens,
+                        {key: float(value) for key, value in tier.items()
+                         if key in {"inp", "out", "cw", "cr"}
+                         and isinstance(value, (int, float))
+                         and not isinstance(value, bool)},
+                    ))
+        context_tiers.sort(key=lambda item: item[0])
+
+        raw_service_tiers = rates.get("_service_tiers", {})
+        service_tiers = (
+            raw_service_tiers if isinstance(raw_service_tiers, Mapping) else {}
+        )
+        service_rate_components: set[str] = set()
+        service_context_components: dict[int, set[str]] = {}
+        service_cache_age_rate_exists = False
+        for service_info in service_tiers.values():
+            if not isinstance(service_info, Mapping):
+                continue
+            service_rates = service_info.get("rates", {})
+            if isinstance(service_rates, Mapping):
+                service_rate_components.update(
+                    key for key in service_rates if key in {"inp", "out", "cw", "cr"}
+                )
+            service_context = service_info.get("context_tiers", {})
+            if isinstance(service_context, Mapping):
+                for threshold, tier in service_context.items():
+                    try:
+                        threshold_tokens = int(threshold)
+                    except (TypeError, ValueError):
+                        continue
+                    if isinstance(tier, Mapping):
+                        service_context_components.setdefault(
+                            threshold_tokens, set(),
+                        ).update(
+                            key for key in tier if key in {"inp", "out", "cw", "cr"}
+                        )
+            if service_info.get("cache_creation_above_1hr") is not None:
+                service_cache_age_rate_exists = True
+
+        dimensions = rates.get("_unsupported_dimensions", [])
+        if not isinstance(dimensions, list):
+            dimensions = []
+        known_cost = 0.0
+        fully_priced = True
+        long_cache_rate = rates.get("_cache_creation_above_1hr")
+
+        for request in self.request_token_usage:
+            # Unsuffixed LiteLLM rates are the standard/default class. A
+            # service-specific rate is selected only when the provider log
+            # records that explicit tier; absence does not mean a free rate.
+            service_tier_name = request.service_tier or "default"
+            selected_service_info: Mapping[str, object] = {}
+            selected_service_tier_available = True
+            if service_tier_name not in (None, "default"):
+                selected = service_tiers.get(service_tier_name)
+                if isinstance(selected, Mapping):
+                    selected_service_info = selected
+                else:
+                    selected_service_tier_available = False
+
+            prompt_tokens = request.prompt_tokens
+            applicable_tiers = [
+                (threshold, tier)
+                for threshold, tier in context_tiers
+                if prompt_tokens > threshold
+            ]
+            service_context = selected_service_info.get("context_tiers", {})
+            if isinstance(service_context, Mapping):
+                context_by_threshold = {
+                    threshold: dict(tier)
+                    for threshold, tier in applicable_tiers
+                }
+                for threshold, tier in service_context.items():
+                    try:
+                        threshold_tokens = int(threshold)
+                    except (TypeError, ValueError):
+                        continue
+                    if prompt_tokens <= threshold_tokens or not isinstance(tier, Mapping):
+                        continue
+                    context_by_threshold.setdefault(threshold_tokens, {}).update(tier)
+                applicable_tiers = sorted(context_by_threshold.items())
+
+            request_rates = {
+                key: rates[key]
+                for key in ("inp", "out", "cw", "cr")
+                if key in rates
+            }
+            service_rates = selected_service_info.get("rates", {})
+            if isinstance(service_rates, Mapping):
+                request_rates.update({
+                    key: value
+                    for key, value in service_rates.items()
+                    if key in {"inp", "out", "cw", "cr"}
+                })
+            for _threshold, tier in applicable_tiers:
+                request_rates.update(tier)
+
+            in_tokens = request.input_tokens
+            cache_read_tokens = request.cache_read
+            cache_5m_tokens = request.cache_creation_5m
+            cache_1h_tokens = request.cache_creation_1h
+            cache_unknown_tokens = request.cache_creation_unknown
+            if uncached:
+                in_tokens += (
+                    cache_read_tokens + cache_5m_tokens + cache_1h_tokens
+                    + cache_unknown_tokens
+                )
+                cache_read_tokens = cache_5m_tokens = cache_1h_tokens = 0
+                cache_unknown_tokens = 0
+
+            request_components = {
+                "inp": in_tokens,
+                "out": request.output_tokens,
+                "cr": cache_read_tokens,
+                "cw": cache_5m_tokens + cache_1h_tokens + cache_unknown_tokens,
+            }
+            affected_components: set[str] = set()
+            service_affected_components = {
+                component
+                for component in service_rate_components
+                if request_components.get(component, 0) > 0
+            }
+            for threshold, components in service_context_components.items():
+                if prompt_tokens > threshold:
+                    service_affected_components.update(
+                        component
+                        for component in components
+                        if request_components.get(component, 0) > 0
+                    )
+            if (
+                service_cache_age_rate_exists
+                and cache_1h_tokens > 0
+            ):
+                service_affected_components.add("cw")
+
+            if service_tier_name is None or not selected_service_tier_available:
+                affected_components.update(service_affected_components)
+            elif service_tier_name != "default":
+                selected_service_rates = (
+                    service_rates if isinstance(service_rates, Mapping) else {}
+                )
+                for component in service_affected_components:
+                    if (
+                        request_components.get(component, 0) > 0
+                        and component not in selected_service_rates
+                    ):
+                        affected_components.add(component)
+                selected_service_context = (
+                    service_context if isinstance(service_context, Mapping) else {}
+                )
+                for threshold, components in service_context_components.items():
+                    if prompt_tokens <= threshold:
+                        continue
+                    selected_context_rates = selected_service_context.get(
+                        str(threshold), {},
+                    )
+                    if not isinstance(selected_context_rates, Mapping):
+                        selected_context_rates = {}
+                    for component in components:
+                        if (
+                            request_components.get(component, 0) > 0
+                            and component not in selected_context_rates
+                        ):
+                            affected_components.add(component)
+
+            selected_cache_age_rate = selected_service_info.get(
+                "cache_creation_above_1hr",
+            )
+            if selected_cache_age_rate is not None:
+                long_cache_rate = selected_cache_age_rate
+            elif (
+                service_tier_name not in (None, "default")
+                and service_cache_age_rate_exists
+                and cache_1h_tokens > 0
+            ):
+                affected_components.add("cw")
+            for dimension in dimensions:
+                if not isinstance(dimension, str):
+                    continue
+                source_dimension = dimension
+                service_suffix = _SERVICE_TIER_SUFFIX_RE.search(dimension)
+                if service_suffix is not None:
+                    if _canonical_service_tier(service_suffix.group(1)) != service_tier_name:
+                        continue
+                    source_dimension = dimension[:service_suffix.start()]
+                if "cache_creation_input_token_cost_above_1hr" in source_dimension:
+                    if service_suffix is not None and (
+                        cache_unknown_tokens > 0 or cache_1h_tokens > 0
+                    ):
+                        affected_components.add("cw")
+                        continue
+                    if cache_unknown_tokens > 0 or (
+                        cache_1h_tokens > 0 and long_cache_rate is None
+                    ):
+                        affected_components.add("cw")
+                    continue
+                threshold = re.search(
+                    r"_above_(\d+)(k)?_tokens", source_dimension,
+                )
+                if threshold is None:
+                    component = next(
+                        (
+                            key for prefix, key in (
+                                ("input_cost_per_token", "inp"),
+                                ("output_cost_per_token", "out"),
+                                ("cache_creation_input_token_cost", "cw"),
+                                ("cache_read_input_token_cost", "cr"),
+                            )
+                            if source_dimension.startswith(prefix)
+                        ),
+                        None,
+                    )
+                    if (
+                        service_suffix is not None
+                        and component is not None
+                        and request_components.get(component, 0) > 0
+                    ):
+                        affected_components.add(component)
+                    continue
+                limit = int(threshold.group(1)) * (
+                    1000 if threshold.group(2) else 1
+                )
+                if prompt_tokens <= limit:
+                    continue
+                if source_dimension.startswith((
+                    "input_cost_per_token",
+                    "cache_creation_input_token_cost",
+                )):
+                    affected_components.add("inp" if source_dimension.startswith(
+                        "input_cost_per_token"
+                    ) else "cw")
+                elif source_dimension.startswith("cache_read_input_token_cost"):
+                    affected_components.add("cr")
+                elif source_dimension.startswith("output_cost_per_token"):
+                    affected_components.add("out")
+
+            unresolved = bool(
+                applicable_tiers
+                and not request.prompt_is_exact
+                and any(
+                    request_components.get(component, 0) > 0
+                    for _threshold, tier in applicable_tiers
+                    for component in tier
+                )
+            )
+            if applicable_tiers and not request.prompt_is_exact:
+                # A summed multi-call receipt above a boundary cannot tell us
+                # which calls received the higher rate, even if one category
+                # happens not to have a tier-specific source rate.
+                unresolved = True
+            if cache_unknown_tokens > 0 and long_cache_rate is not None:
+                unresolved = True
+            if (
+                cache_1h_tokens > 0
+                and long_cache_rate is not None
+                and any("cw" in tier for _threshold, tier in applicable_tiers)
+            ):
+                # The source does not expose a combined context-size × cache
+                # TTL price. Do not multiply or otherwise synthesize one.
+                unresolved = True
+            if affected_components and any(
+                request_components.get(component, 0) > 0
+                for component in affected_components
+            ):
+                unresolved = True
+
+            if unresolved:
+                fully_priced = False
+                continue
+
+            required_components = [
+                ("inp", request_components["inp"]),
+                ("out", request_components["out"]),
+                ("cr", request_components["cr"]),
+            ]
+            if any(tokens > 0 and component not in request_rates
+                   for component, tokens in required_components):
+                fully_priced = False
+                continue
+            if (
+                cache_5m_tokens + cache_unknown_tokens > 0
+                and "cw" not in request_rates
+            ) or (
+                cache_1h_tokens > 0
+                and long_cache_rate is None
+                and "cw" not in request_rates
+            ):
+                fully_priced = False
+                continue
+            request_cost = sum(
+                request_rates.get(component, 0.0) * tokens
+                for component, tokens in required_components
+                if component != "cw"
+            )
+            cache_write_rate = request_rates.get("cw", 0.0)
+            long_cache_write_rate = (
+                float(long_cache_rate)
+                if long_cache_rate is not None
+                else cache_write_rate
+            )
+            request_cost += (
+                cache_5m_tokens + cache_unknown_tokens
+            ) * cache_write_rate
+            request_cost += cache_1h_tokens * long_cache_write_rate
+            known_cost += request_cost / 1_000_000
+
+        return known_cost, fully_priced
+
     @property
     def unsupported_price_dimensions(self) -> list[str]:
         """Source tariffs that cannot be resolved from this aggregate usage.
@@ -407,11 +915,126 @@ class ModelUsage:
         rates = _price_for(self.model) or {}
         dimensions = rates.get("_unsupported_dimensions", [])
         if not isinstance(dimensions, list):
-            return []
+            dimensions = []
+        raw_service_tiers = rates.get("_service_tiers", {})
+        service_tiers = (
+            raw_service_tiers if isinstance(raw_service_tiers, Mapping) else {}
+        )
+        if self.request_token_usage:
+            result: set[str] = set()
+            for request in self.request_token_usage:
+                if (
+                    service_tiers
+                    and request.service_tier not in (None, "default")
+                    and request.service_tier not in service_tiers
+                ):
+                    result.add("service tier is unavailable or unpriced")
+                prompt_tokens = request.prompt_tokens
+                request_service_tier = request.service_tier or "default"
+                if (
+                    request.cache_creation_unknown > 0
+                    and rates.get("_cache_creation_above_1hr") is not None
+                ):
+                    result.add("cache creation TTL is unavailable for some writes")
+                for dimension in dimensions:
+                    if not isinstance(dimension, str):
+                        continue
+                    source_dimension = dimension
+                    service_suffix = _SERVICE_TIER_SUFFIX_RE.search(dimension)
+                    if service_suffix is not None:
+                        if (
+                            _canonical_service_tier(service_suffix.group(1))
+                            != request_service_tier
+                        ):
+                            continue
+                        source_dimension = dimension[:service_suffix.start()]
+                    if "cache_creation_input_token_cost_above_1hr" in source_dimension:
+                        if service_suffix is not None and (
+                            request.cache_creation_unknown > 0
+                            or request.cache_creation_1h > 0
+                        ):
+                            result.add(dimension)
+                            continue
+                        if request.cache_creation_unknown > 0 or (
+                            request.cache_creation_1h > 0
+                            and rates.get("_cache_creation_above_1hr") is None
+                        ):
+                            result.add(dimension)
+                        continue
+                    threshold = re.search(
+                        r"_above_(\d+)(k)?_tokens", source_dimension,
+                    )
+                    if threshold is None:
+                        if service_suffix is not None:
+                            component = next(
+                                (
+                                    key for prefix, key in (
+                                        ("input_cost_per_token", "inp"),
+                                        ("output_cost_per_token", "out"),
+                                        ("cache_creation_input_token_cost", "cw"),
+                                        ("cache_read_input_token_cost", "cr"),
+                                    )
+                                    if source_dimension.startswith(prefix)
+                                ),
+                                None,
+                            )
+                            token_counts = {
+                                "inp": request.input_tokens,
+                                "out": request.output_tokens,
+                                "cw": (
+                                    request.cache_creation_5m
+                                    + request.cache_creation_1h
+                                    + request.cache_creation_unknown
+                                ),
+                                "cr": request.cache_read,
+                            }
+                            if component and token_counts[component] > 0:
+                                result.add(dimension)
+                        continue
+                    limit = int(threshold.group(1)) * (
+                        1000 if threshold.group(2) else 1
+                    )
+                    if prompt_tokens <= limit:
+                        continue
+                    if source_dimension.startswith("input_cost_per_token"):
+                        used = request.input_tokens
+                    elif source_dimension.startswith("cache_creation_input_token_cost"):
+                        used = (request.cache_creation_5m + request.cache_creation_1h
+                                + request.cache_creation_unknown)
+                    elif source_dimension.startswith("cache_read_input_token_cost"):
+                        used = request.cache_read
+                    elif source_dimension.startswith("output_cost_per_token"):
+                        used = request.output_tokens
+                    else:
+                        used = 0
+                    if used > 0:
+                        result.add(dimension)
+            if any(
+                not request.prompt_is_exact
+                and any(request.prompt_tokens > threshold for threshold, _ in (
+                    (int(k), v)
+                    for k, v in (rates.get("_context_tiers", {}) or {}).items()
+                    if isinstance(v, Mapping)
+                ))
+                for request in self.request_token_usage
+            ):
+                result.add("context-tier prompt size is aggregated across model calls")
+            return sorted(result)
         prompt_tokens = getattr(self, "max_request_prompt_tokens", None)
         if prompt_tokens is None:
             prompt_tokens = self.input_tokens + self.cache_creation + self.cache_read
         relevant: list[str] = []
+        raw_tiers = rates.get("_context_tiers", {})
+        if isinstance(raw_tiers, Mapping):
+            for threshold in raw_tiers:
+                try:
+                    threshold_tokens = int(threshold)
+                except (TypeError, ValueError):
+                    continue
+                if prompt_tokens > threshold_tokens and self.total_tokens > 0:
+                    relevant.append(
+                        f"context-tier request distribution above {threshold_tokens} tokens"
+                    )
         for dimension in dimensions:
             if not isinstance(dimension, str):
                 continue
@@ -437,12 +1060,18 @@ class ModelUsage:
     @property
     def cost_is_priced(self) -> bool:
         """Whether all observed token categories have an explicit rate."""
+        request_result = self._request_pricing_result()
+        if request_result is not None:
+            return request_result[1]
         if self.unsupported_price_dimensions:
             return False
         return not self.missing_price_components
 
     @property
     def cost_usd(self) -> float:
+        request_result = self._request_pricing_result()
+        if request_result is not None:
+            return request_result[0]
         p = _price_for(self.model)
         if not p or not self.cost_is_priced:
             return 0.0
@@ -455,6 +1084,9 @@ class ModelUsage:
 
     @property
     def cost_uncached_is_priced(self) -> bool:
+        request_result = self._request_pricing_result(uncached=True)
+        if request_result is not None:
+            return request_result[1]
         p = _price_for(self.model) or {}
         if self.unsupported_price_dimensions:
             return False
@@ -466,6 +1098,9 @@ class ModelUsage:
     @property
     def cost_uncached_usd(self) -> float:
         """Hypothetical cost if no caching had been used."""
+        request_result = self._request_pricing_result(uncached=True)
+        if request_result is not None:
+            return request_result[0]
         p = _price_for(self.model)
         if not p or not self.cost_uncached_is_priced:
             return 0.0

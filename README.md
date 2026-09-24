@@ -544,10 +544,10 @@ steps have no source timestamp, so their report-window membership is
 deterministically attributed from neighboring transcript step indexes. Treat
 that as local-parser evidence, not a provider billing-portal reconciliation.
 For Grok, token categories come from the final native usage event; provider
-cost metadata in the log is ignored. Model IDs remain exactly as recorded, so
-a Grok CLI build model with no exact LiteLLM snapshot entry stays unpriced.
-Models with known tokens but no known rate remain visible and trigger a
-missing-price warning.
+cost metadata in the log is ignored. Exact `grok-<version>-build` IDs use the
+matching `xai/grok-<version>` LiteLLM row when it exists. A receipt that groups
+multiple model calls without per-call context sizes can still leave that
+model partially unpriced.
 
 Use `--agent <provider-id>` to isolate one bundled provider; run
 `ccstory --help` to see the IDs available in the installed version.
@@ -819,20 +819,25 @@ cache_read  = 0.6
 ```
 
 For a model already in the packaged table, unspecified override keys keep the
-packaged rate. For a new model (`[prices.custom]`), only the supplied rate
-components are known; missing rates stay unpriced. Token categories whose rate
-is missing remain in usage totals, while that model is listed in
-`unpriced_models` and excluded from the cost total. Missing rates are never
-estimated or treated as free.
+packaged rate. Setting a component override also replaces that component's
+context and cache-age tiers. For a new model (`[prices.custom]`), only the
+supplied rate components are known; missing rates stay unpriced. Token
+categories whose rate is missing remain in usage totals. Requests with known
+rates contribute to the cost subtotal; any model with an unpriced portion
+remains listed in `unpriced_models`. Missing rates are never estimated or
+treated as free.
 
 LiteLLM also publishes request-dependent context and cache-age tiers. The
-snapshot retains those source dimensions. When observed aggregate usage could
-have crossed a context tier, or includes cache writes whose age is unknown,
-ccstory lists the affected model in `unpriced_models` instead of applying the
-base rate. Usage below a tier can still use the base rate. Non-token charges
-such as per-query or per-image fees are outside this token-equivalent cost
-calculation. A complete per-model override can replace the source's tiered
-token rates.
+snapshot retains their explicit rates, including service-class variants.
+ccstory applies context rates when a provider exposes exact per-request
+context size, and applies Anthropic's 1-hour cache-write rate when the source
+log gives the 5-minute and 1-hour token counts. Codex service-class rates use
+the `service_tier` recorded in `thread_settings_applied`; when no service
+class is recorded, ccstory uses LiteLLM's unsuffixed standard rate. An explicit
+but unrecognized service class, aggregated multi-call receipt, unknown
+cache-write age, or unsupported token tier stays visible in `unpriced_models`;
+its uncertain cost is excluded. Non-token charges such as per-query or
+per-image fees are outside this token-equivalent cost calculation.
 
 ## How ccstory differs from ccusage
 
