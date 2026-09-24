@@ -118,6 +118,7 @@ implementation_modules = {
     "ccstory.providers.claude",
     "ccstory.providers.codex",
     "ccstory.providers.antigravity",
+    "ccstory.providers.grok",
 }
 before = sorted(implementation_modules.intersection(sys.modules))
 metadata = [
@@ -189,6 +190,7 @@ implementation_modules = {
     "ccstory.providers.claude",
     "ccstory.providers.codex",
     "ccstory.providers.antigravity",
+    "ccstory.providers.grok",
 }
 before = sorted(implementation_modules.intersection(sys.modules))
 
@@ -198,6 +200,7 @@ from ccstory.providers.antigravity import (
 )
 from ccstory.providers.claude import ClaudeCodeProvider as DirectClaudeProvider
 from ccstory.providers.codex import CodexProvider as DirectCodexProvider
+from ccstory.providers.grok import GrokProvider as DirectGrokProvider
 
 after = sorted(implementation_modules.intersection(sys.modules))
 missing = sorted(name for name in providers.__all__ if name not in globals())
@@ -212,6 +215,7 @@ print(
             "antigravity_identity": (
                 AntigravityProvider is DirectAntigravityProvider
             ),
+            "grok_identity": GrokProvider is DirectGrokProvider,
             "all": providers.__all__,
         }
     )
@@ -551,6 +555,7 @@ def test_provider_implementations_load_only_when_factory_is_called():
         ["claude", "Claude Code", "complete"],
         ["codex", "Codex", "complete"],
         ["antigravity", "Antigravity", "complete"],
+        ["grok", "Grok", "partial"],
     ]
 
 
@@ -578,11 +583,13 @@ def test_star_import_preserves_provider_api_and_explicitly_loads_classes():
         "ccstory.providers.antigravity",
         "ccstory.providers.claude",
         "ccstory.providers.codex",
+        "ccstory.providers.grok",
     ]
     assert audit["missing"] == []
     assert audit["claude_identity"] is True
     assert audit["codex_identity"] is True
     assert audit["antigravity_identity"] is True
+    assert audit["grok_identity"] is True
     assert audit["all"] == [
         "AgentProviderSpec",
         "ProviderSnapshot",
@@ -593,6 +600,7 @@ def test_star_import_preserves_provider_api_and_explicitly_loads_classes():
         "ClaudeCodeProvider",
         "CodexProvider",
         "AntigravityProvider",
+        "GrokProvider",
         "TranscriptResolver",
         "register_provider",
         "provider_specs",
