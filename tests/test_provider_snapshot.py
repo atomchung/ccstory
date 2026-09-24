@@ -40,6 +40,7 @@ from ccstory.token_usage import (
     ModelUsage,
     collect_usage_for_windows,
 )
+from tests.conftest import make_assistant_msg, make_user_msg
 
 
 def test_provider_usage_merge_preserves_maximum_request_prompt() -> None:
@@ -63,7 +64,6 @@ def test_provider_usage_merge_preserves_maximum_request_prompt() -> None:
     merged = destination["xai/grok-4.6"]
     assert merged.input_tokens == 300
     assert merged.max_request_prompt_tokens == 150
-from tests.conftest import make_assistant_msg, make_user_msg
 
 
 BOUNDARY = datetime(2026, 7, 20, tzinfo=timezone.utc)
