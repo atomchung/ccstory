@@ -918,6 +918,13 @@ class AntigravityProvider(BaseAgentProvider):
                                 mu.input_tokens += inp
                                 mu.output_tokens += out
                                 mu.cache_read += cache_read
+                                mu.record_request_usage(
+                                    input_tokens=inp,
+                                    cache_creation=0,
+                                    cache_read=cache_read,
+                                    output_tokens=out,
+                                    prompt_tokens=inp + cache_read,
+                                )
                                 assistant_turns += 1
                 except (sqlite3.Error, OSError):
                     pass
@@ -1002,6 +1009,13 @@ class AntigravityProvider(BaseAgentProvider):
                 mu.input_tokens += inp
                 mu.output_tokens += out
                 mu.cache_read += cache_read
+                mu.record_request_usage(
+                    input_tokens=inp,
+                    cache_creation=0,
+                    cache_read=cache_read,
+                    output_tokens=out,
+                    prompt_tokens=inp + cache_read,
+                )
                 assistant_turns += 1
 
         return assistant_turns

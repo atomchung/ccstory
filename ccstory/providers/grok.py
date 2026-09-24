@@ -55,6 +55,7 @@ class _UsageEvent:
     signature: tuple[Any, ...]
     timestamp: datetime
     models: dict[str, tuple[int, int, int, int]]
+    model_calls: int | None = None
     used_fallback_identity: bool = False
 
 
@@ -183,6 +184,8 @@ def _parse_usage_event(
         return None, False
 
     models: dict[str, tuple[int, int, int, int]] = {}
+    raw_model_calls = _nonnegative_int(raw_usage.get("modelCalls"))
+    model_calls = raw_model_calls if raw_model_calls and raw_model_calls > 0 else None
     sums = Counter()
     signature_models: list[tuple[str, tuple[int, ...]]] = []
     for model, raw_model_usage in sorted(raw_models.items()):
@@ -228,13 +231,14 @@ def _parse_usage_event(
         if isinstance(event_id, str)
         else ("session-prompt", session_id, prompt_id)
     )
-    signature = (prompt_id, tuple(signature_models))
+    signature = (prompt_id, model_calls, tuple(signature_models))
     return (
         _UsageEvent(
             identity=identity,
             signature=signature,
             timestamp=timestamp,
             models=models,
+            model_calls=model_calls,
             used_fallback_identity=used_fallback_identity,
         ),
         True,
@@ -392,6 +396,8 @@ class GrokProvider(BaseAgentProvider):
                         if not valid:
                             result.complete = False
                         elif event is not None:
+                            if event.model_calls is None:
+                                result.complete = False
                             result.usage_events.append(event)
         except (OSError, UnicodeError):
             result.complete = False
@@ -551,6 +557,14 @@ class GrokProvider(BaseAgentProvider):
                         usage.max_request_prompt_tokens or 0,
                         input_tokens + cache_read + cache_creation,
                     )
+                    usage.record_request_usage(
+                        input_tokens=input_tokens,
+                        cache_creation=cache_creation,
+                        cache_read=cache_read,
+                        output_tokens=output_tokens,
+                        prompt_tokens=input_tokens + cache_read + cache_creation,
+                        prompt_is_exact=event.model_calls == 1,
+                    )
                 turns[key] += 1
         return turns
 
@@ -630,6 +644,14 @@ class GrokProvider(BaseAgentProvider):
                     usage.max_request_prompt_tokens = max(
                         usage.max_request_prompt_tokens or 0,
                         input_tokens + cache_read + cache_creation,
+                    )
+                    usage.record_request_usage(
+                        input_tokens=input_tokens,
+                        cache_creation=cache_creation,
+                        cache_read=cache_read,
+                        output_tokens=output_tokens,
+                        prompt_tokens=input_tokens + cache_read + cache_creation,
+                        prompt_is_exact=event.model_calls == 1,
                     )
                 assistant_turns_by_window[key] += 1
 

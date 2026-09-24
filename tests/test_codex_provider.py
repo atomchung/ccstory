@@ -412,6 +412,44 @@ def _token_count(
 
 
 class TestCodexUsageCorrectness:
+    def test_service_tier_from_native_thread_settings_is_attached_to_usage(
+        self, codex_factory,
+    ):
+        codex_factory(
+            "service-tier",
+            [
+                _meta("service-tier", "/Users/x/demo"),
+                {
+                    "timestamp": _ts(1),
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "thread_settings_applied",
+                        "thread_settings": {"service_tier": "priority"},
+                    },
+                },
+                {
+                    "timestamp": _ts(2),
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-6-luna"},
+                },
+                _token_count(_ts(3), 100, 20, 10),
+            ],
+        )
+        usage_by_window = {"w": {}}
+        CodexProvider().collect_usage_for_windows(
+            {
+                "w": (
+                    datetime(2026, 7, 22, 11, tzinfo=timezone.utc),
+                    datetime(2026, 7, 22, 13, tzinfo=timezone.utc),
+                ),
+            },
+            usage_by_window,
+        )
+
+        usage = usage_by_window["w"]["gpt-6-luna"]
+        assert len(usage.request_token_usage) == 1
+        assert usage.request_token_usage[0].service_tier == "priority"
+
     def test_concurrent_branches_without_rollout_id_do_not_interleave(
         self, codex_factory,
     ):

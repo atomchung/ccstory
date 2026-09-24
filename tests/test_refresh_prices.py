@@ -78,22 +78,61 @@ class TestParseAndValidateRates:
         )
         assert rates == {"inp": 0.0, "out": 6.0}
 
-    def test_non_base_litellm_cost_dimensions_are_preserved_for_fail_closed_costs(self):
+    def test_exact_litellm_context_tiers_and_cache_age_rate_are_retained(self):
         rates = parse_and_validate_rates(
-            "xai/grok-4.20",
+            "xai/grok-4.6",
             {
                 "input_cost_per_token": 0.000002,
                 "output_cost_per_token": 0.000006,
+                "cache_read_input_token_cost": 0.0000005,
                 "input_cost_per_token_above_200k_tokens": 0.0000025,
                 "cache_read_input_token_cost_above_200k_tokens": 0.0000004,
+                "cache_creation_input_token_cost": 0.000005,
+                "cache_creation_input_token_cost_above_1hr": 0.000008,
+                "input_cost_per_image_token": 0.000002,
             },
         )
         assert rates == {
             "inp": 2.0,
             "out": 6.0,
+            "cr": 0.5,
+            "cw": 5.0,
+            "_context_tiers": {"200000": {"cr": 0.4, "inp": 2.5}},
+            "_cache_creation_above_1hr": 8.0,
+            "_unsupported_dimensions": ["input_cost_per_image_token"],
+        }
+
+    def test_context_and_service_tier_rates_are_retained(self):
+        rates = parse_and_validate_rates(
+            "gpt-6-luna",
+            {
+                "input_cost_per_token": 0.0000001,
+                "input_cost_per_token_above_272k_tokens": 0.0000002,
+                "input_cost_per_token_above_272k_tokens_priority": 0.0000004,
+                "input_cost_per_token_priority": 0.0000002,
+                "output_cost_per_token": 0.0000005,
+                "output_cost_per_token_priority": 0.000001,
+                "cache_creation_input_token_cost_flex": 0.0000000625,
+                "cache_read_input_token_cost": 0.00000001,
+                "cache_read_input_token_cost_priority": None,
+                "input_cost_per_image_token": 0.0000003,
+            },
+        )
+        assert rates == {
+            "inp": 0.1,
+            "out": 0.5,
+            "cr": 0.01,
+            "_context_tiers": {"272000": {"inp": 0.2}},
+            "_service_tiers": {
+                "flex": {"rates": {"cw": 0.0625}},
+                "priority": {
+                    "context_tiers": {"272000": {"inp": 0.4}},
+                    "rates": {"inp": 0.2, "out": 1.0},
+                },
+            },
             "_unsupported_dimensions": [
-                "cache_read_input_token_cost_above_200k_tokens",
-                "input_cost_per_token_above_200k_tokens",
+                "cache_read_input_token_cost_priority",
+                "input_cost_per_image_token",
             ],
         }
 
@@ -167,7 +206,7 @@ class TestRefreshPrices:
             def __enter__(self):
                 import io
                 return io.BytesIO(
-                    b'{"xai/grok-4.6":{"input_cost_per_token":0.000002,"output_cost_per_token":0.000006,"cache_read_input_token_cost":0.0000005},"gpt-6-luna":{"input_cost_per_token":0.000001,"output_cost_per_token":0.000008}}'
+                    b'{"xai/grok-4.6":{"input_cost_per_token":0.000002,"output_cost_per_token":0.000006,"cache_read_input_token_cost":0.0000005,"input_cost_per_token_above_200k_tokens":0.000004},"gpt-6-luna":{"input_cost_per_token":0.000001,"output_cost_per_token":0.000008}}'
                 )
 
             def __exit__(self, *args):
@@ -178,7 +217,12 @@ class TestRefreshPrices:
 
         snapshot = json.loads(output.read_text(encoding="utf-8"))
         assert snapshot["entry_count"] == 2
-        assert snapshot["prices"]["xai/grok-4.6"] == {"inp": 2.0, "out": 6.0, "cr": 0.5}
+        assert snapshot["prices"]["xai/grok-4.6"] == {
+            "inp": 2.0,
+            "out": 6.0,
+            "cr": 0.5,
+            "_context_tiers": {"200000": {"inp": 4.0}},
+        }
         assert "cw: $2.5/M -> unpriced" in capsys.readouterr().out
 
     def test_failed_refresh_preserves_existing_snapshot_bytes(self, monkeypatch, tmp_path):

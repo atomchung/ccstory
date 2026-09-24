@@ -64,6 +64,8 @@ def test_provider_usage_merge_preserves_maximum_request_prompt() -> None:
     merged = destination["xai/grok-4.6"]
     assert merged.input_tokens == 300
     assert merged.max_request_prompt_tokens == 150
+    assert len(merged.request_token_usage) == 2
+    assert all(not row.prompt_is_exact for row in merged.request_token_usage)
 
 
 BOUNDARY = datetime(2026, 7, 20, tzinfo=timezone.utc)

@@ -113,7 +113,9 @@ _USAGE_FIELDS = (
 
 
 def _reconstruct_codex_usage(
-    snapshots_by_branch: Mapping[str, list[tuple[datetime, dict, str]]],
+    snapshots_by_branch: Mapping[
+        str, list[tuple[datetime, dict, str, str | None]],
+    ],
     branch_parents: Mapping[str, str | None],
     normalized_windows: Mapping[str, tuple[datetime, datetime]],
     by_model_by_window: Mapping[str, dict[str, ModelUsage]],
@@ -122,25 +124,42 @@ def _reconstruct_codex_usage(
 ) -> dict[str, int]:
     """Reconstruct token usage across cumulative branches and attribute to windows.
 
-    Each branch_id has a list of (timestamp, total_token_usage_dict, model).
+    Each branch_id has a list of
+    (timestamp, total_token_usage_dict, model, service_tier).
     Deduplicates snapshots per branch, computes inherited prefix length from
     ancestors, calculates deltas handling counter resets, and accumulates
     positive deltas into the matching windows.
     """
     fields = _USAGE_FIELDS
-    ordered_by_branch: dict[str, list[tuple[datetime, dict, str]]] = {}
+    ordered_by_branch: dict[
+        str, list[tuple[datetime, dict, str, str | None]],
+    ] = {}
     for branch_id, snapshots in snapshots_by_branch.items():
-        unique: dict[tuple, tuple[datetime, dict, str]] = {}
-        for ts, totals, model in snapshots:
+        unique: dict[
+            tuple, tuple[datetime, dict, str, str | None],
+        ] = {}
+        for ts, totals, model, service_tier in snapshots:
             key = (
                 ts,
                 tuple(int(totals.get(field, 0) or 0) for field in fields),
             )
             existing = unique.get(key)
-            if existing is None or (
-                existing[2] == "unknown" and model != "unknown"
-            ):
-                unique[key] = (ts, totals, model)
+            if existing is None:
+                unique[key] = (ts, totals, model, service_tier)
+            else:
+                chosen_model = (
+                    model if existing[2] == "unknown" and model != "unknown"
+                    else existing[2]
+                )
+                if existing[3] == service_tier:
+                    chosen_service_tier = service_tier
+                elif existing[3] is None:
+                    chosen_service_tier = service_tier
+                elif service_tier is None:
+                    chosen_service_tier = existing[3]
+                else:
+                    chosen_service_tier = None
+                unique[key] = (ts, totals, chosen_model, chosen_service_tier)
         ordered = sorted(
             unique.values(),
             key=lambda item: (
@@ -166,7 +185,9 @@ def _reconstruct_codex_usage(
         for candidate in candidates:
             thread_by_branch.setdefault(candidate, thread_id)
 
-    def _totals_key(snapshot: tuple[datetime, dict, str]) -> tuple[int, ...]:
+    def _totals_key(
+        snapshot: tuple[datetime, dict, str, str | None],
+    ) -> tuple[int, ...]:
         return tuple(
             max(0, int(snapshot[1].get(field, 0) or 0))
             for field in fields
@@ -183,8 +204,8 @@ def _reconstruct_codex_usage(
 
     def _match_prefix(
         child_values: list[tuple[int, ...]],
-        child_snapshots: list[tuple[datetime, dict, str]],
-        ancestor_snapshots: list[tuple[datetime, dict, str]],
+        child_snapshots: list[tuple[datetime, dict, str, str | None]],
+        ancestor_snapshots: list[tuple[datetime, dict, str, str | None]],
     ) -> int:
         if not ancestor_snapshots or not child_values:
             return 0
@@ -208,8 +229,8 @@ def _reconstruct_codex_usage(
         return matched
 
     def _copied_thread_prefix_len(
-        child_snapshots: list[tuple[datetime, dict, str]],
-        ancestor_snapshots: list[tuple[datetime, dict, str]],
+        child_snapshots: list[tuple[datetime, dict, str, str | None]],
+        ancestor_snapshots: list[tuple[datetime, dict, str, str | None]],
     ) -> int:
         """Return a provable copied prefix for no-id linear resumes.
 
@@ -253,7 +274,7 @@ def _reconstruct_codex_usage(
     def _eval_lineage_prefix(
         start_ancestor_id: str,
         child_values: list[tuple[int, ...]],
-        child_snapshots: list[tuple[datetime, dict, str]],
+        child_snapshots: list[tuple[datetime, dict, str, str | None]],
     ) -> int:
         lineage_best = 0
         curr_id: str | None = start_ancestor_id
@@ -268,7 +289,7 @@ def _reconstruct_codex_usage(
 
     def _inherited_prefix_len(
         branch_id: str,
-        snapshots: list[tuple[datetime, dict, str]],
+        snapshots: list[tuple[datetime, dict, str, str | None]],
     ) -> int:
         if not snapshots:
             return 0
@@ -311,7 +332,7 @@ def _reconstruct_codex_usage(
     for branch_id, ordered in ordered_by_branch.items():
         inherited = _inherited_prefix_len(branch_id, ordered)
         previous = {field: 0 for field in fields}
-        for index, (ts, totals, model) in enumerate(ordered):
+        for index, (ts, totals, model, service_tier) in enumerate(ordered):
             current = {
                 field: max(0, int(totals.get(field, 0) or 0))
                 for field in fields
@@ -357,6 +378,14 @@ def _reconstruct_codex_usage(
                 mu.max_request_prompt_tokens = max(
                     mu.max_request_prompt_tokens or 0,
                     uncached_inp + cached_inp + cw,
+                )
+                mu.record_request_usage(
+                    input_tokens=uncached_inp,
+                    cache_creation=cw,
+                    cache_read=cached_inp,
+                    output_tokens=out,
+                    prompt_tokens=uncached_inp + cached_inp + cw,
+                    service_tier=service_tier,
                 )
                 assistant_turns[key] += 1
 
@@ -578,7 +607,7 @@ class CodexProvider(BaseAgentProvider):
         self, jsonl_path: Path
     ) -> tuple[
         SessionStat | None,
-        list[tuple[datetime, dict, str]],
+        list[tuple[datetime, dict, str, str | None]],
         str,
         str | None,
         str | None,
@@ -596,11 +625,12 @@ class CodexProvider(BaseAgentProvider):
         is_subagent = False
 
         current_model = "unknown"
+        current_service_tier: str | None = None
         branch_id = str(jsonl_path)
         parent_id: str | None = None
         root_thread_id: str | None = None
         identity_seen = False
-        snapshots: list[tuple[datetime, dict, str]] = []
+        snapshots: list[tuple[datetime, dict, str, str | None]] = []
 
         records_parsed = 0
         complete = True
@@ -662,6 +692,13 @@ class CodexProvider(BaseAgentProvider):
                         if isinstance(m, str) and m:
                             current_model = m
 
+                    elif kind == "event_msg" and ptype == "thread_settings_applied":
+                        settings = payload.get("thread_settings")
+                        if isinstance(settings, dict):
+                            raw_tier = settings.get("service_tier")
+                            if isinstance(raw_tier, str) and raw_tier.strip():
+                                current_service_tier = raw_tier.strip().lower()
+
                     elif kind == "event_msg" and ptype == "token_count":
                         ts_raw = d.get("timestamp")
                         info = (
@@ -677,7 +714,9 @@ class CodexProvider(BaseAgentProvider):
                         if ts_raw and isinstance(ttu, dict):
                             ts = _parse_ts(ts_raw)
                             if ts:
-                                snapshots.append((ts, ttu, current_model))
+                                snapshots.append((
+                                    ts, ttu, current_model, current_service_tier,
+                                ))
                             else:
                                 complete = False
                         else:
@@ -787,7 +826,9 @@ class CodexProvider(BaseAgentProvider):
     ) -> dict[str, int]:
         """Scan all Codex jsonl files and aggregate token usage in [since, until]."""
         normalized_windows = _usage_windows_utc(windows)
-        snapshots_by_branch: dict[str, list[tuple[datetime, dict, str]]] = {}
+        snapshots_by_branch: dict[
+            str, list[tuple[datetime, dict, str, str | None]],
+        ] = {}
         branch_parents: dict[str, str | None] = {}
         thread_branches: dict[str, list[str]] = {}
 
@@ -827,6 +868,8 @@ class CodexProvider(BaseAgentProvider):
             for model, usage in model_dict.items():
                 if model in dest:
                     target_mu = dest[model]
+                    if not target_mu.request_token_usage:
+                        target_mu.merge_request_usage(target_mu)
                     target_mu.turns += usage.turns
                     target_mu.input_tokens += usage.input_tokens
                     target_mu.cache_read += usage.cache_read
@@ -836,20 +879,9 @@ class CodexProvider(BaseAgentProvider):
                         getattr(target_mu, "max_request_prompt_tokens", None) or 0,
                         getattr(usage, "max_request_prompt_tokens", None) or 0,
                     )
+                    target_mu.merge_request_usage(usage)
                 else:
-                    dest[model] = ModelUsage(
-                        model=usage.model,
-                        turns=usage.turns,
-                        input_tokens=usage.input_tokens,
-                        cache_read=usage.cache_read,
-                        cache_creation=usage.cache_creation,
-                        output_tokens=usage.output_tokens,
-                        max_request_prompt_tokens=getattr(
-                            usage,
-                            "max_request_prompt_tokens",
-                            None,
-                        ),
-                    )
+                    dest[model] = usage
         return turns
 
     def collect_snapshot(
@@ -901,7 +933,9 @@ class CodexProvider(BaseAgentProvider):
         sessions: list[SessionStat] = []
         source_opens = 0
         records_parsed = 0
-        snapshots_by_branch: dict[str, list[tuple[datetime, dict, str]]] = {}
+        snapshots_by_branch: dict[
+            str, list[tuple[datetime, dict, str, str | None]],
+        ] = {}
         branch_parents: dict[str, str | None] = {}
         thread_branches: dict[str, list[str]] = {}
 
