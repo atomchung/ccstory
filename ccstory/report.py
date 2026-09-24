@@ -1100,12 +1100,12 @@ def render_report(
     )
     lines.append("")
     if usage.unpriced_models:
-        # Some models consumed tokens but have no rate in the active price table.
-        # Disclose that total cost is underestimated rather than presenting a silently low bill.
+        # Some models consumed tokens but lack complete applicable rates for
+        # the observed usage categories or request tiers.
         unpriced_str = ", ".join(usage.unpriced_models)
         lines.append(
             f"> ⚠️ Cost figures exclude {unpriced_str} — "
-            "tokens are counted in usage totals, but rates are missing from the price table so total cost is underestimated."
+            "tokens are counted in usage totals, but applicable price data is incomplete so total cost is understated."
         )
     coverage_warning = _usage_coverage_message(usage.provider_coverage)
     if coverage_warning:
@@ -1784,7 +1784,7 @@ def render_terminal_card(
         unpriced_str = ", ".join(usage.unpriced_models)
         parts.append(
             Text(
-                f"Cost excludes {unpriced_str} (missing from price table).",
+                f"Cost excludes {unpriced_str} (incomplete price data).",
                 style="dim yellow",
                 overflow="fold",
             )
