@@ -187,6 +187,13 @@ def _merge_model_usage(
         combined.cache_creation += incoming.cache_creation
         combined.cache_read += incoming.cache_read
         combined.output_tokens += incoming.output_tokens
+        incoming_max_prompt = getattr(incoming, "max_request_prompt_tokens", None)
+        if incoming_max_prompt is not None:
+            current_max_prompt = getattr(combined, "max_request_prompt_tokens", None)
+            combined.max_request_prompt_tokens = max(
+                current_max_prompt or 0,
+                incoming_max_prompt,
+            )
 
 
 def _window_bounded_sessions(

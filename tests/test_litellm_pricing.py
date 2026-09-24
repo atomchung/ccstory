@@ -115,6 +115,16 @@ class TestAliasPriceResolution:
         assert alias_a_p == canonical_p
         assert alias_agent_p == canonical_p
 
+    @pytest.mark.parametrize("version", ["4.5", "4.6", "4.7"])
+    def test_grok_build_version_resolves_to_exact_litellm_model(self, version):
+        canonical_p = _price_for(f"xai/grok-{version}")
+        assert canonical_p is not None
+        assert _price_for(f"grok-{version}-build") == canonical_p
+
+    def test_grok_build_alias_requires_an_exact_canonical_price(self):
+        assert _price_for("grok-99.99-build") is None
+        assert _price_for("grok-4.6-builder") is None
+
     def test_canonical_user_override_honored_by_alias(self, tmp_path: Path):
         cfg = tmp_path / "config.toml"
         cfg.write_text("[prices.gemini-3-flash-preview]\ninput = 88.0\n", encoding="utf-8")
@@ -144,6 +154,44 @@ class TestAliasPriceResolution:
         p_canonical = _price_for("gemini-3-flash-preview")
         assert p_canonical is not None
         assert p_canonical["inp"] == 88.0
+
+    def test_canonical_grok_user_override_is_honored_by_build_alias(self, tmp_path: Path):
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            '[prices."xai/grok-4.6"]\ninput = 88.0\n',
+            encoding="utf-8",
+        )
+
+        prices, snapshot, prov = load_prices_config(cfg)
+        apply_prices(prices, snapshot, prov)
+
+        p = _price_for("grok-4.6-build")
+        assert p is not None
+        assert p["inp"] == 88.0
+
+    def test_request_context_tier_uses_exact_per_request_maximum(self):
+        # Aggregate usage spans three requests; none crossed the 200k tier.
+        usage = ModelUsage(
+            model="grok-4.6-build",
+            turns=3,
+            input_tokens=300_000,
+            output_tokens=30,
+            max_request_prompt_tokens=100_000,
+        )
+
+        assert usage.cost_is_priced
+        assert usage.cost_usd == pytest.approx(0.60018)
+
+    def test_request_above_context_tier_stays_unpriced(self):
+        usage = ModelUsage(
+            model="grok-4.6-build",
+            input_tokens=250_000,
+            output_tokens=30,
+            max_request_prompt_tokens=250_000,
+        )
+
+        assert not usage.cost_is_priced
+        assert usage.cost_usd == 0.0
 
 
 class TestPrecedenceLadder:

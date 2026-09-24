@@ -225,6 +225,10 @@ def _accumulate_usage_record(
         model_usage.cache_creation += cache_creation
         model_usage.cache_read += cache_read
         model_usage.output_tokens += output_tokens
+        model_usage.max_request_prompt_tokens = max(
+            model_usage.max_request_prompt_tokens or 0,
+            input_tokens + cache_creation + cache_read,
+        )
         assistant_turns_by_window[key] += 1
     return True
 

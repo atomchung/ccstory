@@ -152,6 +152,7 @@ def test_native_turn_usage_uses_actual_model_and_separates_cached_tokens(
     assert usage.cache_creation == 0
     assert usage.output_tokens == 15
     assert usage.total_tokens == 115
+    assert usage.max_request_prompt_tokens == 100
     assert usage.model == MODEL
     assert "grok-4.6" not in record.by_model_by_window["all"]
     assert len(record.sessions_by_window["all"]) == 1

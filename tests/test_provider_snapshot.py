@@ -18,6 +18,7 @@ import ccstory.providers.codex as codex_module
 from ccstory.providers import (
     AgentProviderSpec,
     ProviderSnapshot,
+    _merge_model_usage,
     collect_provider_snapshot,
 )
 from ccstory.providers.base import (
@@ -39,6 +40,29 @@ from ccstory.token_usage import (
     ModelUsage,
     collect_usage_for_windows,
 )
+
+
+def test_provider_usage_merge_preserves_maximum_request_prompt() -> None:
+    destination = {
+        "xai/grok-4.6": ModelUsage(
+            model="xai/grok-4.6",
+            input_tokens=100,
+            max_request_prompt_tokens=100,
+        )
+    }
+    source = {
+        "xai/grok-4.6": ModelUsage(
+            model="xai/grok-4.6",
+            input_tokens=200,
+            max_request_prompt_tokens=150,
+        )
+    }
+
+    _merge_model_usage(destination, source)
+
+    merged = destination["xai/grok-4.6"]
+    assert merged.input_tokens == 300
+    assert merged.max_request_prompt_tokens == 150
 from tests.conftest import make_assistant_msg, make_user_msg
 
 

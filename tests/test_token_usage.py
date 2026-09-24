@@ -7,6 +7,7 @@ fmt_tokens output shape.
 from __future__ import annotations
 
 import os
+import pickle
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -56,6 +57,15 @@ class TestModelUsage:
             output_tokens=50,
         )
         assert mu.total_tokens == 650
+
+    def test_legacy_pickled_usage_defaults_missing_request_maximum(self):
+        usage = ModelUsage(model="legacy", input_tokens=10)
+        del usage.max_request_prompt_tokens
+
+        restored = pickle.loads(pickle.dumps(usage))
+
+        assert restored.max_request_prompt_tokens is None
+        assert "legacy" in repr(restored)
 
     def test_cost_calculation_opus(self):
         # 1M input * $5 + 1M output * $25 = $30
@@ -225,6 +235,7 @@ class TestCollectUsage:
             cache_creation=3,
             cache_read=7,
             output_tokens=11,
+            max_request_prompt_tokens=52,
         )
 
     def test_malformed_line_doesnt_crash(self, tmp_home, jsonl_factory):

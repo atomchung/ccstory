@@ -96,6 +96,29 @@ MODEL_ALIASES: dict[str, str] = {
     "gemini-3-flash-agent": "gemini-3-flash-preview",
 }
 
+_GROK_BUILD_ALIAS_RE = re.compile(r"^grok-(\d+\.\d+)-build$")
+
+
+def _alias_price_target(
+    model_key: str,
+    price_table: Mapping[str, dict[str, float]],
+) -> str | None:
+    """Resolve explicit aliases and Grok Build version suffixes safely.
+
+    Grok's local CLI uses IDs such as ``grok-4.6-build`` while LiteLLM
+    publishes the same version under its first-party ``xai/grok-4.6`` ID.
+    Strip only the exact ``-build`` suffix and only when LiteLLM has that exact
+    canonical version; arbitrary fuzzy/substring matches remain unsupported.
+    """
+    target = MODEL_ALIASES.get(model_key)
+    if target:
+        return target
+    match = _GROK_BUILD_ALIAS_RE.fullmatch(model_key)
+    if match is None:
+        return None
+    candidate = f"xai/grok-{match.group(1)}"
+    return candidate if candidate in price_table else None
+
 
 def _match_price_in_table(
     model_key: str,
@@ -112,7 +135,7 @@ def _match_price_in_table(
     if not mk:
         return None
 
-    target_k = MODEL_ALIASES.get(mk)
+    target_k = _alias_price_target(mk, price_table)
 
     # Tier 1: User override in config.toml for requested model_key (exact key, then substring)
     user_keys = [k for k, prov in provenance.items() if prov == "user"]
@@ -339,6 +362,15 @@ class ModelUsage:
     cache_creation: int = 0
     cache_read: int = 0
     output_tokens: int = 0
+    # Maximum exact per-request prompt size when a provider exposes it.
+    # ``None`` keeps legacy/aggregate callers on the conservative total-token
+    # threshold check.
+    max_request_prompt_tokens: int | None = None
+
+    def __setstate__(self, state: dict[str, object]) -> None:
+        """Keep PersonalOS snapshots pickled before this field readable."""
+        self.__dict__.update(state)
+        self.__dict__.setdefault("max_request_prompt_tokens", None)
 
     @property
     def total_tokens(self) -> int:
@@ -365,17 +397,20 @@ class ModelUsage:
     def unsupported_price_dimensions(self) -> list[str]:
         """Source tariffs that cannot be resolved from this aggregate usage.
 
-        A token total below a context threshold proves no individual request
-        crossed that threshold. Above it, this aggregate lacks the per-request
-        split needed to select the source rate. Cache-write duration tiers need
-        cache-age facts which the shared usage shape does not currently retain.
-        Non-token add-ons remain outside this token-equivalent cost contract.
+        When available, use an exact provider-observed per-request prompt
+        maximum to decide if any request crossed a context threshold. Legacy
+        aggregates fall back to the total, which can conservatively mark a
+        model unpriced. Cache-write duration tiers need cache-age facts which
+        the shared usage shape does not currently retain. Non-token add-ons
+        remain outside this token-equivalent cost contract.
         """
         rates = _price_for(self.model) or {}
         dimensions = rates.get("_unsupported_dimensions", [])
         if not isinstance(dimensions, list):
             return []
-        prompt_tokens = self.input_tokens + self.cache_creation + self.cache_read
+        prompt_tokens = getattr(self, "max_request_prompt_tokens", None)
+        if prompt_tokens is None:
+            prompt_tokens = self.input_tokens + self.cache_creation + self.cache_read
         relevant: list[str] = []
         for dimension in dimensions:
             if not isinstance(dimension, str):
