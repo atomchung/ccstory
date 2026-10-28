@@ -1,13 +1,23 @@
 {
-  "generated_at": "2026-09-25",
+  "generated_at": "2026-10-28",
   "source_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
-  "entry_count": 155,
+  "entry_count": 162,
   "prices": {
     "claude-fable-5": {
       "inp": 10.0,
       "out": 50.0,
       "cw": 12.5,
       "cr": 1.0,
+      "_service_tiers": {
+        "batches": {
+          "rates": {
+            "cr": 0.5,
+            "cw": 6.25,
+            "inp": 5.0,
+            "out": 25.0
+          }
+        }
+      },
       "_cache_creation_above_1hr": 20.0,
       "_unsupported_dimensions": [
         "search_context_cost_per_query"
@@ -18,6 +28,16 @@
       "out": 50.0,
       "cw": 12.5,
       "cr": 0.25,
+      "_service_tiers": {
+        "batches": {
+          "rates": {
+            "cr": 0.125,
+            "cw": 6.25,
+            "inp": 5.0,
+            "out": 25.0
+          }
+        }
+      },
       "_cache_creation_above_1hr": 20.0,
       "_unsupported_dimensions": [
         "search_context_cost_per_query"
@@ -28,6 +48,16 @@
       "out": 5.0,
       "cw": 1.25,
       "cr": 0.1,
+      "_service_tiers": {
+        "batches": {
+          "rates": {
+            "cr": 0.05,
+            "cw": 0.625,
+            "inp": 0.5,
+            "out": 2.5
+          }
+        }
+      },
       "_cache_creation_above_1hr": 2.0
     },
     "claude-haiku-4-5-20251001": {
@@ -35,13 +65,70 @@
       "out": 5.0,
       "cw": 1.25,
       "cr": 0.1,
+      "_service_tiers": {
+        "batches": {
+          "rates": {
+            "cr": 0.05,
+            "cw": 0.625,
+            "inp": 0.5,
+            "out": 2.5
+          }
+        }
+      },
       "_cache_creation_above_1hr": 2.0
+    },
+    "claude-haiku-5-5": {
+      "inp": 0.1,
+      "out": 0.5,
+      "cw": 0.125,
+      "cr": 0.01,
+      "_context_tiers": {
+        "100000": {
+          "cr": 0.05,
+          "cw": 0.625,
+          "inp": 0.5,
+          "out": 2.5
+        }
+      },
+      "_service_tiers": {
+        "batches": {
+          "context_tiers": {
+            "100000": {
+              "cr": 0.025,
+              "cw": 0.3125,
+              "inp": 0.25,
+              "out": 1.25
+            }
+          },
+          "rates": {
+            "cr": 0.005,
+            "cw": 0.0625,
+            "inp": 0.05,
+            "out": 0.25
+          }
+        }
+      },
+      "_cache_creation_above_1hr": 0.2,
+      "_unsupported_dimensions": [
+        "cache_creation_input_token_cost_above_1hr_above_100k_tokens",
+        "search_context_cost_per_query"
+      ]
     },
     "claude-mythos-5": {
       "inp": 10.0,
       "out": 50.0,
       "cw": 12.5,
       "cr": 1.0,
+      "_service_tiers": {
+        "batches": {
+          "rates": {
+            "cr": 0.5,
+            "cw": 6.25,
+            "inp": 5.0,
+            "out": 25.0
+          }
+        }
+      },
       "_cache_creation_above_1hr": 20.0,
       "_unsupported_dimensions": [
         "search_context_cost_per_query"
@@ -52,6 +139,16 @@
       "out": 50.0,
       "cw": 12.5,
       "cr": 0.25,
+      "_service_tiers": {
+        "batches": {
+          "rates": {
+            "cr": 0.125,
+            "cw": 6.25,
+            "inp": 5.0,
+            "out": 25.0
+          }
+        }
+      },
       "_cache_creation_above_1hr": 20.0,
       "_unsupported_dimensions": [
         "search_context_cost_per_query"
@@ -72,6 +169,16 @@
       "out": 25.0,
       "cw": 6.25,
       "cr": 0.5,
+      "_service_tiers": {
+        "batches": {
+          "rates": {
+            "cr": 0.25,
+            "cw": 3.125,
+            "inp": 2.5,
+            "out": 12.5
+          }
+        }
+      },
       "_cache_creation_above_1hr": 10.0,
       "_unsupported_dimensions": [
         "search_context_cost_per_query"
@@ -82,6 +189,16 @@
       "out": 25.0,
       "cw": 6.25,
       "cr": 0.5,
+      "_service_tiers": {
+        "batches": {
+          "rates": {
+            "cr": 0.25,
+            "cw": 3.125,
+            "inp": 2.5,
+            "out": 12.5
+          }
+        }
+      },
       "_cache_creation_above_1hr": 10.0,
       "_unsupported_dimensions": [
         "search_context_cost_per_query"
@@ -92,6 +209,16 @@
       "out": 25.0,
       "cw": 6.25,
       "cr": 0.5,
+      "_service_tiers": {
+        "batches": {
+          "rates": {
+            "cr": 0.25,
+            "cw": 3.125,
+            "inp": 2.5,
+            "out": 12.5
+          }
+        }
+      },
       "_cache_creation_above_1hr": 10.0,
       "_unsupported_dimensions": [
         "search_context_cost_per_query"
@@ -102,6 +229,16 @@
       "out": 25.0,
       "cw": 6.25,
       "cr": 0.5,
+      "_service_tiers": {
+        "batches": {
+          "rates": {
+            "cr": 0.25,
+            "cw": 3.125,
+            "inp": 2.5,
+            "out": 12.5
+          }
+        }
+      },
       "_cache_creation_above_1hr": 10.0,
       "_unsupported_dimensions": [
         "search_context_cost_per_query"
@@ -112,6 +249,16 @@
       "out": 25.0,
       "cw": 6.25,
       "cr": 0.5,
+      "_service_tiers": {
+        "batches": {
+          "rates": {
+            "cr": 0.25,
+            "cw": 3.125,
+            "inp": 2.5,
+            "out": 12.5
+          }
+        }
+      },
       "_cache_creation_above_1hr": 10.0,
       "_unsupported_dimensions": [
         "search_context_cost_per_query"
@@ -122,6 +269,16 @@
       "out": 25.0,
       "cw": 6.25,
       "cr": 0.5,
+      "_service_tiers": {
+        "batches": {
+          "rates": {
+            "cr": 0.25,
+            "cw": 3.125,
+            "inp": 2.5,
+            "out": 12.5
+          }
+        }
+      },
       "_cache_creation_above_1hr": 10.0,
       "_unsupported_dimensions": [
         "search_context_cost_per_query"
@@ -132,6 +289,16 @@
       "out": 25.0,
       "cw": 6.25,
       "cr": 0.5,
+      "_service_tiers": {
+        "batches": {
+          "rates": {
+            "cr": 0.25,
+            "cw": 3.125,
+            "inp": 2.5,
+            "out": 12.5
+          }
+        }
+      },
       "_cache_creation_above_1hr": 10.0,
       "_unsupported_dimensions": [
         "search_context_cost_per_query"
@@ -142,6 +309,16 @@
       "out": 25.0,
       "cw": 6.25,
       "cr": 0.5,
+      "_service_tiers": {
+        "batches": {
+          "rates": {
+            "cr": 0.25,
+            "cw": 3.125,
+            "inp": 2.5,
+            "out": 12.5
+          }
+        }
+      },
       "_cache_creation_above_1hr": 10.0,
       "_unsupported_dimensions": [
         "search_context_cost_per_query"
@@ -152,6 +329,16 @@
       "out": 20.0,
       "cw": 5.0,
       "cr": 0.2,
+      "_service_tiers": {
+        "batches": {
+          "rates": {
+            "cr": 0.1,
+            "cw": 2.5,
+            "inp": 2.0,
+            "out": 10.0
+          }
+        }
+      },
       "_cache_creation_above_1hr": 8.0,
       "_unsupported_dimensions": [
         "search_context_cost_per_query"
@@ -162,17 +349,18 @@
       "out": 15.0,
       "cw": 3.75,
       "cr": 0.3,
-      "_context_tiers": {
-        "200000": {
-          "cr": 0.6,
-          "cw": 7.5,
-          "inp": 6.0,
-          "out": 22.5
+      "_service_tiers": {
+        "batches": {
+          "rates": {
+            "cr": 0.15,
+            "cw": 1.875,
+            "inp": 1.5,
+            "out": 7.5
+          }
         }
       },
       "_cache_creation_above_1hr": 6.0,
       "_unsupported_dimensions": [
-        "cache_creation_input_token_cost_above_1hr_above_200k_tokens",
         "search_context_cost_per_query"
       ]
     },
@@ -181,17 +369,18 @@
       "out": 15.0,
       "cw": 3.75,
       "cr": 0.3,
-      "_context_tiers": {
-        "200000": {
-          "cr": 0.6,
-          "cw": 7.5,
-          "inp": 6.0,
-          "out": 22.5
+      "_service_tiers": {
+        "batches": {
+          "rates": {
+            "cr": 0.15,
+            "cw": 1.875,
+            "inp": 1.5,
+            "out": 7.5
+          }
         }
       },
       "_cache_creation_above_1hr": 6.0,
       "_unsupported_dimensions": [
-        "cache_creation_input_token_cost_above_1hr_above_200k_tokens",
         "search_context_cost_per_query"
       ]
     },
@@ -200,6 +389,16 @@
       "out": 15.0,
       "cw": 3.75,
       "cr": 0.3,
+      "_service_tiers": {
+        "batches": {
+          "rates": {
+            "cr": 0.15,
+            "cw": 1.875,
+            "inp": 1.5,
+            "out": 7.5
+          }
+        }
+      },
       "_cache_creation_above_1hr": 6.0,
       "_unsupported_dimensions": [
         "search_context_cost_per_query"
@@ -210,6 +409,36 @@
       "out": 10.0,
       "cw": 2.5,
       "cr": 0.2,
+      "_service_tiers": {
+        "batches": {
+          "rates": {
+            "cr": 0.1,
+            "cw": 1.25,
+            "inp": 1.0,
+            "out": 5.0
+          }
+        }
+      },
+      "_cache_creation_above_1hr": 4.0,
+      "_unsupported_dimensions": [
+        "search_context_cost_per_query"
+      ]
+    },
+    "claude-sonnet-5-5": {
+      "inp": 2.0,
+      "out": 10.0,
+      "cw": 2.5,
+      "cr": 0.1,
+      "_service_tiers": {
+        "batches": {
+          "rates": {
+            "cr": 0.05,
+            "cw": 1.25,
+            "inp": 1.0,
+            "out": 5.0
+          }
+        }
+      },
       "_cache_creation_above_1hr": 4.0,
       "_unsupported_dimensions": [
         "search_context_cost_per_query"
@@ -263,6 +492,7 @@
         "google_maps_grounding_cost_per_query",
         "input_cost_per_audio_token",
         "input_cost_per_audio_token_batches",
+        "input_cost_per_audio_token_priority",
         "output_cost_per_reasoning_token",
         "search_context_cost_per_query"
       ]
@@ -270,7 +500,6 @@
     "gemini-2.5-flash-image": {
       "inp": 0.3,
       "out": 2.5,
-      "cr": 0.03,
       "_service_tiers": {
         "batches": {
           "rates": {
@@ -282,11 +511,6 @@
           "rates": {
             "inp": 0.15,
             "out": 1.25
-          }
-        },
-        "priority": {
-          "rates": {
-            "inp": 0.54
           }
         }
       },
@@ -328,6 +552,7 @@
         "google_maps_grounding_cost_per_query",
         "input_cost_per_audio_token",
         "input_cost_per_audio_token_batches",
+        "input_cost_per_audio_token_priority",
         "output_cost_per_reasoning_token",
         "search_context_cost_per_query"
       ]
@@ -364,6 +589,7 @@
       "out": 2.0,
       "_unsupported_dimensions": [
         "input_cost_per_audio_token",
+        "input_cost_per_video_token",
         "output_cost_per_audio_token"
       ]
     },
@@ -384,7 +610,8 @@
       "_service_tiers": {
         "batches": {
           "rates": {
-            "inp": 0.25
+            "inp": 0.25,
+            "out": 5.0
           }
         }
       },
@@ -468,7 +695,6 @@
         },
         "flex": {
           "rates": {
-            "cr": 0.05,
             "inp": 0.25,
             "out": 1.5
           }
@@ -542,11 +768,34 @@
     "gemini-3-pro-image-preview": {
       "inp": 2.0,
       "out": 12.0,
+      "cr": 0.2,
+      "_context_tiers": {
+        "200000": {
+          "cr": 0.4,
+          "inp": 4.0,
+          "out": 18.0
+        }
+      },
       "_service_tiers": {
         "batches": {
           "rates": {
+            "cr": 0.1,
             "inp": 1.0,
             "out": 6.0
+          }
+        },
+        "priority": {
+          "context_tiers": {
+            "200000": {
+              "cr": 0.72,
+              "inp": 7.2,
+              "out": 32.4
+            }
+          },
+          "rates": {
+            "cr": 0.36,
+            "inp": 3.6,
+            "out": 21.6
           }
         }
       },
@@ -575,6 +824,13 @@
             "inp": 0.25,
             "out": 1.5
           }
+        },
+        "priority": {
+          "rates": {
+            "cr": 0.09,
+            "inp": 0.9,
+            "out": 5.4
+          }
         }
       },
       "_unsupported_dimensions": [
@@ -587,6 +843,16 @@
     "gemini-3.1-flash-image-preview": {
       "inp": 0.5,
       "out": 3.0,
+      "cr": 0.05,
+      "_service_tiers": {
+        "batches": {
+          "rates": {
+            "cr": 0.025,
+            "inp": 0.25,
+            "out": 1.5
+          }
+        }
+      },
       "_unsupported_dimensions": [
         "input_cost_per_image",
         "output_cost_per_image",
@@ -626,6 +892,7 @@
         "google_maps_grounding_cost_per_query",
         "input_cost_per_audio_token",
         "input_cost_per_audio_token_batches",
+        "input_cost_per_audio_token_priority",
         "output_cost_per_reasoning_token",
         "search_context_cost_per_query"
       ]
@@ -647,6 +914,13 @@
             "cr": 0.0125,
             "inp": 0.125,
             "out": 0.75
+          }
+        },
+        "priority": {
+          "rates": {
+            "cr": 0.045,
+            "inp": 0.45,
+            "out": 2.7
           }
         }
       },
@@ -675,6 +949,7 @@
         "input_cost_per_image_token",
         "input_cost_per_second",
         "input_cost_per_video_per_second",
+        "input_cost_per_video_token",
         "output_cost_per_audio_token"
       ]
     },
@@ -699,7 +974,6 @@
         },
         "flex": {
           "rates": {
-            "cr": 0.2,
             "inp": 1.0,
             "out": 6.0
           }
@@ -971,7 +1245,14 @@
     },
     "gemini-embedding-001": {
       "inp": 0.15,
-      "out": 0.0
+      "out": 0.0,
+      "_service_tiers": {
+        "batches": {
+          "rates": {
+            "inp": 0.12
+          }
+        }
+      }
     },
     "gemini-embedding-2": {
       "inp": 0.2,
@@ -1098,6 +1379,7 @@
       "_unsupported_dimensions": [
         "input_cost_per_audio_token",
         "input_cost_per_image_token",
+        "input_cost_per_video_token",
         "output_cost_per_audio_token",
         "search_context_cost_per_query"
       ]
@@ -1109,6 +1391,33 @@
         "input_cost_per_audio_token",
         "input_cost_per_image_token",
         "output_cost_per_audio_token",
+        "search_context_cost_per_query"
+      ]
+    },
+    "gemini-nano-banana-2.1": {
+      "inp": 1.5,
+      "out": 7.5,
+      "cr": 0.15,
+      "_service_tiers": {
+        "batches": {
+          "rates": {
+            "cr": 0.075,
+            "inp": 0.75,
+            "out": 3.75
+          }
+        },
+        "priority": {
+          "rates": {
+            "cr": 0.27,
+            "inp": 2.7,
+            "out": 13.5
+          }
+        }
+      },
+      "_unsupported_dimensions": [
+        "input_cost_per_image",
+        "output_cost_per_image",
+        "output_cost_per_image_token",
         "search_context_cost_per_query"
       ]
     },
@@ -1173,6 +1482,25 @@
       "_unsupported_dimensions": [
         "input_cost_per_audio_token",
         "output_cost_per_reasoning_token"
+      ]
+    },
+    "gemini-robotics-er-2-preview": {
+      "inp": 1.0,
+      "out": 5.0,
+      "cr": 0.1,
+      "_service_tiers": {
+        "batches": {
+          "rates": {
+            "cr": 0.05,
+            "inp": 0.5,
+            "out": 2.5
+          }
+        }
+      },
+      "_unsupported_dimensions": [
+        "input_cost_per_audio_token",
+        "output_cost_per_reasoning_token",
+        "search_context_cost_per_query"
       ]
     },
     "gpt-5": {
@@ -1332,11 +1660,6 @@
             "inp": 0.025,
             "out": 0.2
           }
-        },
-        "priority": {
-          "rates": {
-            "inp": 2.5
-          }
         }
       },
       "_unsupported_dimensions": [
@@ -1360,11 +1683,6 @@
             "cr": 0.0025,
             "inp": 0.025,
             "out": 0.2
-          }
-        },
-        "priority": {
-          "rates": {
-            "inp": 2.5
           }
         }
       },
@@ -2019,6 +2337,11 @@
       "out": 75.0,
       "cr": 1.25
     },
+    "gpt-5.5-cyber-preview": {
+      "inp": 12.5,
+      "out": 75.0,
+      "cr": 1.25
+    },
     "gpt-5.5-pro": {
       "inp": 30.0,
       "out": 180.0,
@@ -2149,6 +2472,12 @@
         }
       },
       "_unsupported_dimensions": [
+        "cache_creation_input_token_cost_above_12hr",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_flex",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_priority",
+        "cache_creation_input_token_cost_above_12hr_flex",
+        "cache_creation_input_token_cost_above_12hr_priority",
         "search_context_cost_per_query"
       ]
     },
@@ -2164,7 +2493,10 @@
           "inp": 25.0,
           "out": 112.5
         }
-      }
+      },
+      "_unsupported_dimensions": [
+        "cache_creation_input_token_cost_above_12hr"
+      ]
     },
     "gpt-5.6-luna": {
       "inp": 0.2,
@@ -2230,6 +2562,14 @@
         }
       },
       "_unsupported_dimensions": [
+        "cache_creation_input_token_cost_above_12hr",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_batches",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_flex",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_priority",
+        "cache_creation_input_token_cost_above_12hr_batches",
+        "cache_creation_input_token_cost_above_12hr_flex",
+        "cache_creation_input_token_cost_above_12hr_priority",
         "search_context_cost_per_query"
       ]
     },
@@ -2297,6 +2637,14 @@
         }
       },
       "_unsupported_dimensions": [
+        "cache_creation_input_token_cost_above_12hr",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_batches",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_flex",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_priority",
+        "cache_creation_input_token_cost_above_12hr_batches",
+        "cache_creation_input_token_cost_above_12hr_flex",
+        "cache_creation_input_token_cost_above_12hr_priority",
         "search_context_cost_per_query"
       ]
     },
@@ -2364,6 +2712,14 @@
         }
       },
       "_unsupported_dimensions": [
+        "cache_creation_input_token_cost_above_12hr",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_batches",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_flex",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_priority",
+        "cache_creation_input_token_cost_above_12hr_batches",
+        "cache_creation_input_token_cost_above_12hr_flex",
+        "cache_creation_input_token_cost_above_12hr_priority",
         "search_context_cost_per_query"
       ]
     },
@@ -2431,6 +2787,24 @@
         }
       },
       "_unsupported_dimensions": [
+        "cache_creation_input_token_cost_above_12hr",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_batches",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_flex",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_priority",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_ultrafast",
+        "cache_creation_input_token_cost_above_12hr_batches",
+        "cache_creation_input_token_cost_above_12hr_flex",
+        "cache_creation_input_token_cost_above_12hr_priority",
+        "cache_creation_input_token_cost_above_12hr_ultrafast",
+        "cache_creation_input_token_cost_above_272k_tokens_ultrafast",
+        "cache_creation_input_token_cost_ultrafast",
+        "cache_read_input_token_cost_above_272k_tokens_ultrafast",
+        "cache_read_input_token_cost_ultrafast",
+        "input_cost_per_token_above_272k_tokens_ultrafast",
+        "input_cost_per_token_ultrafast",
+        "output_cost_per_token_above_272k_tokens_ultrafast",
+        "output_cost_per_token_ultrafast",
         "search_context_cost_per_query"
       ]
     },
@@ -2498,6 +2872,22 @@
         }
       },
       "_unsupported_dimensions": [
+        "cache_creation_input_token_cost_above_12hr",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_batches",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_flex",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_priority",
+        "cache_creation_input_token_cost_above_12hr_batches",
+        "cache_creation_input_token_cost_above_12hr_flex",
+        "cache_creation_input_token_cost_above_12hr_priority",
+        "cache_creation_input_token_cost_above_272k_tokens_decisions",
+        "cache_creation_input_token_cost_decisions",
+        "cache_read_input_token_cost_above_272k_tokens_decisions",
+        "cache_read_input_token_cost_decisions",
+        "input_cost_per_token_above_272k_tokens_decisions",
+        "input_cost_per_token_decisions",
+        "output_cost_per_token_above_272k_tokens_decisions",
+        "output_cost_per_token_decisions",
         "search_context_cost_per_query"
       ]
     },
@@ -2565,6 +2955,174 @@
         }
       },
       "_unsupported_dimensions": [
+        "cache_creation_input_token_cost_above_12hr",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_batches",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_flex",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_priority",
+        "cache_creation_input_token_cost_above_12hr_batches",
+        "cache_creation_input_token_cost_above_12hr_flex",
+        "cache_creation_input_token_cost_above_12hr_priority",
+        "search_context_cost_per_query"
+      ]
+    },
+    "gpt-6.1-sol": {
+      "inp": 2.0,
+      "out": 10.0,
+      "cw": 2.5,
+      "cr": 0.1,
+      "_context_tiers": {
+        "272000": {
+          "cr": 0.2,
+          "cw": 5.0,
+          "inp": 4.0,
+          "out": 15.0
+        }
+      },
+      "_service_tiers": {
+        "batches": {
+          "context_tiers": {
+            "272000": {
+              "cr": 0.1,
+              "cw": 2.5,
+              "inp": 2.0,
+              "out": 7.5
+            }
+          },
+          "rates": {
+            "cr": 0.05,
+            "cw": 1.25,
+            "inp": 1.0,
+            "out": 5.0
+          }
+        },
+        "flex": {
+          "context_tiers": {
+            "272000": {
+              "cr": 0.1,
+              "cw": 2.5,
+              "inp": 2.0,
+              "out": 7.5
+            }
+          },
+          "rates": {
+            "cr": 0.05,
+            "cw": 1.25,
+            "inp": 1.0,
+            "out": 5.0
+          }
+        },
+        "priority": {
+          "context_tiers": {
+            "272000": {
+              "cr": 0.4,
+              "cw": 10.0,
+              "inp": 8.0,
+              "out": 30.0
+            }
+          },
+          "rates": {
+            "cr": 0.2,
+            "cw": 5.0,
+            "inp": 4.0,
+            "out": 20.0
+          }
+        }
+      },
+      "_unsupported_dimensions": [
+        "cache_creation_input_token_cost_above_12hr",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_batches",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_flex",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_priority",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_ultrafast",
+        "cache_creation_input_token_cost_above_12hr_batches",
+        "cache_creation_input_token_cost_above_12hr_flex",
+        "cache_creation_input_token_cost_above_12hr_priority",
+        "cache_creation_input_token_cost_above_12hr_ultrafast",
+        "cache_creation_input_token_cost_above_272k_tokens_ultrafast",
+        "cache_creation_input_token_cost_ultrafast",
+        "cache_read_input_token_cost_above_272k_tokens_ultrafast",
+        "cache_read_input_token_cost_ultrafast",
+        "input_cost_per_token_above_272k_tokens_ultrafast",
+        "input_cost_per_token_ultrafast",
+        "output_cost_per_token_above_272k_tokens_ultrafast",
+        "output_cost_per_token_ultrafast",
+        "search_context_cost_per_query"
+      ]
+    },
+    "gpt-6.1-terra": {
+      "inp": 1.0,
+      "out": 5.0,
+      "cw": 1.25,
+      "cr": 0.05,
+      "_context_tiers": {
+        "272000": {
+          "cr": 0.1,
+          "cw": 2.5,
+          "inp": 2.0,
+          "out": 7.5
+        }
+      },
+      "_service_tiers": {
+        "batches": {
+          "context_tiers": {
+            "272000": {
+              "cr": 0.05,
+              "cw": 1.25,
+              "inp": 1.0,
+              "out": 3.75
+            }
+          },
+          "rates": {
+            "cr": 0.025,
+            "cw": 0.625,
+            "inp": 0.5,
+            "out": 2.5
+          }
+        },
+        "flex": {
+          "context_tiers": {
+            "272000": {
+              "cr": 0.05,
+              "cw": 1.25,
+              "inp": 1.0,
+              "out": 3.75
+            }
+          },
+          "rates": {
+            "cr": 0.025,
+            "cw": 0.625,
+            "inp": 0.5,
+            "out": 2.5
+          }
+        },
+        "priority": {
+          "context_tiers": {
+            "272000": {
+              "cr": 0.2,
+              "cw": 5.0,
+              "inp": 4.0,
+              "out": 15.0
+            }
+          },
+          "rates": {
+            "cr": 0.1,
+            "cw": 2.5,
+            "inp": 2.0,
+            "out": 10.0
+          }
+        }
+      },
+      "_unsupported_dimensions": [
+        "cache_creation_input_token_cost_above_12hr",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_batches",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_flex",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_priority",
+        "cache_creation_input_token_cost_above_12hr_batches",
+        "cache_creation_input_token_cost_above_12hr_flex",
+        "cache_creation_input_token_cost_above_12hr_priority",
         "search_context_cost_per_query"
       ]
     },
@@ -2577,6 +3135,22 @@
           "cr": 0.4,
           "inp": 2.5,
           "out": 5.0
+        }
+      },
+      "_service_tiers": {
+        "batches": {
+          "context_tiers": {
+            "200000": {
+              "cr": 0.32,
+              "inp": 2.0,
+              "out": 4.0
+            }
+          },
+          "rates": {
+            "cr": 0.16,
+            "inp": 1.0,
+            "out": 2.0
+          }
         }
       },
       "_unsupported_dimensions": [
@@ -2594,6 +3168,22 @@
           "out": 5.0
         }
       },
+      "_service_tiers": {
+        "batches": {
+          "context_tiers": {
+            "200000": {
+              "cr": 0.32,
+              "inp": 2.0,
+              "out": 4.0
+            }
+          },
+          "rates": {
+            "cr": 0.16,
+            "inp": 1.0,
+            "out": 2.0
+          }
+        }
+      },
       "_unsupported_dimensions": [
         "input_cost_per_image_token"
       ]
@@ -2609,6 +3199,22 @@
           "out": 5.0
         }
       },
+      "_service_tiers": {
+        "batches": {
+          "context_tiers": {
+            "200000": {
+              "cr": 0.32,
+              "inp": 2.0,
+              "out": 4.0
+            }
+          },
+          "rates": {
+            "cr": 0.16,
+            "inp": 1.0,
+            "out": 2.0
+          }
+        }
+      },
       "_unsupported_dimensions": [
         "input_cost_per_image_token"
       ]
@@ -2622,6 +3228,22 @@
           "cr": 0.4,
           "inp": 2.5,
           "out": 5.0
+        }
+      },
+      "_service_tiers": {
+        "batches": {
+          "context_tiers": {
+            "200000": {
+              "cr": 0.32,
+              "inp": 2.0,
+              "out": 4.0
+            }
+          },
+          "rates": {
+            "cr": 0.16,
+            "inp": 1.0,
+            "out": 2.0
+          }
         }
       },
       "_unsupported_dimensions": [
@@ -2864,6 +3486,22 @@
           "out": 5.0
         }
       },
+      "_service_tiers": {
+        "batches": {
+          "context_tiers": {
+            "200000": {
+              "cr": 0.32,
+              "inp": 2.0,
+              "out": 4.0
+            }
+          },
+          "rates": {
+            "cr": 0.16,
+            "inp": 1.0,
+            "out": 2.0
+          }
+        }
+      },
       "_unsupported_dimensions": [
         "input_cost_per_image_token"
       ]
@@ -2877,6 +3515,22 @@
           "cr": 0.4,
           "inp": 2.5,
           "out": 5.0
+        }
+      },
+      "_service_tiers": {
+        "batches": {
+          "context_tiers": {
+            "200000": {
+              "cr": 0.32,
+              "inp": 2.0,
+              "out": 4.0
+            }
+          },
+          "rates": {
+            "cr": 0.16,
+            "inp": 1.0,
+            "out": 2.0
+          }
         }
       },
       "_unsupported_dimensions": [
@@ -2954,6 +3608,22 @@
           "out": 5.0
         }
       },
+      "_service_tiers": {
+        "batches": {
+          "context_tiers": {
+            "200000": {
+              "cr": 0.32,
+              "inp": 2.0,
+              "out": 4.0
+            }
+          },
+          "rates": {
+            "cr": 0.16,
+            "inp": 1.0,
+            "out": 2.0
+          }
+        }
+      },
       "_unsupported_dimensions": [
         "input_cost_per_image_token"
       ]
@@ -2967,6 +3637,22 @@
           "cr": 0.4,
           "inp": 2.5,
           "out": 5.0
+        }
+      },
+      "_service_tiers": {
+        "batches": {
+          "context_tiers": {
+            "200000": {
+              "cr": 0.32,
+              "inp": 2.0,
+              "out": 4.0
+            }
+          },
+          "rates": {
+            "cr": 0.16,
+            "inp": 1.0,
+            "out": 2.0
+          }
         }
       },
       "_unsupported_dimensions": [
@@ -2999,6 +3685,22 @@
           "out": 5.0
         }
       },
+      "_service_tiers": {
+        "batches": {
+          "context_tiers": {
+            "200000": {
+              "cr": 0.32,
+              "inp": 2.0,
+              "out": 4.0
+            }
+          },
+          "rates": {
+            "cr": 0.16,
+            "inp": 1.0,
+            "out": 2.0
+          }
+        }
+      },
       "_unsupported_dimensions": [
         "input_cost_per_image_token"
       ]
@@ -3012,6 +3714,22 @@
           "cr": 0.4,
           "inp": 2.5,
           "out": 5.0
+        }
+      },
+      "_service_tiers": {
+        "batches": {
+          "context_tiers": {
+            "200000": {
+              "cr": 0.32,
+              "inp": 2.0,
+              "out": 4.0
+            }
+          },
+          "rates": {
+            "cr": 0.16,
+            "inp": 1.0,
+            "out": 2.0
+          }
         }
       },
       "_unsupported_dimensions": [
@@ -3044,6 +3762,22 @@
           "out": 5.0
         }
       },
+      "_service_tiers": {
+        "batches": {
+          "context_tiers": {
+            "200000": {
+              "cr": 0.32,
+              "inp": 2.0,
+              "out": 4.0
+            }
+          },
+          "rates": {
+            "cr": 0.16,
+            "inp": 1.0,
+            "out": 2.0
+          }
+        }
+      },
       "_unsupported_dimensions": [
         "input_cost_per_image_token"
       ]
@@ -3059,6 +3793,22 @@
           "out": 5.0
         }
       },
+      "_service_tiers": {
+        "batches": {
+          "context_tiers": {
+            "200000": {
+              "cr": 0.32,
+              "inp": 2.0,
+              "out": 4.0
+            }
+          },
+          "rates": {
+            "cr": 0.16,
+            "inp": 1.0,
+            "out": 2.0
+          }
+        }
+      },
       "_unsupported_dimensions": [
         "input_cost_per_image_token"
       ]
@@ -3072,6 +3822,22 @@
           "cr": 0.4,
           "inp": 2.5,
           "out": 5.0
+        }
+      },
+      "_service_tiers": {
+        "batches": {
+          "context_tiers": {
+            "200000": {
+              "cr": 0.32,
+              "inp": 2.0,
+              "out": 4.0
+            }
+          },
+          "rates": {
+            "cr": 0.16,
+            "inp": 1.0,
+            "out": 2.0
+          }
         }
       },
       "_unsupported_dimensions": [
