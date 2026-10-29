@@ -9,7 +9,7 @@
 Sibling to [ccusage](https://github.com/ryoppippi/ccusage):
 **ccusage tells you how much you spent · ccstory tells you what on.**
 
-![ccstory recap](assets/ccstory-recap.gif)
+![ccstory recap](https://raw.githubusercontent.com/atomchung/ccstory/main/assets/ccstory-recap.gif)
 
 ## Who this is for
 
@@ -899,8 +899,8 @@ Disable GitHub/PyPI metadata calls with `--no-artifacts` or persistent
 `[artifacts] enabled = false`. For a fully no-network report, also avoid
 local narrator calls with `--minimal --classify folder` (and initialize with
 `ccstory init --skip`). Relevant implementations are
-[ccstory/artifacts.py](ccstory/artifacts.py) and
-[ccstory/session_summarizer.py](ccstory/session_summarizer.py).
+[ccstory/artifacts.py](https://github.com/atomchung/ccstory/blob/main/ccstory/artifacts.py) and
+[ccstory/session_summarizer.py](https://github.com/atomchung/ccstory/blob/main/ccstory/session_summarizer.py).
 
 ## Requirements
 
@@ -1100,8 +1100,8 @@ full backlog.
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for release history.
+See [CHANGELOG.md](https://github.com/atomchung/ccstory/blob/main/CHANGELOG.md) for release history.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](https://github.com/atomchung/ccstory/blob/main/LICENSE).

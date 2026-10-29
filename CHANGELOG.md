@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.7] - 2026-10-29
+
 ### Added
 
 - **Grok CLI session provider** (#274): reads local session metadata and
@@ -37,8 +39,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CodexProvider.collect_snapshot()` now derives both session facts and exact
   usage from a single physical rollout parse pass, cutting transcript file opens
   in half (from 2 opens down to 1 open per contained transcript).
+- Refreshed the vendored LiteLLM pricing table (#266). Adds
+  `claude-haiku-5-5`, `claude-sonnet-5-5`, `gpt-6.1-sol`, `gpt-6.1-terra`,
+  `gpt-5.5-cyber-preview`, `gemini-nano-banana-2.1`, and
+  `gemini-robotics-er-2-preview`. Before this refresh, `claude-haiku-5-5` fell
+  back to the generic Haiku rate and was overstated 10x, and
+  `claude-sonnet-5-5` fell back to the generic Sonnet rate and was overstated
+  1.5x.
+
+### Known issues
+
+- LiteLLM lists `claude-sonnet-5-5` cache reads at $0.10 per million tokens;
+  Anthropic's published rate is $0.20. ccstory mirrors the upstream table, so
+  Sonnet 5.5 cache-read cost is understated by half until the upstream row is
+  corrected and a later refresh picks it up.
 
 ### Fixed
+
+- The `refresh-prices` workflow failed every week from 2026-09-06: with
+  `actions/checkout` v7, `create-pull-request` v6 could not push the refresh
+  branch (HTTP 400). It now uses `create-pull-request` v8.1.1 (#279).
 
 - **Codex usage reconstruction correctness boundaries** (#174):
   - Preserved per-line and byte-level fault tolerance for invalid UTF-8 bytes
@@ -1122,7 +1142,8 @@ Initial tagged release.
 - Category surfaced in the CLI, with louder warnings on silent
   classification failures.
 
-[Unreleased]: https://github.com/atomchung/ccstory/compare/v0.8.5...HEAD
+[Unreleased]: https://github.com/atomchung/ccstory/compare/v0.8.7...HEAD
+[0.8.7]: https://github.com/atomchung/ccstory/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/atomchung/ccstory/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/atomchung/ccstory/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/atomchung/ccstory/compare/v0.8.3...v0.8.4
