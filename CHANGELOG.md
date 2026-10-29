@@ -47,13 +47,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `claude-sonnet-5-5` fell back to the generic Sonnet rate and was overstated
   1.5x.
 
-### Known issues
-
-- LiteLLM lists `claude-sonnet-5-5` cache reads at $0.10 per million tokens;
-  Anthropic's published rate is $0.20. ccstory mirrors the upstream table, so
-  Sonnet 5.5 cache-read cost is understated by half until the upstream row is
-  corrected and a later refresh picks it up.
-
 ### Fixed
 
 - The `refresh-prices` workflow failed every week from 2026-09-06: with
