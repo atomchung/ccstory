@@ -45,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `gemini-robotics-er-2-preview`. Before this refresh, `claude-haiku-5-5` fell
   back to the generic Haiku rate and was overstated 10x, and
   `claude-sonnet-5-5` fell back to the generic Sonnet rate and was overstated
-  1.5x.
+  1.5x on input, output, and cache writes and 3x on cache reads.
 
 ### Fixed
 
