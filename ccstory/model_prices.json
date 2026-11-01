@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-10-28",
+  "generated_at": "2026-11-01",
   "source_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
-  "entry_count": 162,
+  "entry_count": 164,
   "prices": {
     "claude-fable-5": {
       "inp": 10.0,
@@ -518,6 +518,7 @@
         "input_cost_per_audio_token",
         "output_cost_per_image",
         "output_cost_per_image_token",
+        "output_cost_per_image_token_batches",
         "output_cost_per_reasoning_token"
       ]
     },
@@ -633,6 +634,12 @@
       },
       "_service_tiers": {
         "batches": {
+          "context_tiers": {
+            "200000": {
+              "inp": 1.25,
+              "out": 7.5
+            }
+          },
           "rates": {
             "inp": 0.625,
             "out": 5.0
@@ -762,6 +769,7 @@
         "input_cost_per_image",
         "output_cost_per_image",
         "output_cost_per_image_token",
+        "output_cost_per_image_token_batches",
         "search_context_cost_per_query"
       ]
     },
@@ -803,6 +811,7 @@
         "input_cost_per_image",
         "output_cost_per_image",
         "output_cost_per_image_token",
+        "output_cost_per_image_token_batches",
         "search_context_cost_per_query"
       ]
     },
@@ -837,6 +846,7 @@
         "input_cost_per_image",
         "output_cost_per_image",
         "output_cost_per_image_token",
+        "output_cost_per_image_token_batches",
         "search_context_cost_per_query"
       ]
     },
@@ -857,6 +867,7 @@
         "input_cost_per_image",
         "output_cost_per_image",
         "output_cost_per_image_token",
+        "output_cost_per_image_token_batches",
         "search_context_cost_per_query"
       ]
     },
@@ -927,7 +938,8 @@
       "_unsupported_dimensions": [
         "input_cost_per_image",
         "output_cost_per_image",
-        "output_cost_per_image_token"
+        "output_cost_per_image_token",
+        "output_cost_per_image_token_batches"
       ]
     },
     "gemini-3.1-flash-lite-preview": {
@@ -967,6 +979,12 @@
       },
       "_service_tiers": {
         "batches": {
+          "context_tiers": {
+            "200000": {
+              "inp": 2.0,
+              "out": 9.0
+            }
+          },
           "rates": {
             "inp": 1.0,
             "out": 6.0
@@ -1418,6 +1436,7 @@
         "input_cost_per_image",
         "output_cost_per_image",
         "output_cost_per_image_token",
+        "output_cost_per_image_token_batches",
         "search_context_cost_per_query"
       ]
     },
@@ -2808,6 +2827,14 @@
         "search_context_cost_per_query"
       ]
     },
+    "gpt-6-astra-law": {
+      "inp": 10.0,
+      "out": 50.0,
+      "cr": 1.0,
+      "_unsupported_dimensions": [
+        "search_context_cost_per_query"
+      ]
+    },
     "gpt-6-luna": {
       "inp": 0.1,
       "out": 0.5,
@@ -2889,6 +2916,24 @@
         "output_cost_per_token_above_272k_tokens_decisions",
         "output_cost_per_token_decisions",
         "search_context_cost_per_query"
+      ]
+    },
+    "gpt-6-rosalind": {
+      "inp": 15.0,
+      "out": 75.0,
+      "cw": 18.75,
+      "cr": 1.5,
+      "_context_tiers": {
+        "272000": {
+          "cr": 3.0,
+          "cw": 37.5,
+          "inp": 30.0,
+          "out": 112.5
+        }
+      },
+      "_unsupported_dimensions": [
+        "cache_creation_input_token_cost_above_12hr",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens"
       ]
     },
     "gpt-6-sol": {
@@ -3898,6 +3943,22 @@
           "cr": 1.0,
           "inp": 4.0,
           "out": 12.0
+        }
+      },
+      "_service_tiers": {
+        "batches": {
+          "context_tiers": {
+            "200000": {
+              "cr": 0.8,
+              "inp": 3.2,
+              "out": 9.6
+            }
+          },
+          "rates": {
+            "cr": 0.4,
+            "inp": 1.6,
+            "out": 4.8
+          }
         }
       },
       "_unsupported_dimensions": [
