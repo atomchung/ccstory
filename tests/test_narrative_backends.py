@@ -144,7 +144,10 @@ def test_antigravity_command_uses_explicit_flash_model_and_effort(monkeypatch):
     argv, kwargs = calls[0]
     assert argv[1:] == [
         "-p", "prompt", "--model", "gemini-3.6-flash-low", "--effort", "low",
+        "--settings", '{"agentMode":""}',
     ]
+    # Default permission mode is requested; nothing widens what the CLI may do.
+    assert not {"--mode", "--dangerously-skip-permissions", "--add-dir"} & set(argv)
     assert kwargs["timeout"] == 180
 
 

@@ -40,6 +40,11 @@ CCSTORY_LANG_ENV = "CCSTORY_LANG"
 CLAUDE_BIN = "claude"
 CODEX_BIN = "codex"
 ANTIGRAVITY_BIN = Path.home() / ".local" / "bin" / "agy"
+# From agy 1.5.7 a headless run with no saved agentMode starts in Auto, which
+# runs shell commands and writes files in the working directory. A session-only
+# empty agentMode selects Default, where both are auto-denied. Narration reads
+# transcript text and needs neither.
+ANTIGRAVITY_READ_ONLY_ARGS = ("--settings", '{"agentMode":""}')
 
 # The CLI accepts free-form language names, but the short codes people
 # naturally type (for example ``--lang en``) are ambiguous to a narrative
@@ -1629,7 +1634,11 @@ def _run_antigravity_p(
     prompt: str, timeout: float, model: str, effort: str,
     deadline: float | None = None,
 ) -> subprocess.CompletedProcess | None:
-    """Run Antigravity prose generation with retries bounded by one deadline."""
+    """Run Antigravity prose generation with retries bounded by one deadline.
+
+    The CLI runs in Default permission mode: it may not execute commands or
+    write files, whatever the transcript text in the prompt asks for.
+    """
     for attempt in range(3):
         attempt_timeout = max(timeout, 180)
         if deadline is not None:
@@ -1643,7 +1652,10 @@ def _run_antigravity_p(
             if attempt_timeout <= 0:
                 raise subprocess.TimeoutExpired(str(ANTIGRAVITY_BIN), timeout)
         result = subprocess.run(
-            [str(ANTIGRAVITY_BIN), "-p", prompt, "--model", model, "--effort", effort],
+            [
+                str(ANTIGRAVITY_BIN), "-p", prompt, "--model", model,
+                "--effort", effort, *ANTIGRAVITY_READ_ONLY_ARGS,
+            ],
             capture_output=True, text=True, timeout=attempt_timeout, check=False,
         )
         if result.returncode == 0 and result.stdout.strip():

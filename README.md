@@ -876,7 +876,10 @@ Repo activity metadata providers. There is no ccstory telemetry or account.
   its explicit model policy. In this release that policy defaults to
   `claude -p --model sonnet`, `codex exec --ephemeral --sandbox read-only
   --model gpt-5.6-terra`, then `agy -p --model gemini-3.6-flash-low --effort
-  low`. The selected CLI contacts its provider using your signed-in session and
+  low --settings '{"agentMode":""}'`. The `agy` setting is session-only and
+  selects Default permission mode, in which the CLI cannot run commands or
+  write files; without it, `agy` 1.5.7 and later start a headless run in Auto
+  mode. The selected CLI contacts its provider using your signed-in session and
   plan quota; ccstory does not use your API key or operate a proxy.
 - **GoalContext**: goal titles, source content/path/fingerprint, and
   attribution never enter narrator prompts or traces. Recap output exposes the
