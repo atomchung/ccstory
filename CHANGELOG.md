@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Antigravity narrator runs in Default permission mode.** `agy` 1.5.7 changed
+  a headless run with no saved `agentMode` from Default to Auto, which executes
+  shell commands and writes files in the working directory. The narrator prompt
+  carries transcript text, so ccstory now passes the session-only
+  `--settings '{"agentMode":""}'`, under which both are auto-denied. Nothing is
+  saved to the user's `agy` settings. Verified on `agy` 1.5.9; an `agy` too old
+  to accept `--settings` fails that call, which ccstory handles like any failed
+  narrator call (the next configured narrator, or the excerpt fallback).
+
 ## [0.8.7] - 2026-10-29
 
 ### Added
