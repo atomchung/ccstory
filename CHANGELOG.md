@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Default Antigravity narrator model is `gemini-3.8-flash-low`.** The previous
+  default, `gemini-3.6-flash-low`, is no longer in the `agy models` catalogue,
+  and a headless `agy` run exits non-zero on a model id it cannot resolve, so
+  the default Antigravity narrator failed on every call. The narrator
+  fingerprint includes each backend's model, so generated summaries regenerate
+  once on the first run under this version. A `[narrative.antigravity]` model
+  set in `config.toml` is left as configured.
+
 ### Security
 
 - **Antigravity narrator runs in Default permission mode.** `agy` 1.5.7 changed

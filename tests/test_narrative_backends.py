@@ -20,7 +20,7 @@ def test_default_backends_are_ordered_and_explicitly_modelled():
     ] == [
         ("claude", "sonnet", None),
         ("codex", "gpt-5.6-terra", None),
-        ("antigravity", "gemini-3.6-flash-low", "low"),
+        ("antigravity", "gemini-3.8-flash-low", "low"),
     ]
 
 
@@ -33,7 +33,7 @@ providers = ["codex", "antigravity"]
 model = "gpt-5.6-terra"
 
 [narrative.antigravity]
-model = "gemini-3.6-flash-medium"
+model = "gemini-3.8-flash-medium"
 effort = "medium"
 """,
         encoding="utf-8",
@@ -43,7 +43,7 @@ effort = "medium"
         for backend in ss.narrative_backends()
     ] == [
         ("codex", "gpt-5.6-terra", None),
-        ("antigravity", "gemini-3.6-flash-medium", "medium"),
+        ("antigravity", "gemini-3.8-flash-medium", "medium"),
     ]
 
 
@@ -138,12 +138,12 @@ def test_antigravity_command_uses_explicit_flash_model_and_effort(monkeypatch):
 
     monkeypatch.setattr(ss.subprocess, "run", fake_run)
     result = ss._run_antigravity_p(
-        "prompt", 10, "gemini-3.6-flash-low", "low",
+        "prompt", 10, "gemini-3.8-flash-low", "low",
     )
     assert result is not None and result.stdout == "flash prose"
     argv, kwargs = calls[0]
     assert argv[1:] == [
-        "-p", "prompt", "--model", "gemini-3.6-flash-low", "--effort", "low",
+        "-p", "prompt", "--model", "gemini-3.8-flash-low", "--effort", "low",
         "--settings", '{"agentMode":""}',
     ]
     # Default permission mode is requested; nothing widens what the CLI may do.
@@ -164,7 +164,7 @@ def test_antigravity_deadline_cannot_round_above_caller_reservation(monkeypatch)
     monkeypatch.setattr(ss.time, "monotonic", lambda: next(clock))
 
     result = ss._run_antigravity_p(
-        "prompt", 45, "gemini-3.6-flash-low", "low",
+        "prompt", 45, "gemini-3.8-flash-low", "low",
         deadline=145.00000000000006,
     )
 
@@ -185,13 +185,13 @@ def test_budgeted_antigravity_call_is_capped_at_deadline(monkeypatch):
     monkeypatch.setattr(
         ss,
         "narrative_backends",
-        lambda: (ss.NarrativeBackend("antigravity", "gemini-3.6-flash-low", "low"),),
+        lambda: (ss.NarrativeBackend("antigravity", "gemini-3.8-flash-low", "low"),),
     )
     monkeypatch.setattr(ss, "narrative_backend_available", lambda _backend: True)
 
     budget = ss.NarrativeBudget(total_sec=90, batch_deadline_sec=45)
     assert ss.run_llm_p("prompt", 120, budget=budget) == ss.NarrativeCall(
-        "flash prose", "antigravity", "gemini-3.6-flash-low",
+        "flash prose", "antigravity", "gemini-3.8-flash-low",
     )
     assert calls[0][1]["timeout"] <= 45
 
@@ -252,7 +252,7 @@ providers = ["codex", "antigravity"]
 model = "gpt-5.6-terra"
 
 [narrative.antigravity]
-model = "gemini-3.6-flash-low"
+model = "gemini-3.8-flash-low"
 effort = "low"
 
 [categories]
@@ -266,7 +266,7 @@ effort = "low"
         for backend in ss.narrative_backends()
     ] == [
         ("codex", "gpt-5.6-terra", None),
-        ("antigravity", "gemini-3.6-flash-low", "low"),
+        ("antigravity", "gemini-3.8-flash-low", "low"),
     ]
 
 

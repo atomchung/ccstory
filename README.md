@@ -637,7 +637,7 @@ model = "sonnet"
 model = "gpt-5.6-terra"
 
 [narrative.antigravity]
-model = "gemini-3.6-flash-low"
+model = "gemini-3.8-flash-low"
 effort = "low"
 ```
 
@@ -875,7 +875,7 @@ Repo activity metadata providers. There is no ccstory telemetry or account.
 - **Narratives and classification**: invoke the configured local backend with
   its explicit model policy. In this release that policy defaults to
   `claude -p --model sonnet`, `codex exec --ephemeral --sandbox read-only
-  --model gpt-5.6-terra`, then `agy -p --model gemini-3.6-flash-low --effort
+  --model gpt-5.6-terra`, then `agy -p --model gemini-3.8-flash-low --effort
   low --settings '{"agentMode":""}'`. The `agy` setting is session-only and
   selects Default permission mode, in which the CLI cannot run commands or
   write files; without it, `agy` 1.5.7 and later start a headless run in Auto
