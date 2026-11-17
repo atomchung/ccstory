@@ -652,7 +652,7 @@ class NarrativeBudget:
 _DEFAULT_NARRATIVE_BACKENDS: tuple[NarrativeBackend, ...] = (
     NarrativeBackend("claude", "sonnet"),
     NarrativeBackend("codex", "gpt-5.6-terra"),
-    NarrativeBackend("antigravity", "gemini-3.6-flash-low", "low"),
+    NarrativeBackend("antigravity", "gemini-3.8-flash-low", "low"),
 )
 _NARRATIVE_PROVIDER_NAMES = frozenset(b.provider for b in _DEFAULT_NARRATIVE_BACKENDS)
 
