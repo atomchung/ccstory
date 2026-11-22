@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-10-28",
+  "generated_at": "2026-11-22",
   "source_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
-  "entry_count": 162,
+  "entry_count": 169,
   "prices": {
     "claude-fable-5": {
       "inp": 10.0,
@@ -39,6 +39,26 @@
         }
       },
       "_cache_creation_above_1hr": 20.0,
+      "_unsupported_dimensions": [
+        "search_context_cost_per_query"
+      ]
+    },
+    "claude-fable-5-2": {
+      "inp": 8.0,
+      "out": 40.0,
+      "cw": 10.0,
+      "cr": 0.2,
+      "_service_tiers": {
+        "batches": {
+          "rates": {
+            "cr": 0.1,
+            "cw": 5.0,
+            "inp": 4.0,
+            "out": 20.0
+          }
+        }
+      },
+      "_cache_creation_above_1hr": 16.0,
       "_unsupported_dimensions": [
         "search_context_cost_per_query"
       ]
@@ -150,6 +170,26 @@
         }
       },
       "_cache_creation_above_1hr": 20.0,
+      "_unsupported_dimensions": [
+        "search_context_cost_per_query"
+      ]
+    },
+    "claude-mythos-5-2": {
+      "inp": 8.0,
+      "out": 40.0,
+      "cw": 10.0,
+      "cr": 0.2,
+      "_service_tiers": {
+        "batches": {
+          "rates": {
+            "cr": 0.1,
+            "cw": 5.0,
+            "inp": 4.0,
+            "out": 20.0
+          }
+        }
+      },
+      "_cache_creation_above_1hr": 16.0,
       "_unsupported_dimensions": [
         "search_context_cost_per_query"
       ]
@@ -444,13 +484,6 @@
         "search_context_cost_per_query"
       ]
     },
-    "gemini-2.0-flash-exp-image-generation": {
-      "inp": 0.0,
-      "out": 0.0,
-      "_unsupported_dimensions": [
-        "output_cost_per_image"
-      ]
-    },
     "gemini-2.5-computer-use-preview-10-2025": {
       "inp": 1.25,
       "out": 10.0,
@@ -489,9 +522,15 @@
       },
       "_unsupported_dimensions": [
         "cache_read_input_audio_token_cost",
+        "cache_read_input_audio_token_cost_priority",
         "google_maps_grounding_cost_per_query",
         "input_cost_per_audio_token",
+        "input_cost_per_audio_token_above_200k_tokens",
+        "input_cost_per_audio_token_above_200k_tokens_batches",
+        "input_cost_per_audio_token_above_200k_tokens_flex",
+        "input_cost_per_audio_token_above_200k_tokens_priority",
         "input_cost_per_audio_token_batches",
+        "input_cost_per_audio_token_flex",
         "input_cost_per_audio_token_priority",
         "output_cost_per_reasoning_token",
         "search_context_cost_per_query"
@@ -515,9 +554,9 @@
         }
       },
       "_unsupported_dimensions": [
-        "input_cost_per_audio_token",
         "output_cost_per_image",
         "output_cost_per_image_token",
+        "output_cost_per_image_token_batches",
         "output_cost_per_reasoning_token"
       ]
     },
@@ -549,9 +588,15 @@
       },
       "_unsupported_dimensions": [
         "cache_read_input_audio_token_cost",
+        "cache_read_input_audio_token_cost_priority",
         "google_maps_grounding_cost_per_query",
         "input_cost_per_audio_token",
+        "input_cost_per_audio_token_above_200k_tokens",
+        "input_cost_per_audio_token_above_200k_tokens_batches",
+        "input_cost_per_audio_token_above_200k_tokens_flex",
+        "input_cost_per_audio_token_above_200k_tokens_priority",
         "input_cost_per_audio_token_batches",
+        "input_cost_per_audio_token_flex",
         "input_cost_per_audio_token_priority",
         "output_cost_per_reasoning_token",
         "search_context_cost_per_query"
@@ -626,19 +671,30 @@
       "_context_tiers": {
         "200000": {
           "cr": 0.25,
-          "cw": 0.25,
           "inp": 2.5,
           "out": 15.0
         }
       },
       "_service_tiers": {
         "batches": {
+          "context_tiers": {
+            "200000": {
+              "inp": 1.25,
+              "out": 7.5
+            }
+          },
           "rates": {
             "inp": 0.625,
             "out": 5.0
           }
         },
         "flex": {
+          "context_tiers": {
+            "200000": {
+              "inp": 1.25,
+              "out": 7.5
+            }
+          },
           "rates": {
             "cr": 0.125,
             "inp": 0.625,
@@ -709,9 +765,15 @@
       },
       "_unsupported_dimensions": [
         "cache_read_input_audio_token_cost",
+        "cache_read_input_audio_token_cost_priority",
         "google_maps_grounding_cost_per_query",
         "input_cost_per_audio_token",
+        "input_cost_per_audio_token_above_200k_tokens",
+        "input_cost_per_audio_token_above_200k_tokens_batches",
+        "input_cost_per_audio_token_above_200k_tokens_flex",
+        "input_cost_per_audio_token_above_200k_tokens_priority",
         "input_cost_per_audio_token_batches",
+        "input_cost_per_audio_token_flex",
         "input_cost_per_audio_token_priority",
         "output_cost_per_reasoning_token",
         "search_context_cost_per_query"
@@ -721,13 +783,6 @@
       "inp": 2.0,
       "out": 12.0,
       "cr": 0.2,
-      "_context_tiers": {
-        "200000": {
-          "cr": 0.4,
-          "inp": 4.0,
-          "out": 18.0
-        }
-      },
       "_service_tiers": {
         "batches": {
           "rates": {
@@ -744,13 +799,6 @@
           }
         },
         "priority": {
-          "context_tiers": {
-            "200000": {
-              "cr": 0.72,
-              "inp": 7.2,
-              "out": 32.4
-            }
-          },
           "rates": {
             "cr": 0.36,
             "inp": 3.6,
@@ -762,6 +810,8 @@
         "input_cost_per_image",
         "output_cost_per_image",
         "output_cost_per_image_token",
+        "output_cost_per_image_token_batches",
+        "output_cost_per_image_token_priority",
         "search_context_cost_per_query"
       ]
     },
@@ -769,13 +819,6 @@
       "inp": 2.0,
       "out": 12.0,
       "cr": 0.2,
-      "_context_tiers": {
-        "200000": {
-          "cr": 0.4,
-          "inp": 4.0,
-          "out": 18.0
-        }
-      },
       "_service_tiers": {
         "batches": {
           "rates": {
@@ -785,13 +828,6 @@
           }
         },
         "priority": {
-          "context_tiers": {
-            "200000": {
-              "cr": 0.72,
-              "inp": 7.2,
-              "out": 32.4
-            }
-          },
           "rates": {
             "cr": 0.36,
             "inp": 3.6,
@@ -803,6 +839,8 @@
         "input_cost_per_image",
         "output_cost_per_image",
         "output_cost_per_image_token",
+        "output_cost_per_image_token_batches",
+        "output_cost_per_image_token_priority",
         "search_context_cost_per_query"
       ]
     },
@@ -837,6 +875,8 @@
         "input_cost_per_image",
         "output_cost_per_image",
         "output_cost_per_image_token",
+        "output_cost_per_image_token_batches",
+        "output_cost_per_image_token_priority",
         "search_context_cost_per_query"
       ]
     },
@@ -857,6 +897,8 @@
         "input_cost_per_image",
         "output_cost_per_image",
         "output_cost_per_image_token",
+        "output_cost_per_image_token_batches",
+        "output_cost_per_image_token_priority",
         "search_context_cost_per_query"
       ]
     },
@@ -889,9 +931,17 @@
       },
       "_unsupported_dimensions": [
         "cache_read_input_audio_token_cost",
+        "cache_read_input_audio_token_cost_batches",
+        "cache_read_input_audio_token_cost_flex",
+        "cache_read_input_audio_token_cost_priority",
         "google_maps_grounding_cost_per_query",
         "input_cost_per_audio_token",
+        "input_cost_per_audio_token_above_200k_tokens",
+        "input_cost_per_audio_token_above_200k_tokens_batches",
+        "input_cost_per_audio_token_above_200k_tokens_flex",
+        "input_cost_per_audio_token_above_200k_tokens_priority",
         "input_cost_per_audio_token_batches",
+        "input_cost_per_audio_token_flex",
         "input_cost_per_audio_token_priority",
         "output_cost_per_reasoning_token",
         "search_context_cost_per_query"
@@ -927,7 +977,9 @@
       "_unsupported_dimensions": [
         "input_cost_per_image",
         "output_cost_per_image",
-        "output_cost_per_image_token"
+        "output_cost_per_image_token",
+        "output_cost_per_image_token_batches",
+        "output_cost_per_image_token_priority"
       ]
     },
     "gemini-3.1-flash-lite-preview": {
@@ -960,19 +1012,30 @@
       "_context_tiers": {
         "200000": {
           "cr": 0.4,
-          "cw": 0.25,
           "inp": 4.0,
           "out": 18.0
         }
       },
       "_service_tiers": {
         "batches": {
+          "context_tiers": {
+            "200000": {
+              "inp": 2.0,
+              "out": 9.0
+            }
+          },
           "rates": {
             "inp": 1.0,
             "out": 6.0
           }
         },
         "flex": {
+          "context_tiers": {
+            "200000": {
+              "inp": 2.0,
+              "out": 9.0
+            }
+          },
           "rates": {
             "inp": 1.0,
             "out": 6.0
@@ -1006,7 +1069,6 @@
       "_context_tiers": {
         "200000": {
           "cr": 0.4,
-          "cw": 0.25,
           "inp": 4.0,
           "out": 18.0
         }
@@ -1316,6 +1378,7 @@
       "_service_tiers": {
         "batches": {
           "rates": {
+            "cr": 0.0375,
             "inp": 0.375,
             "out": 1.875
           }
@@ -1348,6 +1411,7 @@
       "_service_tiers": {
         "batches": {
           "rates": {
+            "cr": 0.015,
             "inp": 0.15,
             "out": 1.25
           }
@@ -1418,6 +1482,8 @@
         "input_cost_per_image",
         "output_cost_per_image",
         "output_cost_per_image_token",
+        "output_cost_per_image_token_batches",
+        "output_cost_per_image_token_priority",
         "search_context_cost_per_query"
       ]
     },
@@ -1443,12 +1509,27 @@
       },
       "_service_tiers": {
         "batches": {
+          "context_tiers": {
+            "200000": {
+              "cr": 0.4,
+              "inp": 2.0,
+              "out": 9.0
+            }
+          },
           "rates": {
+            "cr": 0.2,
             "inp": 1.0,
             "out": 6.0
           }
         },
         "flex": {
+          "context_tiers": {
+            "200000": {
+              "cr": 0.4,
+              "inp": 2.0,
+              "out": 9.0
+            }
+          },
           "rates": {
             "cr": 0.2,
             "inp": 1.0,
@@ -1488,15 +1569,6 @@
       "inp": 1.0,
       "out": 5.0,
       "cr": 0.1,
-      "_service_tiers": {
-        "batches": {
-          "rates": {
-            "cr": 0.05,
-            "inp": 0.5,
-            "out": 2.5
-          }
-        }
-      },
       "_unsupported_dimensions": [
         "input_cost_per_audio_token",
         "output_cost_per_reasoning_token",
@@ -2353,12 +2425,6 @@
       },
       "_service_tiers": {
         "batches": {
-          "context_tiers": {
-            "272000": {
-              "inp": 30.0,
-              "out": 135.0
-            }
-          },
           "rates": {
             "inp": 15.0,
             "out": 90.0
@@ -2808,6 +2874,37 @@
         "search_context_cost_per_query"
       ]
     },
+    "gpt-6-astra-law": {
+      "inp": 10.0,
+      "out": 50.0,
+      "cr": 1.0,
+      "_context_tiers": {
+        "272000": {
+          "cr": 2.0,
+          "inp": 20.0,
+          "out": 75.0
+        }
+      },
+      "_unsupported_dimensions": [
+        "search_context_cost_per_query"
+      ]
+    },
+    "gpt-6-cyber": {
+      "inp": 20.0,
+      "out": 100.0,
+      "cw": 25.0,
+      "cr": 2.0,
+      "_context_tiers": {
+        "272000": {
+          "cr": 4.0,
+          "inp": 40.0,
+          "out": 150.0
+        }
+      },
+      "_unsupported_dimensions": [
+        "cache_creation_input_token_cost_above_12hr"
+      ]
+    },
     "gpt-6-luna": {
       "inp": 0.1,
       "out": 0.5,
@@ -2889,6 +2986,24 @@
         "output_cost_per_token_above_272k_tokens_decisions",
         "output_cost_per_token_decisions",
         "search_context_cost_per_query"
+      ]
+    },
+    "gpt-6-rosalind": {
+      "inp": 10.0,
+      "out": 50.0,
+      "cw": 12.5,
+      "cr": 1.0,
+      "_context_tiers": {
+        "272000": {
+          "cr": 2.0,
+          "cw": 25.0,
+          "inp": 20.0,
+          "out": 75.0
+        }
+      },
+      "_unsupported_dimensions": [
+        "cache_creation_input_token_cost_above_12hr",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens"
       ]
     },
     "gpt-6-sol": {
@@ -3123,6 +3238,159 @@
         "cache_creation_input_token_cost_above_12hr_batches",
         "cache_creation_input_token_cost_above_12hr_flex",
         "cache_creation_input_token_cost_above_12hr_priority",
+        "search_context_cost_per_query"
+      ]
+    },
+    "gpt-6.2-astra": {
+      "inp": 8.0,
+      "out": 40.0,
+      "cw": 10.0,
+      "cr": 0.4,
+      "_context_tiers": {
+        "272000": {
+          "cr": 0.8,
+          "cw": 20.0,
+          "inp": 16.0,
+          "out": 60.0
+        }
+      },
+      "_service_tiers": {
+        "batches": {
+          "context_tiers": {
+            "272000": {
+              "cr": 0.4,
+              "cw": 10.0,
+              "inp": 8.0,
+              "out": 30.0
+            }
+          },
+          "rates": {
+            "cr": 0.2,
+            "cw": 5.0,
+            "inp": 4.0,
+            "out": 20.0
+          }
+        },
+        "priority": {
+          "context_tiers": {
+            "272000": {
+              "cr": 1.6,
+              "cw": 40.0,
+              "inp": 32.0,
+              "out": 120.0
+            }
+          },
+          "rates": {
+            "cr": 0.8,
+            "cw": 20.0,
+            "inp": 16.0,
+            "out": 80.0
+          }
+        }
+      },
+      "_unsupported_dimensions": [
+        "cache_creation_input_token_cost_above_12hr",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_batches",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_priority",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_ultrafast",
+        "cache_creation_input_token_cost_above_12hr_batches",
+        "cache_creation_input_token_cost_above_12hr_priority",
+        "cache_creation_input_token_cost_above_12hr_ultrafast",
+        "cache_creation_input_token_cost_above_272k_tokens_ultrafast",
+        "cache_creation_input_token_cost_ultrafast",
+        "cache_read_input_token_cost_above_272k_tokens_ultrafast",
+        "cache_read_input_token_cost_ultrafast",
+        "input_cost_per_token_above_272k_tokens_ultrafast",
+        "input_cost_per_token_ultrafast",
+        "output_cost_per_token_above_272k_tokens_ultrafast",
+        "output_cost_per_token_ultrafast",
+        "search_context_cost_per_query"
+      ]
+    },
+    "gpt-6.2-astra-law": {
+      "inp": 8.0,
+      "out": 40.0,
+      "cw": 10.0,
+      "cr": 0.4,
+      "_context_tiers": {
+        "272000": {
+          "cr": 0.8,
+          "cw": 20.0,
+          "inp": 16.0,
+          "out": 60.0
+        }
+      },
+      "_unsupported_dimensions": [
+        "cache_creation_input_token_cost_above_12hr",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens",
+        "search_context_cost_per_query"
+      ]
+    },
+    "gpt-6.2-sol": {
+      "inp": 2.0,
+      "out": 10.0,
+      "cw": 2.5,
+      "cr": 0.1,
+      "_context_tiers": {
+        "272000": {
+          "cr": 0.2,
+          "cw": 5.0,
+          "inp": 4.0,
+          "out": 15.0
+        }
+      },
+      "_service_tiers": {
+        "batches": {
+          "context_tiers": {
+            "272000": {
+              "cr": 0.1,
+              "cw": 2.5,
+              "inp": 2.0,
+              "out": 7.5
+            }
+          },
+          "rates": {
+            "cr": 0.05,
+            "cw": 1.25,
+            "inp": 1.0,
+            "out": 5.0
+          }
+        },
+        "priority": {
+          "context_tiers": {
+            "272000": {
+              "cr": 0.4,
+              "cw": 10.0,
+              "inp": 8.0,
+              "out": 30.0
+            }
+          },
+          "rates": {
+            "cr": 0.2,
+            "cw": 5.0,
+            "inp": 4.0,
+            "out": 20.0
+          }
+        }
+      },
+      "_unsupported_dimensions": [
+        "cache_creation_input_token_cost_above_12hr",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_batches",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_priority",
+        "cache_creation_input_token_cost_above_12hr_above_272k_tokens_ultrafast",
+        "cache_creation_input_token_cost_above_12hr_batches",
+        "cache_creation_input_token_cost_above_12hr_priority",
+        "cache_creation_input_token_cost_above_12hr_ultrafast",
+        "cache_creation_input_token_cost_above_272k_tokens_ultrafast",
+        "cache_creation_input_token_cost_ultrafast",
+        "cache_read_input_token_cost_above_272k_tokens_ultrafast",
+        "cache_read_input_token_cost_ultrafast",
+        "input_cost_per_token_above_272k_tokens_ultrafast",
+        "input_cost_per_token_ultrafast",
+        "output_cost_per_token_above_272k_tokens_ultrafast",
+        "output_cost_per_token_ultrafast",
         "search_context_cost_per_query"
       ]
     },
@@ -3898,6 +4166,22 @@
           "cr": 1.0,
           "inp": 4.0,
           "out": 12.0
+        }
+      },
+      "_service_tiers": {
+        "batches": {
+          "context_tiers": {
+            "200000": {
+              "cr": 0.8,
+              "inp": 3.2,
+              "out": 9.6
+            }
+          },
+          "rates": {
+            "cr": 0.4,
+            "inp": 1.6,
+            "out": 4.8
+          }
         }
       },
       "_unsupported_dimensions": [
